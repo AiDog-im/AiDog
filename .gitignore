@@ -50,3 +50,9 @@ aidog-public/
 _public_meta/
 # product-repo preservation bundle (git backup artifact), moved in with the rest
 aidog-preserve-full.bundle
+# Internal research vault (owner rule: third-party names live ONLY under
+# docs/research/*) — machine-local citation store, never committed: it keeps
+# the development history clean for the pre-release leak scan, and the
+# publish gate's deny entry (publish_manifest.json + required_deny) remains
+# the second wall if a file is ever force-added.
+docs/research/
