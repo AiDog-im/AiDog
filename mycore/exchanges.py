@@ -1,10 +1,10 @@
 """mycore.exchanges — Web3 phase 2, W1 car: READ-ONLY exchange & chain data.
 
-Three hard contracts (owner decrees, 2026-10-24) that this file enforces in
+Three hard contracts (product decisions, 2026-10-24) that this file enforces in
 code rather than in configuration:
 
 1. READ-ONLY UNTIL A HUMAN SAYS OTHERWISE (W1 -> W2). W1: every request
-   here fetched data. W2 (owner decree 2026-10-25) adds ORDER PLACEMENT and
+   here fetched data. W2 (product decision 2026-10-25) adds ORDER PLACEMENT and
    nothing else, behind a prepare/execute split drawn in CODE:
    ``prepare_order`` builds a dry-run plan (book, VWAP, fees, thresholds)
    and ``execute_order`` takes the plan id and NOTHING ELSE — every order
@@ -116,7 +116,7 @@ VENUES: dict[str, Venue] = {v.key: v for v in (
           "BTC", "GMX pairs feed (keyless, no account involved)"),
     Venue("rpc", "Public RPC", "chain", "public", (),
           "base", "JSON-RPC chain head (base | ethereum | solana)"),
-    # Third CEX (owner decree 2026-10-25): Binance has NO official MCP/agent
+    # Third CEX (product decision 2026-10-25): Binance has NO official MCP/agent
     # API (GitHub org search: 0 repos, verified 2026-10-24) — only the
     # official Skills Hub + REST. This is our OWN thin adapter over the
     # documented REST surface; no third-party server ever sees the key.
@@ -903,7 +903,7 @@ def quote(venue: str, symbol: str | None = None, *, timeout: float = 10.0) -> st
 
 # ============================================================ W2: orders ==
 #
-# W2 (owner decree 2026-10-25) adds ORDER PLACEMENT behind a hard approval
+# W2 (product decision 2026-10-25) adds ORDER PLACEMENT behind a hard approval
 # gate that lives in CODE, not in configuration:
 #
 #  * prepare / execute are separate functions. ``execute_order`` takes a

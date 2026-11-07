@@ -1134,7 +1134,7 @@
             </select>
           </div>
           <div class="stat-note" data-i18n="exnav.hint">auto shows the nav item once an exchange API key is configured; stored in this browser</div>
-          <!-- Car A2 (port standard, owner decree 2026-11-01): the console
+          <!-- Car A2 (port standard, product decision 2026-11-01): the console
                port is visible and editable here (default 19167; recommend
                keeping it). GET /api/console reports the RUNNING port and its
                source truthfully; the write pins web/port.local behind the
@@ -1756,6 +1756,34 @@
           </div>
         </div>
 
+        <!-- car K (recovery center): the owner's web recovery surface —
+             diagnose + act on the system-level failures that used to need a
+             terminal (audit: docs/design/system_recovery_web_audit.md).
+             Red lines: every action is Bearer-gated + logged to the event
+             stream; nothing destructive is automated (the dirty tree is
+             diagnosis only); an unknown state offers diagnosis, never a
+             guessed action. -->
+        <div class="card" data-setgroup="services" id="recoveryCard">
+          <h2 data-i18n="rec.sec">Recovery</h2>
+          <div class="stat-note" data-i18n="rec.hint">system-level health and one-click recovery — every action is logged and applies exactly what it says</div>
+          <div id="recList"></div>
+          <div class="ctl-actions">
+            <button class="btn" id="recWdRestart" type="button"
+                    data-i18n="rec.wdRestart">RESTART WATCHDOG</button>
+            <button class="btn" id="recWdRetry" type="button" hidden
+                    data-i18n="rec.wdRetry">RETRY CIRCUIT</button>
+            <button class="btn" id="recConsoleRestart" type="button"
+                    data-i18n="rec.consoleRestart">RESTART CONSOLE</button>
+            <button class="btn" id="recCleanLogs" type="button"
+                    data-i18n="rec.cleanLogs">CLEAN OLD LOGS</button>
+            <button class="btn" id="recLeftovers" type="button"
+                    data-i18n="rec.cleanLeftovers">CLEAN LEFTOVERS</button>
+            <button class="btn" id="recProxyToggle" type="button"
+                    data-i18n="rec.proxyDirect">DIRECT MODE</button>
+            <span class="save-state" id="recMsg" role="status"></span>
+          </div>
+        </div>
+
         <div class="card" data-setgroup="creds">
           <h2 data-i18n="sec.creds">Credentials</h2>
           <div class="stat-note" id="credTokenHint" hidden></div>
@@ -2007,6 +2035,10 @@
         <div class="card" data-setgroup="always" id="accessCard">
           <h2 data-i18n="set.group.access">Access</h2>
           <div class="stat-note" data-i18n="onb.accessHint">The access token is WEB_TOKEN — the unlock password for this console, written into secrets.env when you installed. Lost it? Run `grep WEB_TOKEN secrets.env` in your install folder to see it, then paste it once below and this browser remembers it; after that saving settings, approvals and service restarts all work. It cannot be changed from this page: to rotate it, edit WEB_TOKEN in secrets.env, then paste the new value here.</div>
+          <!-- Novice recovery (owner ask 2026-11-01): the install folder is
+               PAINTED here from the loopback /api/console facts — a lost-token
+               user sees exactly where to run the grep above. -->
+          <div class="stat-note" id="accessInstall" hidden></div>
           <div class="ctl-row token-row">
             <label data-i18n="ctl.token" title="WEB_TOKEN">Access token</label>
             <input type="password" id="tokenInput" autocomplete="off"

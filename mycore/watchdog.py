@@ -207,6 +207,12 @@ class Watchdog:
                  missions_path: str | Path | None = None) -> None:
         self.cfg = cfg
         self.state_path = Path(state_path)
+        # Car K (recovery center): the console's command channel. The state
+        # file is the watchdog's OUTPUT, so owner commands arrive in a
+        # separate small file next to it, polled at the start of every cycle
+        # and consumed once (deleted after reading). <state>.cmd.json.
+        self.cmd_path = self.state_path.parent / (
+            self.state_path.stem + ".cmd.json")
         self.tg = tg
         self._log = log or (lambda line: print(line, flush=True))
         self._probe = probe
@@ -478,12 +484,59 @@ class Watchdog:
             self.notify(f"🟢 [HEARTBEAT] mycore watchdog · {day} {hhmm} · {summary}")
             self._save_state()
 
+    def _apply_commands(self) -> None:
+        """Car K (recovery center): consume the console's command file.
+
+        Today ONE command exists — {"action": "retry", "target": <name>}:
+        it reopens the escalation circuit for that target (level back to 1,
+        throttle cleared) so the normal down path attempts a restart again;
+        the honest no-op cases (healthy target, unknown name, garbage file)
+        are logged and never raise. Anything unrecognized is dropped with a
+        log line — the file is always consumed, so garbage cannot wedge the
+        loop into a retry storm."""
+        try:
+            raw = self.cmd_path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return
+        except OSError:
+            self._log("[wd] command file unreadable — ignored")
+            return
+        try:
+            self.cmd_path.unlink()
+        except OSError:
+            pass                      # a stale file may linger; never fatal
+        try:
+            doc = json.loads(raw)
+        except ValueError:
+            self._log("[wd] command file is not JSON — dropped")
+            return
+        if not isinstance(doc, dict) or doc.get("action") != "retry":
+            self._log(f"[wd] unknown command dropped: "
+                      f"{str(doc.get('action'))[:32] if isinstance(doc, dict) else 'garbage'}")
+            return
+        name = str(doc.get("target") or "")
+        st = self.states.get(name)
+        if st is None:
+            self._log(f"[wd] retry for unknown target '{name[:32]}' — ignored")
+            return
+        if st.esc_level < 1 and st.state != "down":
+            self._log(f"[wd] retry requested but {name} is healthy — nothing to do")
+            return
+        st.esc_level = 1              # circuit reopened: restarts allowed
+        st.esc_since = 0.0
+        st.last_restart = 0.0         # throttle cleared — attempt this cycle
+        st.last_alert = 0.0
+        self._log(f"[wd] {name}: owner retry (console) — circuit reopened")
+        self._escalate(1, name, st.restart_attempts, "owner retry (console)",
+                       f"🔁 mycore wd · {name}: owner retry — restarting again")
+
     def loop(self, max_cycles: int | None = None) -> None:
         mode = "DRY-RUN (shadow)" if self.cfg.dry_run else "LIVE"
         self._log(f"[wd] starting: {len(self.cfg.targets)} target(s), "
                   f"interval={self.cfg.interval_sec}s, mode={mode}")
         cycles = 0
         while True:
+            self._apply_commands()     # car K: owner commands land first
             self.check_once()
             cycles += 1
             if max_cycles is not None and cycles >= max_cycles:

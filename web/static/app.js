@@ -2651,7 +2651,7 @@ async function evoPost(url, payload) {
       headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
       body: JSON.stringify(payload) });
     const body = await res.json().catch(() => ({}));
-    if (res.status === 401) { evoMsg("err", t("save.badToken", "401 · unauthorized")); return null; }
+    if (res.status === 401) { evoMsg("err", badTokenText()); return null; }
     if (!res.ok) {
       const details = (body.details || [body.error || "error"]).map(d => t("rule." + d, d));
       evoMsg("err", details.join("; ").slice(0, 90));
@@ -3214,7 +3214,7 @@ async function updateApply() {
     let body = {};
     try { body = await res.json(); } catch (e) { body = {}; }
     if (res.status === 401) {
-      updToast(t("save.badToken", "401 · unauthorized"), true);
+      updToast(badTokenText(), true);
       done(); return;
     }
     if (!res.ok) {
@@ -3444,7 +3444,7 @@ async function saveSettings() {
     });
     if (res.status === 401) {
       state.className = "save-state err";
-      state.textContent = t("save.badToken", "401 · unauthorized");
+      state.textContent = badTokenText();
       return;
     }
     const body = await res.json();
@@ -5064,7 +5064,7 @@ async function decideAgentPlan(id, action) {
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) {
       if (msg) { msg.className = "save-state err";
-        msg.textContent = t("save.badToken", "401 · unauthorized"); }
+        msg.textContent = badTokenText(); }
       return;
     }
     if (!res.ok) {
@@ -5089,6 +5089,144 @@ async function decideAgentPlan(id, action) {
       loadSettings().then(() => initSettingsPanels());
     }
     refreshAgentPlans();
+  } catch (e) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = String(e).slice(0, 80); }
+  }
+}
+
+/* car K (recovery center): the owner's web recovery surface. Data comes
+   from GET /api/recovery (diagnose-only facts); every action posts through
+   the Bearer gate, lands in the event stream, and says exactly what it
+   applied. Fail-soft: an unreachable server keeps the last paint. */
+let recData = null;
+
+function fmtBytes(n) {
+  n = Number(n) || 0;
+  return n >= 1048576 ? (n / 1048576).toFixed(1) + " MB"
+    : n >= 1024 ? Math.round(n / 1024) + " KB" : n + " B";
+}
+
+function recRow(label, value, bad) {
+  return `<div class="ctl-row" style="margin-bottom:4px;">` +
+    `<label>${escapeHtml(label)}</label>` +
+    `<span class="stat-note" style="margin:0;${bad ?
+      "color:var(--red);" : ""}">${escapeHtml(value)}</span></div>`;
+}
+
+function renderRecovery() {
+  const list = document.getElementById("recList");
+  if (!list) return;
+  const d = recData;
+  if (!d || typeof d !== "object") { list.innerHTML = ""; return; }
+  const wd = (d.watchdog && typeof d.watchdog === "object") ? d.watchdog : {};
+  const esc = (wd.escalation && typeof wd.escalation === "object")
+    ? wd.escalation : {};
+  const okWord = t("rec.ok", "OK");
+  const rows = [];
+  rows.push(recRow(t("rec.wd", "Watchdog"),
+    wd.process ? (wd.state === "up" ? okWord
+                 : String(wd.state || "unknown"))
+               : t("rec.down", "NOT RUNNING"),
+    wd.process !== true || wd.state === "down"));
+  if (Number(esc.level) > 0) {
+    rows.push(recRow(t("rec.escalation", "Escalation"),
+      t("rec.escLevel", "L{v} \u00b7 {t}")
+        .replace("{v}", String(esc.level))
+        .replace("{t}", String(esc.target || "?")), true));
+  }
+  rows.push(recRow(t("rec.settings", "Settings file"),
+    d.settings_unreadable
+      ? t("rec.unreadable", "UNREADABLE \u2014 running on defaults")
+      : okWord, !!d.settings_unreadable));
+  if (Number(d.console_restarts) > 0) {
+    rows.push(recRow(t("rec.restarts", "Console restarts (watchdog)"),
+      String(d.console_restarts)));
+  }
+  rows.push(recRow(t("rec.clock", "Clock"),
+    d.clock_skew_sec
+      ? t("rec.skew", "SKEW \u2014 timestamps {v}s in the future")
+          .replace("{v}", String(d.clock_skew_sec))
+      : okWord, !!d.clock_skew_sec));
+  const leftovers = Array.isArray(d.leftovers) ? d.leftovers : [];
+  rows.push(recRow(t("rec.leftovers", "Retired sessions"),
+    leftovers.length ? leftovers.join(", ") : t("rec.none", "none")));
+  const logs = (d.old_logs && typeof d.old_logs === "object") ? d.old_logs : {};
+  rows.push(recRow(t("rec.logs", "Old logs"),
+    t("rec.logsCount", "{n} file(s) \u00b7 {b}")
+      .replace("{n}", String(logs.count || 0))
+      .replace("{b}", fmtBytes(logs.bytes || 0))));
+  const mode = ((d.proxy || {}).mode) || "default";
+  rows.push(recRow(t("rec.proxy", "Proxy"),
+    { default: t("rec.proxyRowDefault", "default (env chain)"),
+      direct: t("rec.proxyRowDirect", "DIRECT (proxy.local empty)"),
+      custom: t("rec.proxyRowCustom", "custom (proxy.local pinned)"),
+      unknown: "?" }[mode] || "?"));
+  const dirty = Array.isArray(d.git_dirty) ? d.git_dirty : [];
+  rows.push(recRow(t("rec.git", "Worktree"),
+    dirty.length
+      ? t("rec.dirty", "{n} uncommitted file(s) \u2014 aidog update will "
+          + "refuse; the choice is yours (never auto-cleaned)")
+          .replace("{n}", String(dirty.length))
+      : t("rec.clean", "clean"), dirty.length > 0));
+  list.innerHTML = rows.join("");
+  // the retry button appears ONLY when the circuit is actually open
+  const retry = document.getElementById("recWdRetry");
+  if (retry) retry.hidden = !(Number(esc.level) >= 2);
+  // the proxy toggle label FLIPS with the current mode (honest action name)
+  const px = document.getElementById("recProxyToggle");
+  if (px) {
+    px.dataset.i18n = mode === "direct" ? "rec.proxyDefaultBtn"
+                                        : "rec.proxyDirect";
+    px.textContent = t(px.dataset.i18n,
+      mode === "direct" ? "USE DEFAULT PROXY" : "DIRECT MODE");
+  }
+}
+
+async function refreshRecovery() {
+  try {
+    recData = await fetch("/api/recovery").then(r => r.json());
+  } catch (e) { /* keep the last paint */ }
+  renderRecovery();
+}
+
+async function recAction(path, body, confirmKey, confirmFallback) {
+  if (confirmKey && !window.confirm(t(confirmKey, confirmFallback))) return;
+  const msg = document.getElementById("recMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = badTokenText(); }
+    return;
+  }
+  if (msg) { msg.className = "save-state"; msg.textContent = "\u2026"; }
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(body || {}) });
+    const doc = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = badTokenText(); }
+      return;
+    }
+    if (!res.ok) {
+      const det = ((doc && (doc.details || [doc.error])) || ["error"])
+        .join("; ");
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = det.slice(0, 160); }
+      refreshRecovery();
+      return;
+    }
+    if (msg) {
+      msg.className = "save-state";
+      msg.textContent = "\u2713 " + (doc.note || t("rec.done", "done"))
+        + (doc.restart_required
+           ? " \u00b7 " + t("rec.restartRequired", "restart required") : "");
+    }
+    refreshRecovery();
   } catch (e) {
     if (msg) { msg.className = "save-state err";
       msg.textContent = String(e).slice(0, 80); }
@@ -5188,7 +5326,7 @@ async function postControl(action) {
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
-      say("err", res.status === 401 ? t("save.badToken", "401 · unauthorized")
+      say("err", res.status === 401 ? badTokenText()
         : ((body.details || [body.error || "error"])[0] + ""));
       return;
     }
@@ -5517,8 +5655,10 @@ function settingsRelang() {
   renderAgentBackup();         // car 8: agent-backup rows follow the pack too
   renderFileFace();            // round C: file face text follows the pack
   renderModelChips();          // D1: chip remove labels follow the pack
+  paintInstallFolder();      // novice recovery: the install-folder line follows the pack
   paintLedgerStatus();        // D2: ledger card dynamic rows follow the pack too
   renderAgentPlans();         // car C: plan rows follow the pack too
+  renderRecovery();           // car K: recovery rows follow the pack too
   paintPresetMsg();           // car B: preset status line follows the pack
   discPaintMsg();              // D1: discovery status line repaints
   discPaintAdd();              // D1: ADD label repaints with the selection
@@ -5621,7 +5761,7 @@ async function evoSave() {
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) {
       state.className = "save-state err";
-      state.textContent = t("save.badToken", "401 · unauthorized");
+      state.textContent = badTokenText();
       return;
     }
     if (!res.ok) {
@@ -5685,7 +5825,7 @@ async function exCapSave() {
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) {
       state.className = "save-state err";
-      state.textContent = t("save.badToken", "401 · unauthorized");
+      state.textContent = badTokenText();
       return;
     }
     if (!res.ok) {
@@ -6435,7 +6575,7 @@ async function svcRestartWith(btn, msg) {
     try { body = await res.json(); } catch (e) { body = {}; }
     if (res.status === 401) {
       msg.className = "save-state err";
-      msg.textContent = t("save.badToken", "401 · unauthorized");
+      msg.textContent = badTokenText();
       btn.disabled = false;
       return;
     }
@@ -6520,7 +6660,7 @@ async function doctorRun() {
     try { body = await res.json(); } catch (e) { body = {}; }
     if (res.status === 401) {
       msg.className = "save-state err";
-      msg.textContent = t("save.badToken", "401 · unauthorized");
+      msg.textContent = badTokenText();
       return;
     }
     if (!res.ok) {
@@ -7135,7 +7275,7 @@ async function missionAction(action) {
     try { body = await res.json(); } catch (e) { body = {}; }
     if (res.status === 401) {
       if (msg) { msg.className = "save-state err";
-        msg.textContent = t("save.badToken", "401 · unauthorized"); }
+        msg.textContent = badTokenText(); }
       return;
     }
     if (!res.ok) {
@@ -7184,7 +7324,7 @@ async function missionTierWrite(value) {
     try { body = await res.json(); } catch (e) { body = {}; }
     if (res.status === 401) {
       if (msg) { msg.className = "save-state err";
-        msg.textContent = t("save.badToken", "401 · unauthorized"); }
+        msg.textContent = badTokenText(); }
     } else if (!res.ok) {
       const details = Array.isArray(body.details) ? body.details : [];
       if (msg) { msg.className = "save-state err";
@@ -7238,7 +7378,7 @@ async function missionCfgWrite() {
     try { body = await res.json(); } catch (e) { body = {}; }
     if (res.status === 401) {
       if (msg) { msg.className = "save-state err";
-        msg.textContent = t("save.badToken", "401 · unauthorized"); }
+        msg.textContent = badTokenText(); }
       return;
     }
     if (!res.ok) {
@@ -8608,7 +8748,7 @@ async function sniffPost(payload) {
       body: JSON.stringify(payload) });
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) {
-      sniffNote("err", t("save.badToken", "401 · unauthorized")); return null;
+      sniffNote("err", badTokenText()); return null;
     }
     if (!res.ok) {
       const details = (body.details || [body.error || "error"])
@@ -8645,7 +8785,7 @@ async function sniffCfgWrite(mutate, okText) {
       body: JSON.stringify({ mycore: { sniff: block } }) });
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) {
-      sniffNote("err", t("save.badToken", "401 · unauthorized")); return false;
+      sniffNote("err", badTokenText()); return false;
     }
     if (!res.ok) {
       const details = (body.details || [body.error || "error"])
@@ -8907,7 +9047,10 @@ function setView(name, fromUser) {
   if (name === "community" && (fromUser || !commData)) refreshCommunity(false);
   // car C: the agent-proposal queue loads when Settings opens — the same
   // lazy rule as the approval queue above
-  if (name === "settings" && (fromUser || !agentPlanData)) refreshAgentPlans();
+  if (name === "settings") {
+    if (fromUser || !agentPlanData) refreshAgentPlans();
+    if (fromUser || !recData) refreshRecovery();   // car K: recovery facts
+  }
   // SNIFF car: the SENSE board lazy-loads on the same rule — first open, then
   // only on a user nav click (the sweep state changes server-side anyway).
   if (name === "sniff" && (fromUser || !sniffData)) refreshSniff();
@@ -8966,12 +9109,33 @@ if (voiceVolEl) voiceVolEl.addEventListener("input", e => {
    restart_required so the note can tell the operator the truth (the console
    never re-binds mid-response). An env override (source=env) disables the
    editor because the server refuses that write with 409. */
+/* Novice recovery (owner ask 2026-11-01): the install folder rides the
+   loopback /api/console facts — every 401 hint names WHERE to run the
+   grep, and the Access card always shows the folder. Fail-soft: a missing
+   fact keeps the old generic text and hides the line. */
+let consoleRepo = "";
+
+function badTokenText() {
+  return t("save.badToken", "401 · unauthorized")
+    + (consoleRepo ? "  ·  " + consoleRepo : "");
+}
+
+function paintInstallFolder() {
+  const el = document.getElementById("accessInstall");
+  if (!el) return;
+  if (!consoleRepo) { el.hidden = true; return; }
+  el.hidden = false;
+  el.textContent = t("ctl.installFolder", "Install folder") + ": " + consoleRepo;
+}
+
 async function loadPortStatus() {
   const input = document.getElementById("portInput");
   const state = document.getElementById("portState");
   if (!input || !state) return;
   try {
     const doc = await fetch("/api/console").then(r => r.json());
+    consoleRepo = String(doc.repo || "");
+    paintInstallFolder();
     input.value = String(doc.port || "");
     const src = { env: t("port.srcEnv", "env override"),
                   file: t("port.srcFile", "pinned"),
@@ -9010,7 +9174,7 @@ async function savePort() {
       body: JSON.stringify({ port }) });
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) { state.className = "save-state err";
-      state.textContent = t("save.badToken", "401 · unauthorized"); return; }
+      state.textContent = badTokenText(); return; }
     if (!res.ok) { state.className = "save-state err";
       state.textContent = (body.details || [body.error || "error"]).join("; ").slice(0, 120); return; }
     state.className = "save-state";
@@ -9127,6 +9291,42 @@ if (agentPlanListEl) agentPlanListEl.addEventListener("click", e => {
 const agentPlanRefreshEl = document.getElementById("agentPlanRefresh");
 if (agentPlanRefreshEl) agentPlanRefreshEl.addEventListener("click",
   () => refreshAgentPlans());
+/* car K: the recovery card's actions — each confirms, then posts */
+const recWdRestartEl = document.getElementById("recWdRestart");
+if (recWdRestartEl) recWdRestartEl.addEventListener("click", () =>
+  recAction("/api/service/restart", { target: "watchdog" },
+    "rec.confirmWatchdog",
+    "Recycle the watchdog session now? It restarts with the current config."));
+const recWdRetryEl = document.getElementById("recWdRetry");
+if (recWdRetryEl) recWdRetryEl.addEventListener("click", () =>
+  recAction("/api/recovery/watchdog/retry",
+    { target: (recData && recData.watchdog && recData.watchdog.escalation
+               && recData.watchdog.escalation.target) || "console" },
+    "rec.confirmRetry",
+    "Queue a retry for the open circuit? The watchdog applies it within one cycle (60s)."));
+const recConsoleRestartEl = document.getElementById("recConsoleRestart");
+if (recConsoleRestartEl) recConsoleRestartEl.addEventListener("click", () =>
+  recAction("/api/service/restart", { target: "console" },
+    "rec.confirmConsole",
+    "Restart the console now? This page will drop for a moment and come back."));
+const recCleanLogsEl = document.getElementById("recCleanLogs");
+if (recCleanLogsEl) recCleanLogsEl.addEventListener("click", () =>
+  recAction("/api/recovery/cleanup", { kind: "logs" },
+    "rec.confirmLogs",
+    "Delete log files older than 7 days? Only this product's own logs are touched."));
+const recLeftoversEl = document.getElementById("recLeftovers");
+if (recLeftoversEl) recLeftoversEl.addEventListener("click", () =>
+  recAction("/api/recovery/leftovers", {},
+    "rec.confirmLeftovers",
+    "Remove the retired sessions (aidog_gw / aidog_wd)?"));
+const recProxyToggleEl = document.getElementById("recProxyToggle");
+if (recProxyToggleEl) recProxyToggleEl.addEventListener("click", () => {
+  const direct = !!(recData && recData.proxy && recData.proxy.mode === "direct");
+  recAction("/api/recovery/proxy", { mode: direct ? "default" : "direct" },
+    direct ? "rec.confirmProxyDefault" : "rec.confirmProxyDirect",
+    direct ? "Restore the default proxy chain? Applies after the next service restart."
+           : "Switch to DIRECT MODE (no proxy)? Applies after the next service restart.");
+});
 const svcRestartBtnEl = document.getElementById("svcRestartBtn");
 if (svcRestartBtnEl) svcRestartBtnEl.addEventListener("click", svcRestart);
 const tgRestartBtnEl = document.getElementById("tgRestartBtn");
@@ -9661,7 +9861,7 @@ async function bkCreate() {
       const res = await fetch("/api/backup/export?include=" + encodeURIComponent(include),
         { headers: { Authorization: "Bearer " + token } });
       const body = await res.json().catch(() => ({}));
-      if (res.status === 401) return bkSet(msg, t("save.badToken", "401 · unauthorized"), "err");
+      if (res.status === 401) return bkSet(msg, badTokenText(), "err");
       if (!res.ok) return bkSet(msg, bkErrText(res.status, body), "err");
       env = body;
     } catch (e) {
@@ -9732,7 +9932,7 @@ async function bkApply(doc, scope, token, msg, preview) {
     return bkSet(msg, t("comm.netFail", "network error — the console is not answering"), "err");
   }
   bkPending = null;
-  if (res.status === 401) return bkSet(msg, t("save.badToken", "401 · unauthorized"), "err");
+  if (res.status === 401) return bkSet(msg, badTokenText(), "err");
   if (res.status === 400) return bkSet(msg, bkErrText(400, out), "err");
   const bits = [];
   if (out.secrets) bits.push(`${(out.secrets.names || []).length} ` +

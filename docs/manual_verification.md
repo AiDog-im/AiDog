@@ -1,4 +1,4 @@
-# Manual Verification Guide (owner spot-check)
+# Manual Verification Guide
 
 > Purpose: a human-readable acceptance pass that complements the automated
 > E2E suites. Run it after a fresh install or when you want to confirm the
@@ -159,7 +159,7 @@ Win/macOS builds are honestly **not built yet**.
 1. **Zero secret echo** — a raw token/key in any output, log, status, or
    error is a defect.
 2. **Zero paid touchpoints** — any paywall, tier, or usage fee is a defect
-   (owner decree).
+   (a permanent product commitment).
 3. **Fail-closed defaults** — allowlists, profile names, settings validation
    must reject rather than guess.
 4. **Honest degradation** — missing credentials report *pending by name*,

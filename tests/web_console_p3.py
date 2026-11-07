@@ -14,6 +14,7 @@ import json
 import os
 import re
 import sys
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -604,7 +605,11 @@ def main() -> int:
           and isinstance(con.get("port"), int) and 1024 <= con["port"] <= 65535
           and con.get("source") in ("env", "file", "default")
           and isinstance(con.get("restart_required"), bool)
-          and con.get("url", "").startswith("http://127.0.0.1:"),
+          and con.get("url", "").startswith("http://127.0.0.1:")
+          # novice recovery (owner ask 2026-11-01): the install folder rides
+          # the loopback facts so a lost-token user knows WHERE to grep
+          and isinstance(con.get("repo"), str)
+          and con["repo"].startswith("/"),
           f"got {s} {con}")
     check("GET /api/console never leaks a credential",
           isinstance(con, dict)
@@ -943,6 +948,76 @@ def main() -> int:
               s == 200 and isinstance(body, dict)
               and body.get("settings", {}).get("mycore", {}).get("subagent")
               == {"max_parallel": 3, "max_iters": 12}, f"got {s}")
+        # ---- car K (recovery center): the read face + the safe actions ----
+        s, rec = get("/api/recovery")
+        check("GET /api/recovery shape (diagnosis facts, no secrets)",
+              s == 200 and isinstance(rec, dict)
+              and isinstance(rec.get("settings_unreadable"), bool)
+              and isinstance(rec.get("console_restarts"), int)
+              and isinstance(rec.get("leftovers"), list)
+              and isinstance(rec.get("old_logs"), dict)
+              and rec.get("proxy", {}).get("mode")
+              in ("default", "direct", "custom")
+              and isinstance(rec.get("git_dirty"), list)
+              and "Bearer" not in json.dumps(rec),
+              f"got {s} {str(rec)[:200]}")
+        s, body = post("/api/recovery/watchdog/retry", {"target": "bogus"},
+                       token)
+        check("watchdog retry bad target -> 400", s == 400, f"got {s}")
+        s, body = post("/api/recovery/watchdog/retry", {"target": "console"},
+                       None)
+        check("watchdog retry no token -> 401", s == 401, f"got {s}")
+        s, body = post("/api/recovery/watchdog/retry", {"target": "console"},
+                       token)
+        check("watchdog retry answers honestly (409 healthy | 200 queued)",
+              s in (200, 409) and isinstance(body, dict),
+              f"got {s} {str(body)[:120]}")
+        s, body = post("/api/recovery/cleanup", {"kind": "bogus"}, token)
+        check("cleanup bad kind -> 400", s == 400, f"got {s}")
+        s, body = post("/api/recovery/cleanup", {"kind": "logs"}, token)
+        check("cleanup old logs -> 200 with counts",
+              s == 200 and isinstance(body.get("files"), int)
+              and isinstance(body.get("bytes"), int), f"got {s} {body}")
+        s, body = post("/api/recovery/leftovers", {}, token)
+        check("leftovers cleanup -> 200 with the killed list",
+              s == 200 and isinstance(body.get("killed"), list),
+              f"got {s} {body}")
+        s, body = post("/api/recovery/proxy", {"mode": "bogus"}, token)
+        check("proxy mode bogus -> 400", s == 400, f"got {s}")
+        s, body = post("/api/recovery/proxy", {"mode": "direct"}, token)
+        check("proxy direct-mode written + honest restart_required",
+              s == 200 and body.get("mode") == "direct"
+              and body.get("restart_required") is True, f"got {s} {body}")
+        s, rec2 = get("/api/recovery")
+        check("recovery facts report the direct-mode switch",
+              s == 200 and rec2.get("proxy", {}).get("mode") == "direct",
+              str(rec2.get("proxy")))
+        s, body = post("/api/recovery/proxy", {"mode": "default"}, token)
+        check("proxy default restores the env chain",
+              s == 200 and body.get("mode") == "default", f"got {s} {body}")
+        s, rec3 = get("/api/recovery")
+        check("recovery facts report the default mode again",
+              s == 200 and rec3.get("proxy", {}).get("mode") == "default",
+              str(rec3.get("proxy")))
+        # the REAL watchdog recycle — this machine is the feature's home.
+        # Detached + answered; the facts must show a live process again.
+        # (The console restart is deliberately NOT run here — it kills THIS
+        # console; the isolated E2E suite owns that leg.)
+        s, body = post("/api/service/restart", {"target": "watchdog"}, token)
+        check("watchdog recycle issued -> 200",
+              s == 200 and body.get("issued") is True,
+              f"got {s} {str(body)[:120]}")
+        _rec = {}
+        _up = False
+        for _ in range(30):                 # bring-up: kill + boot ~8s
+            time.sleep(1)
+            s, _rec = get("/api/recovery")
+            if s == 200 and isinstance(_rec, dict) \
+                    and _rec.get("watchdog", {}).get("process") is True:
+                _up = True
+                break
+        check("watchdog process is live again after the recycle", _up,
+              str((_rec or {}).get("watchdog"))[:160])
         # self-metered usage panel (works with zero rows — honest zeros)
         s, mine = get("/api/usage/self")
         check("GET /api/usage/self shape",
@@ -2933,6 +3008,23 @@ def main() -> int:
               bool(_srv.SLOT_PATTERNS)
               and all(_wpat.get(k) == v for k, v in _srv.SLOT_PATTERNS.items()),
               f"server={sorted(_srv.SLOT_PATTERNS)} wizard={sorted(_wpat)}")
+        # owner ruling 2026-11-01: ANY provider's key is welcome — the old
+        # 8+ floor refused legitimate short keys (local gateways, one-api
+        # tokens). In-process legs: no real slot is ever written here.
+        check("MODEL_API_KEY accepts any non-space key (any provider)",
+              _srv._backup_secret_reason("MODEL_API_KEY", "short-key") == ""
+              and _srv._backup_secret_reason("MODEL_UP_K3", "x1y2z3") == "",
+              _srv._backup_secret_reason("MODEL_API_KEY", "short-key"))
+        check("MODEL_API_KEY still refuses a spaced value",
+              _srv._backup_secret_reason("MODEL_API_KEY", "two words") != "",
+              _srv._backup_secret_reason("MODEL_API_KEY", "two words"))
+        check("slot refusal text names the rule, never the value or regex",
+              "without spaces" in _srv._slot_format_reason("MODEL_API_KEY")
+              and "two words" not in _srv._slot_format_reason("MODEL_API_KEY")
+              and "^\\S" not in _srv._slot_format_reason("MODEL_API_KEY")
+              and "digits and commas" in
+              _srv._slot_format_reason("AIDOG_TG_ALLOWED_USERS"),
+              _srv._slot_format_reason("MODEL_API_KEY"))
         check("setup required set == the wizard's 3 required slots",
               _srv.REQUIRED_SLOTS == ("WEB_TOKEN", "MYCORE_TG_TOKEN",
                                       "AIDOG_TG_ALLOWED_USERS")
@@ -3008,7 +3100,10 @@ def main() -> int:
         if token:
             # --- §1.2 restart: 400 bad target (never reaches tmux) + ---
             # --- 409 no session, with the tmux probe patched off ---
-            s, body = post("/api/service/restart", {"target": "console"}, token)
+            # car K note: 'console' became a REAL target (202 + self-restart),
+            # so the bad-target leg must use a genuinely unknown name —
+            # posting 'console' here would restart this very console.
+            s, body = post("/api/service/restart", {"target": "bogus"}, token)
             check("POST /api/service/restart bad target -> 400 details",
                   s == 400 and isinstance(body, dict)
                   and any("target" in str(d)

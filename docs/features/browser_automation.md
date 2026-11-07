@@ -92,7 +92,7 @@ connects to `127.0.0.1` / `localhost` / `::1`, `ws://` only.
 - **Local CDP only**: hosted/remote browser services (cloud CDP grids,
   browser-as-a-API vendors) are **structurally not adopted** — no adapter, no
   slot, nothing half-wired. Stated explicitly so silence is never read as
-  support (owner decision, car 4b).
+  support (product decision, car 4b).
 - **No shell in the tool path**: navigation, clicks and typing go over our
   own WebSocket/CDP frames; the browser process is launched directly as argv.
 

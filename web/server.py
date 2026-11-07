@@ -176,6 +176,30 @@ Routes:
                                    SAME write core as POST /api/settings;
                                    invalid plan = 400 (stays pending) |
                                    404 unknown id | 409 already closed
+  GET  /api/recovery           -> car K: the recovery center's read face —
+                                   watchdog/escalation, settings-file
+                                   sanity, console restart counters, clock
+                                   skew, retired leftovers, old-log sizes,
+                                   proxy mode, dirty-tree names (diagnosis
+                                   ONLY — this product never auto-cleans)
+  POST /api/service/restart {target:"watchdog"|"console"}
+                                   -> car K B1/B3: recycle the watchdog
+                                   session (detached + answered) | restart
+                                   the console (202 FIRST, then this
+                                   process dies and boot brings it back)
+  POST /api/recovery/watchdog/retry {target}
+                                   -> car K B2: queue the watchdog's command
+                                   file (consumed at its next cycle start);
+                                   409 when the target is healthy
+  POST /api/recovery/cleanup {kind:"logs"}
+                                   -> car K B7: delete OUR *.log artifacts
+                                   older than 7 days (data/ + deploy/ only)
+  POST /api/recovery/leftovers -> car K B5: kill ONLY the two retired
+                                   transition-era sessions (aidog_gw/wd)
+  POST /api/recovery/proxy {mode:"direct"|"default"}
+                                   -> car K B4: write/clear deploy/
+                                   proxy.local (direct mode); honest
+                                   restart_required — applies on restart
   POST /api/extensions/intent    -> Bearer WEB_TOKEN; {text} -> car 4 call
                                    site 1: which Extensions tab owns the
                                    request (Jev choice over finance/home/
@@ -736,7 +760,10 @@ SLOT_PATTERNS: dict = {
     "WEB_TOKEN": r"^\S{16,}$",
     "MYCORE_TG_TOKEN": r"^\d{4,}:[A-Za-z0-9_-]{20,}$",
     "AIDOG_TG_ALLOWED_USERS": r"^\d+(,\d+)*$",
-    "MODEL_API_KEY": r"^\S{8,}$",
+    # Owner ruling (2026-11-01): ANY provider's key is welcome — the old
+    # 8+ floor refused legitimate short keys (local gateways, one-api
+    # tokens). One line, no spaces, non-empty; empty = keyless endpoint.
+    "MODEL_API_KEY": r"^\S+$",
 }
 # The wizard's required set (aidog_setup --check pending semantics).
 REQUIRED_SLOTS = ("WEB_TOKEN", "MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS")
@@ -929,6 +956,18 @@ def backup_payload(include) -> dict:
     return payload
 
 
+def _slot_format_reason(name: str) -> str:
+    """Plain-words explanation of a slot's shape rule — names the RULE, never
+    the value and never the raw regex (owner ask 2026-11-01: a refusal must
+    be actionable, and ANY provider's key is welcome)."""
+    if MODEL_KEY_SLOT_RE.match(name):
+        return ("one line without spaces — any provider's key works; "
+                "leave the slot empty when the endpoint needs none")
+    if name == "AIDOG_TG_ALLOWED_USERS":
+        return "digits and commas only (e.g. 123456789, or 111,222)"
+    return "does not match the slot format"
+
+
 def _backup_secret_reason(name: str, value: str) -> str:
     """The SAME value rules POST /api/secrets enforces (length, one line, no
     edge whitespace, per-slot shape) as a reason WORD — the value itself is
@@ -943,7 +982,7 @@ def _backup_secret_reason(name: str, value: str) -> str:
     if fmt_pat is None and MODEL_KEY_SLOT_RE.match(name):
         fmt_pat = SLOT_PATTERNS["MODEL_API_KEY"]
     if value and fmt_pat and not re.match(fmt_pat, value):
-        return "value does not match the slot format"
+        return _slot_format_reason(name)
     return ""
 
 
@@ -5718,6 +5757,101 @@ def collect_console() -> dict:
         "restart_required": pinned is not None and pinned != PORT,
         "default_port": 19167,
         "url": f"http://{HOST}:{PORT}",
+        # Novice recovery (owner ask 2026-11-01): the install folder, so the
+        # console can tell a lost-token user WHERE to run the grep. The
+        # console binds loopback only — a browser on this machine IS the
+        # machine's owner; a path is not a credential.
+        "repo": str(REPO),
+    }
+
+
+# ------------------------------------ car K: recovery center (read face) ------
+def _old_log_files(days: int = 7) -> list[Path]:
+    """Our OWN log artifacts older than N days (car K B7): `*.log` under
+    repo/data and repo/deploy ONLY — never secrets, never settings, never
+    backups, never today's live logs (their mtime is recent by definition)."""
+    cutoff = time.time() - days * 86400
+    out: list[Path] = []
+    for root in (REPO / "data", REPO / "deploy"):
+        try:
+            for p in root.glob("**/*.log"):
+                try:
+                    if p.stat().st_mtime < cutoff:
+                        out.append(p)
+                except OSError:
+                    continue
+        except OSError:
+            continue
+    return out
+
+
+def _git_dirty_files(limit: int = 20) -> list[str]:
+    """B6 (diagnosis ONLY): the dirty worktree's file NAMES — the operator
+    decides (commit/stash/discard); this product never auto-cleans."""
+    try:
+        proc = subprocess.run(["git", "status", "--porcelain"], cwd=str(REPO),
+                              capture_output=True, text=True, timeout=5)
+    except Exception:  # noqa: BLE001 — git absent = no diagnosis, no error
+        return []
+    if proc.returncode != 0:
+        return []
+    return [ln[3:].strip() for ln in proc.stdout.splitlines()
+            if ln.strip()][:limit]
+
+
+def collect_recovery() -> dict:
+    """GET /api/recovery — the recovery center's read face (car K; loopback
+    no-auth like /api/status). Diagnose-only facts; every ACTION endpoint is
+    Bearer-gated separately. Each block is fail-soft: an unreadable source
+    degrades to an honest unknown, never a 500."""
+    wdf = mycore_watchdog_facts()
+    # B9: settings.json unparsable -> the server silently runs on defaults;
+    # the recovery card must SAY so (an honest banner, never a silent drop)
+    try:
+        json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
+        settings_bad = False
+    except (OSError, ValueError):
+        settings_bad = True
+    # B8: the console restart-loop counters live in the watchdog's state
+    # file (its own verdict, not a guess)
+    cstate: dict = {}
+    try:
+        doc = json.loads(MYCORE_WD_STATE.read_text(encoding="utf-8"))
+        cstate = (doc.get("targets") or {}).get("console") or {}
+    except (OSError, ValueError):
+        pass
+    # B10: clock sanity — a watchdog state file mtime in the FUTURE is a
+    # real, offline-detectable clock failure (negative age).
+    age = wdf.get("age_sec")
+    # B5: the two retired transition-era sessions
+    leftovers = [s for s in ("aidog_gw", "aidog_wd")
+                 if _tmux_session_exists(s)]
+    # B4: proxy mode (deploy/proxy.local wins over the env chain at restart)
+    pf = REPO / "deploy" / "proxy.local"
+    mode = "default"
+    if pf.is_file():
+        try:
+            mode = "custom" if pf.read_text(encoding="utf-8").strip() \
+                else "direct"
+        except OSError:
+            mode = "unknown"
+    logs = _old_log_files()
+    return {
+        "watchdog": {"process": wdf.get("process"),
+                     "state": wdf.get("state"),
+                     "age_sec": age,
+                     "targets": wdf.get("targets"),
+                     "escalation": wdf.get("escalation")},
+        "settings_unreadable": settings_bad,
+        "console_restarts": int(cstate.get("restart_attempts") or 0),
+        "clock_skew_sec": (-age if isinstance(age, int) and age < -30
+                           else None),
+        "leftovers": leftovers,
+        "old_logs": {"count": len(logs),
+                     "bytes": sum(p.stat().st_size for p in logs
+                                  if p.is_file())},
+        "proxy": {"mode": mode},
+        "git_dirty": _git_dirty_files(),
     }
 
 
@@ -5779,8 +5913,9 @@ def _tmux_session_exists(name: str) -> bool:
 
 def restart_chat_service() -> tuple[int, dict]:
     """POST /api/service/restart core (§1.2): restart ONLY the chat-service
-    tmux session. The web console is NEVER restarted from here — it comes back
-    through boot/upgrade paths only (restart it and this request dies mid-flight).
+    tmux session. (Car K: the console gained its OWN separate restart target
+    that answers 202 first — see restart_console_self; THIS function still
+    never touches the console.)
 
     Session names are the real ones: `aidog_svc` for the default profile
     (deploy/boot_services.sh) and `aidog_svc_<name>` for a named profile, whose
@@ -5824,6 +5959,64 @@ def restart_chat_service() -> tuple[int, dict]:
     if rc != 0:
         return 500, {"error": "service start failed", "rc": rc}
     return 200, {"ok": True, "target": "service"}
+
+
+def restart_watchdog_recycle() -> tuple[int, dict]:
+    """Car K B1: recycle the mycore watchdog session — the same class of
+    action as the config-snapshot guard in boot_services start_mwd, exposed
+    to the web. Kill ONLY python processes matching our own pattern (a bare
+    pattern match would reap an operator's grep — the self-match class the
+    guard already documents), then boot_services start brings a fresh
+    session up with the CURRENT config. Detached + answered: the request
+    never blocks on the ~8s bring-up; the recovery card refreshes the
+    facts."""
+    sh = ("tmux kill-session -t aidog_mwd 2>/dev/null; "
+          "for p in $(pgrep -f 'python3 -m mycore\\.watchdog'); do "
+          "c=$(ps -o comm= -p \"$p\" 2>/dev/null | tr -d ' '); "
+          "case \"$c\" in python*) kill \"$p\" 2>/dev/null;; esac; done; "
+          f"bash {REPO}/deploy/boot_services.sh start "
+          f">> {REPO}/data/recovery_watchdog.log 2>&1")
+    try:
+        subprocess.Popen(["/bin/sh", "-c", sh], cwd=str(REPO),
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+    except OSError as e:  # noqa: BLE001
+        sys.stderr.write(f"recovery action=watchdog_restart spawn="
+                         f"{type(e).__name__}\n")
+        return 500, {"error": f"spawn failed: {type(e).__name__}"}
+    sys.stderr.write("recovery action=watchdog_restart result=issued\n")
+    return 200, {"ok": True, "target": "watchdog", "issued": True,
+                 "note": "watchdog recycling — facts refresh within one "
+                         "cycle (≤60s)"}
+
+
+def restart_console_self() -> tuple[int, dict]:
+    """Car K B3: the console restarts ITSELF — the ONE self-referential
+    action, so the contract is explicit: answer 202 FIRST (the reply lands
+    before anything dies), then a detached child kills THIS process after a
+    2s grace and runs boot_services start. In production the tmux session
+    ends and the watchdog (or boot) brings the console back; the UI tells
+    the user the page will drop for a moment. The child kills the CONSOLE'S
+    OWN PID — never a session name — so an isolated test console can never
+    take the production session with it."""
+    pid = os.getpid()
+    sh = (f"sleep 2; kill {pid} 2>/dev/null; "
+          f"bash {REPO}/deploy/boot_services.sh start "
+          f">> {REPO}/data/console_restart.log 2>&1")
+    try:
+        subprocess.Popen(["/bin/sh", "-c", sh], cwd=str(REPO),
+                         stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+    except OSError as e:  # noqa: BLE001
+        sys.stderr.write(f"recovery action=console_restart spawn="
+                         f"{type(e).__name__}\n")
+        return 500, {"error": f"spawn failed: {type(e).__name__}"}
+    sys.stderr.write("recovery action=console_restart result=queued\n")
+    return 202, {"ok": True, "target": "console", "queued": True,
+                 "note": "the console restarts in ~2s — this page drops and "
+                         "comes back (the watchdog brings it up)"}
 
 
 def _cron_jobs_path() -> Path:
@@ -5934,6 +6127,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(load_settings())
         if path == "/api/console":
             return self._json(collect_console())
+        if path == "/api/recovery":
+            return self._json(collect_recovery())
         if path == "/api/backup/export":
             return self._handle_backup_export()
         if path == "/api/backup/agent":
@@ -6102,6 +6297,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_sniff_post()
         if path == "/api/service/restart":
             return self._handle_service_restart()
+        if path == "/api/recovery/watchdog/retry":
+            return self._handle_recovery_retry()
+        if path == "/api/recovery/cleanup":
+            return self._handle_recovery_cleanup()
+        if path == "/api/recovery/leftovers":
+            return self._handle_recovery_leftovers()
+        if path == "/api/recovery/proxy":
+            return self._handle_recovery_proxy()
         if path == "/api/update/apply":
             return self._handle_update_apply()
         if path == "/api/doctor/run":
@@ -6200,15 +6403,17 @@ class Handler(BaseHTTPRequestHandler):
                                "details": ["value must not start or end with whitespace"]}, 400)
         fmt_pat = SLOT_WRITE_PATTERNS.get(name)
         if fmt_pat is None and MODEL_KEY_SLOT_RE.match(name):
-            # same shape rule as MODEL_API_KEY (the wizard's mirror): a model
-            # key is at least 8 non-space chars, one line.
+            # same shape rule as MODEL_API_KEY (the wizard's mirror): any
+            # provider's key — one line, no spaces; empty = keyless endpoint
+            # (owner ruling 2026-11-01: the old 8+ floor is gone).
             fmt_pat = SLOT_PATTERNS["MODEL_API_KEY"]
         if value and fmt_pat and not re.match(fmt_pat, value):
-            # per-slot shape rule (activation car §1.9): mirrors the setup
-            # wizard; the stored value is NEVER echoed back in the refusal.
+            # per-slot shape rule (activation car §1.9): the refusal names
+            # the RULE in plain words — never the value, never the raw
+            # regex a user cannot act on.
             return self._json({"error": "validation failed",
-                               "details": [f"invalid format for {name}: expected "
-                                           f"{fmt_pat} (value not shown)"]}, 400)
+                               "details": [f"invalid format for {name}: "
+                                           + _slot_format_reason(name)]}, 400)
         try:
             changed = write_env_slot(name, value)
         except OSError as e:  # noqa: BLE001 — type name only, never the value
@@ -6532,20 +6737,156 @@ class Handler(BaseHTTPRequestHandler):
 
     # ------------------------------------ activation & operations (0.5.40) ---
     def _handle_service_restart(self) -> None:
-        """POST /api/service/restart {target:'service'} — Bearer gate, then
-        the target check, then restart_chat_service(). The chat service only:
-        this console never restarts itself. 400 bad target · 409 no tmux
-        session (honest) · 503/401 from the standard gate."""
+        """POST /api/service/restart — Bearer gate, then the target check.
+        Targets: 'service' (the chat service, synchronous — the §1.2
+        original) | 'watchdog' (car K B1: recycle the mycore watchdog
+        session, detached + answered) | 'console' (car K B3: answer 202
+        first, then this process dies and boot_services brings it back).
+        400 bad target · 409 no tmux session (honest) · 503/401 from the
+        standard gate."""
         if not self._require_token():
             return
         doc = self._read_json_body()
         if doc is None:
             return
-        if doc.get("target") != "service":
+        target = doc.get("target")
+        if target not in ("service", "watchdog", "console"):
             return self._json({"error": "validation failed",
-                               "details": ["target must be 'service'"]}, 400)
+                               "details": ["target must be 'service' | "
+                                           "'watchdog' | 'console'"]}, 400)
+        if target == "watchdog":
+            code, out = restart_watchdog_recycle()
+            return self._json(out, code)
+        if target == "console":
+            code, out = restart_console_self()
+            return self._json(out, code)
         code, out = restart_chat_service()
         return self._json(out, code)
+
+    # ---------------------------- car K: recovery actions (all Bearer) -----
+    def _handle_recovery_retry(self) -> None:
+        """POST /api/recovery/watchdog/retry {target} — car K B2. The
+        escalation circuit is the watchdog's IN-MEMORY state (the state file
+        is its output), so the owner's retry arrives through the command
+        channel the watchdog consumes at its next cycle start. The honest
+        refusal: a healthy target is a 409 — nothing to retry."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        target = doc.get("target")
+        if target not in ("service", "console", "model-e"):
+            return self._json({"error": "validation failed", "details":
+                               ["target must be 'service' | 'console' | "
+                                "'model-e'"]}, 400)
+        try:
+            state = json.loads(MYCORE_WD_STATE.read_text(encoding="utf-8"))
+            esc = int(((state.get("targets") or {}).get(target) or {})
+                      .get("esc_level") or 0)
+        except (OSError, ValueError):
+            return self._json({"error": "watchdog state unreadable — retry "
+                               "not queued"}, 503)
+        if esc < 1:
+            return self._json({"error": f"{target} is healthy — nothing to "
+                               "retry"}, 409)
+        # the SAME derivation mycore.watchdog uses: <state-stem>.cmd.json
+        cmd_path = MYCORE_WD_STATE.parent / (
+            MYCORE_WD_STATE.stem + ".cmd.json")
+        try:
+            tmp = cmd_path.with_suffix(".tmp")
+            tmp.write_text(json.dumps({"action": "retry", "target": target,
+                                       "ts": round(time.time(), 3)}),
+                           encoding="utf-8")
+            os.replace(tmp, cmd_path)
+        except OSError as e:  # noqa: BLE001
+            return self._json({"error": f"queue failed: {type(e).__name__}"},
+                              500)
+        sys.stderr.write(f"recovery action=watchdog_retry target={target} "
+                         "result=queued\n")
+        return self._json({"ok": True, "queued": True, "target": target,
+                           "note": "applied within one watchdog cycle (≤60s)"})
+
+    def _handle_recovery_cleanup(self) -> None:
+        """POST /api/recovery/cleanup {kind:'logs'} — car K B7. Deletes our
+        OWN log artifacts older than 7 days (repo/data + repo/deploy
+        *.log only) and reports counts + bytes. Never secrets, settings,
+        backups, or today's live logs."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        if doc.get("kind") != "logs":
+            return self._json({"error": "validation failed",
+                               "details": ["kind must be 'logs'"]}, 400)
+        deleted = freed = 0
+        for p in _old_log_files():
+            try:
+                freed += p.stat().st_size
+                p.unlink()
+                deleted += 1
+            except OSError:
+                continue
+        sys.stderr.write(f"recovery action=cleanup kind=logs files={deleted} "
+                         f"bytes={freed}\n")
+        return self._json({"ok": True, "files": deleted, "bytes": freed})
+
+    def _handle_recovery_leftovers(self) -> None:
+        """POST /api/recovery/leftovers — car K B5. Kills ONLY the two known
+        retired transition-era tmux sessions (aidog_gw / aidog_wd) — never a
+        broad pkill; absent sessions are an honest no-op."""
+        if not self._require_token():
+            return
+        killed: list[str] = []
+        for name in ("aidog_gw", "aidog_wd"):
+            if not _tmux_session_exists(name):
+                continue
+            try:
+                subprocess.run(["tmux", "kill-session", "-t", name],
+                               capture_output=True, timeout=10)
+                killed.append(name)
+            except Exception as e:  # noqa: BLE001
+                sys.stderr.write(f"recovery action=leftovers session={name} "
+                                 f"rc={type(e).__name__}\n")
+        sys.stderr.write(f"recovery action=leftovers killed={','.join(killed) or 'none'}\n")
+        return self._json({"ok": True, "killed": killed})
+
+    def _handle_recovery_proxy(self) -> None:
+        """POST /api/recovery/proxy {mode:'direct'|'default'} — car K B4.
+        Writes deploy/proxy.local (empty = DIRECT MODE, absent = the env
+        chain wins) — the SAME file boot_services reads, so the switch is
+        one machine-local truth. Honest restart_required: the change applies
+        on the next service restart, never a live re-bind."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        mode = doc.get("mode")
+        if mode not in ("direct", "default"):
+            return self._json({"error": "validation failed", "details":
+                               ["mode must be 'direct' | 'default'"]}, 400)
+        pf = REPO / "deploy" / "proxy.local"
+        try:
+            if mode == "direct":
+                pf.parent.mkdir(parents=True, exist_ok=True)
+                pf.write_text("", encoding="utf-8")   # empty = direct
+            else:
+                try:
+                    pf.unlink()
+                except FileNotFoundError:
+                    pass
+        except OSError as e:  # noqa: BLE001
+            return self._json({"error": f"write failed: {type(e).__name__}"},
+                              500)
+        sys.stderr.write(f"recovery action=proxy mode={mode} "
+                         "result=written restart_required\n")
+        return self._json({"ok": True, "mode": mode,
+                           "restart_required": True,
+                           "note": "applies on the next service restart — "
+                                   "RESTART CHAT SERVICE (or boot_services.sh "
+                                   "restart for the whole stack)"})
 
     def _handle_update_apply(self) -> None:
         """POST /api/update/apply — queue `aidog_update.py apply` in a
