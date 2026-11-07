@@ -9,13 +9,14 @@ interval, evaluates bounded rules over the readings a sweep just produced,
 records durable, deduplicated *findings* — and **speaks first** only when a
 finding earns it. Sense → sweep → finding → speak, never another chat window.
 
-## Sources (three kinds, all read-only)
+## Sources (four kinds, all read-only)
 
 | Kind | Reads | Configuration | Never does |
 |---|---|---|---|
 | `home` | `GET <url>/api/states` filtered by entity globs (Home Assistant as the hub for health/device/vehicle entities) | `url` + `token` (a **slot NAME**, e.g. `HA_TOKEN`) + `entities` globs + `rate_cap_per_min` | no service call, no state write |
 | `web` | one `GET` per sweep: a page hash plus an optional regex extraction | `url` + `regex` + `field` | no POST, no form, no session |
 | `mcp` | the bridge registry (`settings.mycore.mcp`) + this process's live sessions for one named server | `server` (the bridge name) | **never calls a tool, never spawns a process, never opens a connection** |
+| `discussions` | the product repository's own GitHub Discussions (`<api>/repos/<repo>/discussions?per_page=30`), filtered **locally** by `category.slug` (GitHub ignores the upstream param) — readings `tasks` (matching count) and `latest` (highest discussion number) | `category` (slug, optional — empty = the whole forum); the repo comes from `AIDOG_COMMUNITY_REPO`, no url, **no token** (the list is public) | no Authorization header, no write, no `community_post` — detection only |
 
 Honest statuses (exactly these words, on every source row):
 `disabled` · `pending` (configured, first sweep not run yet) · `reachable` ·
@@ -91,7 +92,7 @@ Fourth sidebar group **SENSE** → `#view-sniff`: sources (honest badge, read
 count, last-read age, per-minute cap, enable/remove), rules (condition,
 severity, `reports` marker), the findings timeline (severity, summary, age,
 count, ACK) and controls (SWEEP NOW, PAUSE, digest cap) — plus composers
-for a source (kind dropdown: `home` / `web` / `mcp`) and a rule. Deep link:
+for a source (kind dropdown: `home` / `web` / `mcp` / `discussions`) and a rule. Deep link:
 `/?view=sniff`.
 
 ## Boundaries (honest)
@@ -111,7 +112,7 @@ for a source (kind dropdown: `home` / `web` / `mcp`) and a rule. Deep link:
 ## Gates
 
 - `python3 -m mycore.tests.run` — the `sniff:` lane (registry first-error,
-  rule parser, findings dedup/caps, hermetic home/web/mcp sweeps, delivery
+  rule parser, findings dedup/caps, hermetic home/web/mcp/discussions sweeps, delivery
   seam, the service SENSE leg, and the read-only absence assertions).
 - `python3 tests/web_console_p3.py` — the `mycore.sniff` settings partition
   (first-error 400s, slot grammar) and the `GET/POST /api/sniff` board API.

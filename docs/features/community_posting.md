@@ -26,8 +26,8 @@ what posting needs.
 
 | Route | Gate | Contract |
 |---|---|---|
-| `GET /api/discussions` | none (loopback) | unchanged — the public list, anonymous |
-| `GET /api/discussions/categories` | none (needs the slot upstream) | `{available, categories[{id,name,slug}], checked_at[, reason]}`; GraphQL is the only source of category node ids |
+| `GET /api/discussions` | none (loopback) | unchanged — the public list, anonymous; **`?category=<slug>`** (car F) filters the cached list LOCALLY by `category.slug` (GitHub ignores the upstream param — verified), an invalid slug is a 400 **before** any outbound call |
+| `GET /api/discussions/categories` | none (needs the slot upstream) | `{available, categories[{id,name,slug}], checked_at[, reason]}`; GraphQL is the only source of category node ids — and the only way to learn them: **no API can create a category** (car F verified: no mutation, no REST route), creation happens in repo Settings |
 | `GET /api/discussions/replies?number=N` | none (loopback) | `{available, number, replies[{id,author,body,created_at,url}], checked_at[, reason]}` — anonymous REST, 60s per-thread cache, `?fresh=1` busts it, a non-`https://github.com/` href scrubs to `""` |
 | `POST /api/discussions/create` | Bearer `WEB_TOKEN` | `{title, body, category}` -> `{ok, number, url}` |
 | `POST /api/discussions/comment` | Bearer `WEB_TOKEN` | `{number, body}` -> `{ok, number, comment_id}` |
@@ -88,4 +88,16 @@ a failure. Live probes run in parallel, so `VERIFY ALL` costs one timeout.
   live console (no outbound), success paths in-process with an injected
   transport, a temp secrets/state dir and a local `getMe` double.
 * probe `tmp/parity_delta4_verify.js` extends to the composer, thread
-  expansion and the verify controls.
+  expansion, the verify controls, the **TASK HALL card** (count/newest title,
+  VIEW ALL scoping, the noCat vs "no tasks yet" empty states, NEW TASK
+  preselect + no-token hint, zh repaint) and the **sniff `discussions`
+  source form** (kind dropdown, category row, local slug refusal, a real
+  settings round-trip on the isolated console).
+* **Task-hall console surface (car F):** the `#commHall` card above the list
+  reads `?category=task-hall` — one shared server cache, the card never
+  stacks its own upstream reads; VIEW ALL scopes the list to the same slug
+  and "All categories" restores the full list; the category dropdown is
+  `rows ∪ GraphQL categories` (a category with zero posts stays selectable
+  and renders its honest empty state — owner ask #1); `NEW TASK` opens the
+  composer with `task-hall` preselected (missing category / missing slot are
+  honest hints, never a silent first option).

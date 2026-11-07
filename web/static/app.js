@@ -55,6 +55,7 @@ async function loadLang(lang) {
   settingsRelang();            // rows built by JS keep their pack strings too
   renderExchange();            // venue rows / probe labels follow the language too
   renderCommunity();           // delta4: reason note / filter / rows re-translate
+  renderHall();                // car F: task-hall card text follows the language too
   chatBadge(chatBusy);            // badge label follows the active language
   renderCtx(lastCtx);             // X14: context line label follows too
   refreshEventTexts();
@@ -7793,8 +7794,18 @@ function reasonLi(r) { return `<li>&gt; ${reasonHtml(r)}</li>`; }
 let commData = null;   // /api/discussions payload (null = never loaded)
 let commCat = "";      // active category filter ("" = all categories)
 let commCats = null;   // composer categories payload (null = never loaded)
+let commScope = "";    // car F: category slug currently SERVER-scoped into
+                       // commData ("" = full list); the client-side filter
+                       // below still applies on top of it
 let commThread = null; // discussion number whose thread is open (null = none)
 let commThreadData = null;  // {number, replies[]} for the open thread
+let hallData = null;   // car F: ?category=task-hall payload (null = never loaded)
+
+// The product repository's task board is a fixed pair (owner ask #18); the
+// VIEW ALL button scopes by slug directly, the dropdown reaches it through
+// the GraphQL category list once it is loaded.
+const TASK_HALL_NAME = "Task Hall";
+const TASK_HALL_SLUG = "task-hall";
 
 function commReasonText(reason) {
   const word = /^[a-z_]+$/.test(String(reason || "")) ? reason : "unknown";
@@ -7858,14 +7869,21 @@ function commRelTime(iso) {
   return new Date(ts).toLocaleDateString();
 }
 
-async function refreshCommunity(fresh) {
+async function refreshCommunity(fresh, slug) {
+  const scope = slug !== undefined ? slug : commScope;
   const list = document.getElementById("commList");
   if (list && !commData) {
     list.innerHTML = `<div class="stat-note">${escapeHtml(
       t("comm.loading", "loading discussions\u2026"))}</div>`;
   }
   try {
-    const r = await fetch("/api/discussions" + (fresh ? "?fresh=1" : ""));
+    // car F: ?category=<slug> is filtered SERVER-side (GitHub ignores the
+    // upstream param, the console filters locally) — one cache serves both
+    // the full list and every category view.
+    const qs = [];
+    if (scope) qs.push("category=" + encodeURIComponent(scope));
+    if (fresh) qs.push("fresh=1");
+    const r = await fetch("/api/discussions" + (qs.length ? "?" + qs.join("&") : ""));
     const d = r.ok ? await r.json() : null;
     commData = (d && typeof d.available === "boolean") ? d
       : { available: false, discussions: [], checked_at: "",
@@ -7874,7 +7892,92 @@ async function refreshCommunity(fresh) {
     commData = { available: false, discussions: [], checked_at: "",
                  reason: "unknown" };
   }
+  commScope = scope;
   renderCommunity();
+  // car F: the dropdown union (rows ∪ GraphQL categories) needs the
+  // category list — fetched once per view session (server caches 600s).
+  // Without the slot this answers no_token silently; the data-built list
+  // below still works (owner ask #1: selectable categories at zero posts).
+  if (!commCats) {
+    commLoadCategories(false).then(() => {
+      if (commData) { renderCommunity(); renderHall(); }
+    });
+  }
+}
+
+/* car F (owner ask #18): the task-hall board card — its own
+   ?category=task-hall read, honest states only: unavailable -> the reason
+   word, zero rows -> "category missing" (knowable only from the GraphQL
+   list) vs "no tasks yet", populated -> count + newest title. */
+async function refreshHall(fresh) {
+  try {
+    const r = await fetch("/api/discussions?category=" + TASK_HALL_SLUG +
+                          (fresh ? "&fresh=1" : ""));
+    const d = await r.json().catch(() => null);
+    hallData = (d && typeof d.available === "boolean") ? d
+      : { available: false, discussions: [], checked_at: "",
+          reason: "unknown" };
+  } catch (e) {
+    hallData = { available: false, discussions: [], checked_at: "",
+                 reason: "network" };
+  }
+  renderHall();
+}
+
+function renderHall() {
+  const card = document.getElementById("commHall");
+  const badge = document.getElementById("hallBadge");
+  const sum = document.getElementById("hallSummary");
+  if (!card || !sum) return;
+  if (!hallData) { card.hidden = true; return; }   // never a fake empty state
+  card.hidden = false;
+  if (!hallData.available) {
+    if (badge) badge.textContent = "\u2013";
+    sum.textContent = commReasonText(hallData.reason);
+    return;
+  }
+  const rows = Array.isArray(hallData.discussions) ? hallData.discussions : [];
+  if (badge) badge.textContent = String(rows.length);
+  if (!rows.length) {
+    // "category not created" is only provable from the GraphQL list (slot);
+    // without it the honest statement is the empty board.
+    const noCat = commCats && commCats.available
+      && Array.isArray(commCats.categories)
+      && !commCats.categories.some(c => String(c.slug || c.id) === TASK_HALL_SLUG);
+    sum.textContent = noCat
+      ? t("comm.hall.noCat", "the task-hall category has not been created yet")
+      : t("comm.hall.empty", "no tasks yet — be the first");
+    return;
+  }
+  // newest = highest discussion number (creation order, not fetch order)
+  const latest = rows.reduce((a, b) =>
+    (Number(b.number) || 0) > (Number(a.number) || 0) ? b : a);
+  sum.textContent = t("comm.hall.count", "{n} posts")
+      .replace("{n}", String(rows.length)) + " · " +
+    t("comm.hall.latest", "latest: {t}")
+      .replace("{t}", String(latest.title || ""));
+}
+
+/* car F: VIEW ALL — server-scope the list to the task board by slug (the
+   card's payload is reused; zero extra upstream reads) and keep the filter
+   selection in sync. */
+async function commViewAll() {
+  commCat = TASK_HALL_NAME;
+  if (hallData && typeof hallData.available === "boolean") {
+    commData = hallData;
+    commScope = TASK_HALL_SLUG;
+    renderCommunity();
+  } else {
+    await refreshCommunity(false, TASK_HALL_SLUG);
+  }
+}
+
+function commSlugFor(name) {
+  if (commCats && commCats.available && Array.isArray(commCats.categories)) {
+    const hit = commCats.categories.find(c => String(c.name) === name);
+    if (hit) return String(hit.slug || "");
+  }
+  return "";
 }
 
 function renderCommunity() {
@@ -7899,13 +8002,21 @@ function renderCommunity() {
   if (badge) badge.textContent = String(rows.length);
   if (sel) sel.disabled = false;
 
-  // category filter: built FROM the data (never seeded), selection survives
+  // category filter: built FROM the data (never seeded), plus the GraphQL
+  // category list once it is loaded (car F: a category with zero posts is
+  // still selectable and renders its honest empty state); selection survives
   // a refresh while it still exists, otherwise it resets to "all".
   const cats = [];
   rows.forEach(r => {
     const c = String(r.category || "");
     if (c && cats.indexOf(c) < 0) cats.push(c);
   });
+  if (commCats && commCats.available && Array.isArray(commCats.categories)) {
+    commCats.categories.forEach(c => {
+      const n = String(c.name || "");
+      if (n && cats.indexOf(n) < 0) cats.push(n);
+    });
+  }
   if (commCat && cats.indexOf(commCat) < 0) commCat = "";
   if (sel) {
     const want = [""].concat(cats);
@@ -8002,7 +8113,7 @@ async function commLoadCategories(force) {
   return commCats;
 }
 
-async function commOpenComposer() {
+async function commOpenComposer(preselect) {
   const card = commComposerEl();
   if (!card) return;
   card.hidden = false;
@@ -8025,16 +8136,29 @@ async function commOpenComposer() {
     return;
   }
   const cats = Array.isArray(payload.categories) ? payload.categories : [];
+  const preFound = preselect
+    && cats.some(c => String(c.slug || c.id) === preselect);
   if (sel) {
     sel.innerHTML = cats.map(c =>
       `<option value="${escapeHtml(c.slug || c.id)}">${escapeHtml(c.name || c.slug)}</option>`
     ).join("");
     sel.disabled = cats.length === 0;
+    // car F: NEW TASK preselects the task board when the category exists;
+    // a missing category is an honest hint, never a silent first-option.
+    if (preFound) sel.value = String(preselect);
   }
-  if (hint) hint.hidden = cats.length > 0;
-  if (hint && !cats.length) {
-    hint.textContent = t("comm.hint.noCats",
-      "no discussion categories available yet");
+  if (hint) {
+    if (preselect && !preFound) {
+      hint.hidden = false;
+      hint.textContent = t("comm.hall.noCat",
+        "the task-hall category has not been created yet");
+    } else {
+      hint.hidden = cats.length > 0;
+      if (!cats.length) {
+        hint.textContent = t("comm.hint.noCats",
+          "no discussion categories available yet");
+      }
+    }
   }
 }
 
@@ -8079,6 +8203,7 @@ async function commSubmitPost() {
   commCloseComposer();
   commCats = null;              // a fresh list on the next open
   await refreshCommunity(true); // the new row is in the server's fresh read
+  refreshHall(false);           // car F: the card follows the fresh cache too
   if (url) window.open(url, "_blank", "noopener");
 }
 
@@ -8171,6 +8296,9 @@ async function commSendReply(num) {
   on("commNew", "click", () => commOpenComposer());
   on("commCancel", "click", () => commCloseComposer());
   on("commPost", "click", () => commSubmitPost());
+  // car F: the task-hall card's two buttons
+  on("hallNew", "click", () => commOpenComposer(TASK_HALL_SLUG));
+  on("hallView", "click", () => commViewAll());
   // delegate: REPLIES toggle, thread REPLY button — both ride the list
   const list = document.getElementById("commList");
   if (list) list.addEventListener("click", async e => {
@@ -9049,12 +9177,18 @@ function sniffKindRows() {
   if (web) web.hidden = kind !== "web";
   // mcp: the bridge NAME resolves against settings mycore.mcp — there is no
   // url and no rate cap to ask for (the lane issues no HTTP call of its own).
+  // discussions (car F): no url either — the repository comes from
+  // AIDOG_COMMUNITY_REPO; only an optional category slug is asked for.
   const url = document.getElementById("sniffSrcUrlRow");
-  if (url) url.hidden = kind === "mcp";
+  if (url) url.hidden = kind === "mcp" || kind === "discussions";
   const srv = document.getElementById("sniffSrcServerRow");
   if (srv) srv.hidden = kind !== "mcp";
   const note = document.getElementById("sniffMcpNote");
   if (note) note.hidden = kind !== "mcp";
+  const discRow = document.getElementById("sniffDiscRow");
+  if (discRow) discRow.hidden = kind !== "discussions";
+  const discNote = document.getElementById("sniffDiscNote");
+  if (discNote) discNote.hidden = kind !== "discussions";
 }
 
 async function sniffAddSource() {
@@ -9065,17 +9199,31 @@ async function sniffAddSource() {
   const ents = ((document.getElementById("sniffSrcEntities") || {}).value || "").trim();
   const rx = ((document.getElementById("sniffSrcRegex") || {}).value || "").trim();
   const server = ((document.getElementById("sniffSrcServer") || {}).value || "").trim();
-  const need = kind === "mcp" ? server : url;
+  const cat = ((document.getElementById("sniffSrcCat") || {}).value || "").trim();
+  // discussions (car F): id alone is enough — the category slug is optional
+  // (empty = watch the whole forum), so no url is ever required.
+  const need = kind === "mcp" ? server
+    : kind === "discussions" ? "ok" : url;
   if (!id || !need) {
     sniffNote("err", t(kind === "mcp" ? "sniff.srcIncompleteMcp"
-                                      : "sniff.srcIncomplete",
+                       : kind === "discussions" ? "sniff.srcIncompleteDisc"
+                       : "sniff.srcIncomplete",
       kind === "mcp" ? "id and bridge name are required"
-                     : "id and url are required"));
+      : kind === "discussions" ? "an id is required"
+      : "id and url are required"));
+    return;
+  }
+  if (kind === "discussions" && cat &&
+      !/^[a-z0-9][a-z0-9-]{0,39}$/.test(cat)) {
+    sniffNote("err", t("sniff.srcCatBad",
+      "category must be a slug like task-hall"));
     return;
   }
   const ok = await sniffCfgWrite(b => {
     const base = kind === "mcp"
       ? { id, kind, server }
+      : kind === "discussions"
+      ? { id, kind, category: cat }
       : kind === "home"
       ? { id, kind, url, token,
           entities: ents ? ents.split(",").map(x => x.trim()).filter(Boolean) : ["*"] }
@@ -9084,7 +9232,7 @@ async function sniffAddSource() {
   }, t("sniff.srcAdded", "source added: {id}").replace("{id}", id));
   if (!ok) return;
   ["sniffSrcId", "sniffSrcUrl", "sniffSrcToken", "sniffSrcEntities", "sniffSrcRegex",
-   "sniffSrcServer"]
+   "sniffSrcServer", "sniffSrcCat"]
     .forEach(k => { const el = document.getElementById(k); if (el) el.value = ""; });
   const f = document.getElementById("sniffSrcForm");
   const a = document.getElementById("sniffSrcActions");
@@ -9156,7 +9304,9 @@ function setView(name, fromUser) {
   if (name === "chat" && (fromUser || !sessData)) refreshSessions("");
   // delta4: the community panel fetches on first open, then only on a user
   // nav click (the server cache keeps the upstream read rate sane anyway).
+  // car F: the task-hall card rides the same lazy rule (one extra read).
   if (name === "community" && (fromUser || !commData)) refreshCommunity(false);
+  if (name === "community" && (fromUser || !hallData)) refreshHall(false);
   // car C: the agent-proposal queue loads when Settings opens — the same
   // lazy rule as the approval queue above
   if (name === "settings") {
@@ -9195,13 +9345,25 @@ document.querySelectorAll(".nav-item").forEach(btn => {
    the category select just re-filters the payload already in memory. */
 const commRefreshEl = document.getElementById("commRefresh");
 if (commRefreshEl) {
-  commRefreshEl.addEventListener("click", () => refreshCommunity(true));
+  commRefreshEl.addEventListener("click", async () => {
+    await refreshCommunity(true);   // busts + refetches the full list once
+    refreshHall(false);             // served from that fresh cache (0 extra reads)
+  });
 }
 const commCatEl = document.getElementById("commCat");
 if (commCatEl) {
-  commCatEl.addEventListener("change", e => {
+  commCatEl.addEventListener("change", async e => {
     commCat = e.target.value || "";
-    renderCommunity();
+    // car F: a known category slug is filtered SERVER-side (correct at any
+    // post count); an unknown name keeps the legacy in-memory filter.
+    const slug = commSlugFor(commCat);
+    if (commCat && slug && slug !== commScope) {
+      await refreshCommunity(false, slug);
+    } else if (!commCat && commScope) {
+      await refreshCommunity(false, "");   // back to the full list
+    } else {
+      renderCommunity();
+    }
   });
 }
 /* SNIFF car: the SENSE board wires once — the row actions are delegated and
