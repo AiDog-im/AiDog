@@ -3,7 +3,9 @@
 
 Runs against a live console (default http://127.0.0.1:8790). The access token
 is read in-process from secrets.env and never printed or written anywhere.
-Exit code 0 = all assertions passed.
+Exit code 0 = all assertions passed; exit 77 = skipped (no provisioned
+install on this machine — secrets.env absent; the suite drives a live
+console and has nothing to smoke without one).
 English comments per repo i18n policy.
 """
 from __future__ import annotations
@@ -222,7 +224,15 @@ def sse_data_lines(text: str) -> list[str]:
 
 
 def main() -> int:
-    tok_m = re.search(r"(?m)^WEB_TOKEN=(\S+)$", SECRETS.read_text()) if SECRETS.exists() else None
+    # Car A (P6): environment preflight — this suite drives an ALREADY
+    # provisioned console. On a machine without an install there is no
+    # console to smoke: report a clean, honest skip (exit 77, the
+    # conventional "skipped" code) instead of a wall of red failures.
+    if not SECRETS.exists():
+        print("SKIP  console smoke requires a provisioned install "
+              "(secrets.env not found); skipped")
+        return 77
+    tok_m = re.search(r"(?m)^WEB_TOKEN=(\S+)$", SECRETS.read_text())
     token = tok_m.group(1) if tok_m else None
     check("secrets.WEB_TOKEN present", bool(token))
 
@@ -230,6 +240,10 @@ def main() -> int:
     check("GET /api/health", s == 200 and isinstance(health, dict) and health.get("status") == "ok")
 
     s, status = get("/api/status")
+    # Car A (P6): without a WEB_TOKEN the endpoint answers a plain string
+    # error body — normalize to {} so every leg below reports an honest
+    # FAIL instead of an AttributeError crash.
+    status = status if isinstance(status, dict) else {}
     check("GET /api/status advisory", s == 200 and status.get("advisory", {}).get("level") in
           ("info", "warn", "urgent"))
     check("GET /api/status panels=5", s == 200 and len(status.get("panels", [])) == 5)

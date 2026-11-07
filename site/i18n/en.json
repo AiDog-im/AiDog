@@ -166,8 +166,8 @@
   "console.f6B": "Run doctor, restart the chat service and apply an update from the panel; an upgrade banner appears the moment a newer release exists.",
   "models.title": "Models & Transparency",
   "models.sub": "We publish how this product actually runs — which models serve it and how much compute it consumes. No estimates, no marketing charts: only what the software itself reports.",
-  "models.status": "STATISTICS NOT LIVE — this page shows the pipeline until the stats endpoint answers.",
-  "models.statusBody": "The aggregation service is being built. Until it ships, this page shows the pipeline design — and nothing else. Any number here before launch would be a lie, so there are none.",
+  "models.status": "STATISTICS LIVE — anonymous daily reports, aggregated in public.",
+  "models.statusBody": "The endpoint answers today: aggregate totals, the last seven days and per-model breakdowns, refreshed as each install reports once a day. Verification canary rows are stored but never aggregated, and no per-install record is ever published.",
   "models.chartNote": "Last checked: never — no stats endpoint has answered yet.",
   "models.p1T": "1 · Your install",
   "models.p1B": "Each install reports a few anonymous facts once a day: the model name, request counts and token totals. No prompts, no files, no credentials — and you can switch reporting off in Settings.",
@@ -192,7 +192,7 @@
   "arch.title": "Architecture",
   "arch.sub": "Three layers, strictly separated — so the core underneath can be swapped without losing who you are.",
   "arch.kT": "Kernel",
-  "arch.kB": "Replaceable — a transitional kernel runs today while the self-developed core is under construction.",
+  "arch.kB": "The self-developed core runs today — 37 modules, ~22k LOC, zero upstream dependencies — and stays replaceable by design: swap the kernel, never swap 'me'.",
   "arch.bT": "Body",
   "arch.bB": "Constitution · curated memory · skills · stance · persona — owned by this repo, independent of any kernel.",
   "arch.cT": "Business",
@@ -305,5 +305,6 @@
   "models.chartLive": "Updated {ts} UTC · {installs} installs · {requests} requests · {tokens} tokens",
   "models.chartEmpty": "Pipeline live — waiting for the first install to report.",
   "models.breakModels": "Models in use",
-  "models.breakScenarios": "Activity"
+  "models.breakScenarios": "Activity",
+  "models.unreachable": "The stats endpoint is deployed, but this page could not reach it on this visit — the numbers on it are never fabricated, so it shows none rather than stale or invented ones."
 }

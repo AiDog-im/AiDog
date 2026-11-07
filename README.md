@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/badge/release-0.5.53-blue?style=flat-square" alt="release 0.5.53"></a>
+  <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-2081%2F2081-brightgreen?style=flat-square" alt="core tests 2081/2081">
   <img src="https://img.shields.io/badge/console_smoke-432%2F432-brightgreen?style=flat-square" alt="console smoke 432/432">
@@ -37,8 +37,8 @@
 </p>
 
 > 🌍 **Public repository** (published 2026-10-27) — issues, discussions and
-> pull requests are open; internal design/research history lives in the
-> owner-only vault (`aidog-im/aidog-internal`).
+> pull requests are open; internal design and research history stays in the
+> owner's private archive and is never published here.
 > 🟢 **Permanently free — forever, no exceptions.** No paid tier, no usage
 > fees, no feature locked behind a payment. Ever.
 
@@ -192,7 +192,7 @@ Every release is cut only after these run green on a clean tree:
 | Suite | Result |
 |---|---|
 | `mycore` core suite | **2081/2081** |
-| Console smoke (live HTTP) | **432/432** |
+| Console smoke (live HTTP) | **432/432** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
 | Setup wizard | **99/99** |
@@ -231,8 +231,8 @@ the marketing site ships its own **302-key** bilingual pack.
 - **Web3** — [`exchanges`](docs/features/exchanges.md) (nine venues, orders behind a human approval gate)
 - **Skills ecosystem** — [`skills_ecosystem`](docs/features/skills_ecosystem.md) (official directory, public skills repo, dual-gate review, remote catalog API)
 
-Design history and third-party research notes live in the owner-only vault
-(`aidog-im/aidog-internal`); they are never exported here.
+Design history and third-party research notes stay in the owner's private
+archive and are never exported here.
 
 ## Roadmap
 
