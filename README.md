@@ -16,8 +16,8 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2193%2F2193-brightgreen?style=flat-square" alt="core tests 2193/2193">
-  <img src="https://img.shields.io/badge/console_smoke-539%2F539-brightgreen?style=flat-square" alt="console smoke 539/539">
+  <img src="https://img.shields.io/badge/core_tests-2237%2F2237-brightgreen?style=flat-square" alt="core tests 2237/2237">
+  <img src="https://img.shields.io/badge/console_smoke-547%2F547-brightgreen?style=flat-square" alt="console smoke 547/547">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -200,8 +200,8 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2193/2193** |
-| Console smoke (live HTTP) | **539/539** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
+| `mycore` core suite | **2237/2237** |
+| Console smoke (live HTTP) | **547/547** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |
 | Setup wizard | **113/113** |
@@ -214,7 +214,7 @@ Every release is cut only after these run green on a clean tree:
 Catalog scope: **28 registered tools** · **9 exchange venues** · **27
 real-machine E2E suites** — all green.
 
-Locale packs: `en` (default) + `zh`, **1455 keys** each, parity lint in CI;
+Locale packs: `en` (default) + `zh`, **1457 keys** each, parity lint in CI;
 the marketing site ships its own **337-key** bilingual pack.
 
 ## Documentation

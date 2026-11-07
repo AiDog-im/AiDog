@@ -5292,6 +5292,15 @@ function mycoreExtraPayload() {
       const n = parseInt(bEl.value, 10);
       if (Number.isFinite(n)) out.budget = n;   // server enforces 4000..1000000
     }
+    const tEl = document.getElementById("mycTimeout");
+    if (tEl && String(tEl.value || "").trim() !== "") {
+      const n = parseInt(tEl.value, 10);
+      // untouched default (120) never rides along — B1 dirty-block discipline;
+      // the server enforces 5..600 and its refusal is the honest signal
+      if (Number.isFinite(n) && n !== (Number(stored.timeout) || 120)) {
+        out.timeout = n;
+      }
+    }
     // X12/X15 opt-in switches: they enter the payload only when they really
     // say something (a non-zero day count, or a stored value being cleared) —
     // an untouched default never rides along and never rewrites the document.
@@ -5869,6 +5878,10 @@ function initSettingsPanels() {
   discMsg(null);
   discPaintAdd();
   setField("mycBudget", myc.budget);
+  // backlog (owner 2026-11-02): model timeout — show the stored value, the
+  // DEFAULT (120) when absent; programmatic fill fires no input event, so an
+  // untouched field never raises mycDirty.
+  setField("mycTimeout", myc.timeout == null ? 120 : myc.timeout);
   // Wave 6 delta2: the two opt-in switches round-trip like the other fields
   setField("mycPrune", myc.session_prune_days);
   setField("mycEffort", myc.reasoning_effort || "");
@@ -9930,7 +9943,7 @@ if (exCapSaveBtnEl) exCapSaveBtnEl.addEventListener("click", exCapSave);
     mycDirty = true; mycRestartDirty = true;
   });
 });
-["mycUpstreams", "mycModels", "mycBudget", "mycPrune", "mycEffort"].forEach(id => {
+["mycUpstreams", "mycModels", "mycBudget", "mycPrune", "mycEffort", "mycTimeout"].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener("input", () => { mycDirty = true; });
 });
