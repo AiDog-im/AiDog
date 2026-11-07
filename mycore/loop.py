@@ -12,6 +12,7 @@ English comments per repo i18n policy.
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -122,7 +123,8 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
              budget_chars: int | None = None,
              on_delta: Callable[[str], None] | None = None,
              budget_tokens: int | None = None,
-             should_stop: Callable[[], bool] | None = None) -> TurnResult:
+             should_stop: Callable[[], bool] | None = None,
+             run_deadline: float | None = None) -> TurnResult:
     """Drive one user turn to completion. Mutates `messages` in place (the
     caller owns session state); never raises for model/tool failures.
 
@@ -148,6 +150,16 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
     "[mycore: turn stopped by the operator (STOP) ...]". None (default)
     keeps today's behavior byte-for-byte.
     """
+    # L3 (owner2026-11-07): turn wall-clock ceiling — prior art's separate
+    # run deadline. None -> resolve from settings (default1800s,0 = off);
+    # an explicit value (tests pass tiny ones) is used as given.
+    if run_deadline is None:
+        try:
+            from . import cli as _cli          # local import: cli imports loop
+            run_deadline = _cli.resolve_run_deadline()
+        except Exception:                      # noqa: BLE001 — never break a turn
+            run_deadline = None
+    t_start = time.monotonic() if run_deadline else None
     emit = on_event or (lambda kind, data: None)
     tool_log: list[dict] = []
     tools = registry.schema()
@@ -181,6 +193,13 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
         # model was never called for this iteration.
         if should_stop is not None and should_stop():
             note = (f"[mycore: turn stopped by the operator (STOP) after "
+                    f"{max(0, it - 1)} completed iteration(s)]")
+            messages.append({"role": "assistant", "content": note})
+            return stop("aborted", note)
+        if run_deadline and t_start is not None and \
+                (time.monotonic() - t_start) > run_deadline:
+            note = (f"[mycore: turn stopped by the run deadline "
+                    f"({int(run_deadline)}s) after "
                     f"{max(0, it - 1)} completed iteration(s)]")
             messages.append({"role": "assistant", "content": note})
             return stop("aborted", note)

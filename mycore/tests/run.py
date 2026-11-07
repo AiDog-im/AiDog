@@ -161,12 +161,32 @@ def test_model() -> None:
             check("model: payload carries tools", "tools" in body or True)
             raise ModelError("transport failure: URLError")
 
+        # L2 (owner2026-11-07): a transport TIMEOUT retries the SAME unit
+        # TRANSPORT_RETRY_MAX times before the chain gives up.
+        t_calls = {"n": 0}
+
+        def timeout_transport(url, headers, payload, timeout):
+            t_calls["n"] += 1
+            raise ModelError("transport failure: TimeoutError")
+
+        t_err = None
+        # distinct endpoint identity: the shared health/cooldown registry is
+        # process-wide — poisoning the DEFAULT identity here made a LATER
+        # suite flaky inside the30s cooldown window (d6 order-interaction).
+        t_cfg = ModelConfig(api_key_env="MYCORE_TEST_KEY",
+                            base_url="http://127.0.0.1:39991/v1")
+        try:
+            ChatClient(t_cfg, transport=timeout_transport).chat(
+                [{"role": "user", "content": "hi"}])
+        except ModelError as e:
+            t_err = e
         c2 = ChatClient(cfg, transport=bad_transport)
         try:
             c2.chat([{"role": "user", "content": "hi"}])
             check("model: transport failure raises", False)
         except ModelError as e:
-            check("model: transport failure raises", True)
+            check("model: transport failure raises + timeout retries",
+                  t_err is not None and t_calls["n"] == 3)
             check("model: error message hides key",
                   "sk-secret" not in str(e) and "MYCORE_TEST_KEY" not in str(e).replace("key[", ""))
 
@@ -175,11 +195,13 @@ def test_model() -> None:
 
         def capture(url, headers, payload, timeout):
             seen.update(headers)
+            seen["_timeout"] = timeout
             return json.dumps(fake_response(text="ok"))
 
         ChatClient(cfg, transport=capture).chat([{"role": "user", "content": "x"}])
-        check("model: sends Bearer when key set",
-              seen.get("Authorization", "").startswith("Bearer "))
+        check("model: sends Bearer when key set + loopback idle floor",
+              seen.get("Authorization", "").startswith("Bearer ")
+              and seen.get("_timeout", 0) >= 1800)
         check("model: key value in header only",
               seen.get("Authorization") == "Bearer sk-secret-XYZ-should-never-appear")
     finally:
@@ -255,9 +277,18 @@ def test_registry_and_tools() -> None:
         check("tools: glob **/ hits top-level + nested",
               "model.py" in r and "sub/loop.py" in r, r[:120])
 
-        # run_bash: honest failure shape (nonexistent command -> non-zero exit line)
+        # run_bash: honest failure shape + multiline/bashism fidelity
+        # (owner fix 2026-11-07: local backend now /bin/bash — a multi-line
+        # pipefail script must parse AND newlines must survive byte-for-byte;
+        # under the old /bin/sh "Illegal option" would land in stderr.)
+        r_ml = reg.dispatch("run_bash", {"command":
+            "set -o pipefail\nprintf 'A\\nB\\n' | cat\nprintf 'C\\n'"})
         r = reg.dispatch("run_bash", {"command": "exit 3"})
-        check("tools: bash exit reported", r.startswith("exit=3"), r[:40])
+        check("tools: bash exit reported + multiline/pipefail fidelity",
+              r.startswith("exit=3")
+              and r_ml.startswith("exit=0") and "A\nB\nC" in r_ml
+              and "Illegal" not in r_ml,
+              r_ml[:90])
         r = reg.dispatch("run_bash", {"command": ""})
         check("tools: bash empty -> ERROR", r.startswith("ERROR:"), r[:60])
 
@@ -16105,11 +16136,14 @@ def test_leash() -> None:
             calls["n"] += 1
             return {"choices": [{"message": {"role": "assistant",
                                                "content": "ok"}}]}
+        res_d = _rt(msgs(), chat_final, reg, run_deadline=0.000001)
         res = _rt(msgs(), chat_final, reg, should_stop=lambda: True)
-        check("leash: should_stop at the iteration top = aborted, no model call",
+        check("leash: should_stop at the iteration top = aborted ( + run deadline )",
               res.stop == "aborted" and calls["n"] == 0
-              and "stopped by the operator" in res.text,
-              f"{res.stop} n={calls['n']} {res.text[:60]}")
+              and "stopped by the operator" in res.text
+              and res_d.stop == "aborted" and "run deadline" in res_d.text
+              and calls["n"] == 0,
+              f"{res.stop} n={calls['n']} {res.text[:60]} | dl={res_d.stop}")
 
         # pre-dispatch: the model answers with a tool call, stop flips after
         # the iteration-top check -> the tool must never run.
