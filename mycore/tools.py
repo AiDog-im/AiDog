@@ -75,7 +75,7 @@ RESULT_CAPS: dict[str, int] = {
     "community_post": 4000, "exchange_markets": 4000,
     "exchange_portfolio": 4000, "exchange_orders": 4000,
     "exchange_prepare_order": 4000, "exchange_execute_order": 4000,
-    "exchange_plans": 4000,
+    "exchange_plans": 4000, "chain_read": 4000,
     "browser_open": 4000, "browser_click": 4000, "browser_type": 4000,
     "browser_screenshot": 4000, "browser_close": 4000,
     # car C: the settings tool answers short lists/confirmations (the plan
@@ -116,6 +116,11 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # (prepare/execute/plans ride the SAME slot gate as the account reads)
     "exchange_markets", "exchange_portfolio", "exchange_orders",
     "exchange_prepare_order", "exchange_execute_order", "exchange_plans",
+    # Web3/finance skills Phase 1 (design doc §3, D1=B): READ-ONLY JSON-RPC
+    # on the public CHAINS endpoints — keyless, reads only; the method
+    # whitelist admits no send/sign method and the core suite pins that
+    # absence against mycore/exchanges.py
+    "chain_read",
     # car C (agent foundation): propose console settings on the owner's
     # behalf — writes stay impossible from the tool (owner-approved plans)
     "settings"})
@@ -1124,6 +1129,23 @@ def _exchange_markets(venue: str, symbol: str | None = None) -> str:
         raise ToolError(str(e)) from None
 
 
+def _chain_read(chain: str, method: str, address: str | None = None,
+                tx_hash: str | None = None, contract: str | None = None,
+                data: str | None = None) -> str:
+    """`chain_read` handler (Web3/finance skills Phase 1): READ-ONLY
+    JSON-RPC on public chain endpoints. ExchangeError (closed grammar,
+    upstream failure) becomes the honest ERROR line. The method whitelist
+    lives in `mycore.exchanges.CHAIN_READ` and admits reads only — no
+    signing and no transaction broadcast exists on this path."""
+    from . import exchanges  # local import: optional dependency path
+    try:
+        return exchanges.chain_read(chain, method, address=address,
+                                    tx_hash=tx_hash, contract=contract,
+                                    data=data)
+    except exchanges.ExchangeError as e:
+        raise ToolError(str(e)) from None
+
+
 def _exchange_portfolio(venue: str) -> str:
     """`exchange_portfolio` handler (W1 Web3 car): READ-ONLY account
     balances for one CEX venue (slot-gated at registration). ExchangeError
@@ -1604,6 +1626,53 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                                              "the venue's default pair."}},
                 "required": ["venue"]},
                lambda venue, symbol=None: _exchange_markets(venue, symbol))
+    # --- Web3/finance skills Phase 1 (design doc §3, D1=B): chain_read —
+    # READ-ONLY JSON-RPC on the three public CHAINS endpoints. Always
+    # registers, same keyless rationale as exchange_markets: configuration
+    # resolves at CALL time, so a closed-grammar mistake or a dead upstream
+    # surfaces as an honest ERROR line, never a missing capability. The
+    # enums come from mycore.exchanges.CHAIN_READ (reads only — the core
+    # suite pins the no-send/no-sign absence against that source).
+    if ex_mod is not None and getattr(ex_mod, "CHAIN_READ", None):
+        cr_chains = list(ex_mod.CHAIN_READ)
+        cr_methods = sorted({m for ms in ex_mod.CHAIN_READ.values()
+                             for m in ms})
+    else:
+        cr_chains = ["base", "ethereum", "solana"]
+        cr_methods = ["eth_blockNumber", "eth_call", "eth_getBalance",
+                      "eth_getTransactionCount",
+                      "eth_getTransactionReceipt", "getBalance", "getSlot",
+                      "getTokenAccountsByOwner", "getSignaturesForAddress"]
+    r.register("chain_read",
+               "READ-ONLY JSON-RPC on public chain endpoints (base, "
+               "ethereum, solana) — keyless, no credential. Reads chain "
+               "heads, native balances, nonces, contract state (eth_call), "
+               "transaction receipts and Solana signature history. Never "
+               "signs and never broadcasts: the method whitelist admits "
+               "reads only (orders stay behind exchange_prepare_order -> "
+               "console approval -> exchange_execute_order).",
+               {"type": "object",
+                "properties": {
+                    "chain": {"type": "string", "enum": cr_chains},
+                    "method": {"type": "string", "enum": cr_methods},
+                    "address": {"type": "string",
+                                "description": "Account for balance, nonce "
+                                               "and history reads: EVM "
+                                               "0x + 40 hex, or Solana "
+                                               "base58."},
+                    "tx_hash": {"type": "string",
+                                "description": "0x + 64 hex; required by "
+                                               "eth_getTransactionReceipt."},
+                    "contract": {"type": "string",
+                                 "description": "0x + 40 hex contract; "
+                                                "required by eth_call."},
+                    "data": {"type": "string",
+                             "description": "0x even-length calldata; "
+                                            "required by eth_call."}},
+                "required": ["chain", "method"]},
+               lambda chain, method, address=None, tx_hash=None,
+               contract=None, data=None:
+               _chain_read(chain, method, address, tx_hash, contract, data))
     if r.exchange_note is None:  # probe healthy: gate the account reads on slots
         try:
             if ex_ready:

@@ -24,7 +24,7 @@ matrix).
 ## 1. Three-layer structure
 
 ```
-Layer 1  this repo, overlay/skills/            core skills shipped with the product (6, all passing lint + skill_route pre-filter)
+Layer 1  this repo, overlay/skills/            core skills shipped with the product (10, all passing lint + skill_route pre-filter)
 Layer 2  the standalone skills repo (public GitHub)   single source of truth for officially recommended skills: catalog + category directories + dual gates + versions
 Layer 3  the aidog.im catalog page             static JSON catalog: browsable by users; the product reads the same JSON
 ```
@@ -182,7 +182,7 @@ and any changes (if any) are declared item by item in `THIRD_PARTY.md`.
 never part of a user install.*
 
 ```bash
-cd aidog-skills && python3 tools/lint.py   # standalone repo: === 324/324 PASS === (including 0 leak hits)
+cd aidog-skills && python3 tools/lint.py   # standalone repo: === 420/420 PASS === (including 0 leak hits)
 python3 tmp/e2e_skills_catalog.py  # catalog schema + page rendering + site gate regression (PASS n/n)
 python3 tmp/e2e_skills_parity.py   # car H: L2 ≡ site catalog ≡ staged ≡ bundled (68/68, honest SKIP without the clone)
 python3 tmp/e2e_car_h.py           # car H: install/toggle/uninstall + proxy contract (65/65, isolated console)
