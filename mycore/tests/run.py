@@ -2022,6 +2022,118 @@ def test_service() -> None:
                   fake.sends[-1][1].startswith("unknown command"),
                   fake.sends[-1][1])
 
+            # --- release awareness (car G, owner ask #7) ------------------
+            # The update-module loader is stubbed: zero network, zero git.
+            from lib import i18n as _i18n
+            real_loader = svc_mod._load_update_mod
+            fetch_calls = {"n": 0}
+
+            class _FakeRel:
+                def __init__(self, installed, latest, fail=False):
+                    self._i, self._l, self._fail = installed, latest, fail
+                def installed_version(self):
+                    return self._i
+                def fetch_manifest(self):
+                    fetch_calls["n"] += 1
+                    if self._fail:
+                        raise RuntimeError("egress down")
+                    return {"version": self._l}
+                def newer(self, a, b):
+                    return (a,) > (b,)
+
+            def staged(doc):
+                (state1 / "release_notice.json").write_text(
+                    json.dumps(doc), encoding="utf-8")
+            try:
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.69")
+                svc.handle_update(mk_update(30, 111, 123456789, "/version"))
+                v_ok = fake.sends[-1][1]
+                check("service: /version up to date says so (installed shown)",
+                      "0.5.69" in v_ok and "up to date" in v_ok, v_ok[:140])
+
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.70")
+                staged({"day": "x", "pending": "0.5.70"})
+                svc.handle_update(mk_update(31, 111, 123456789, "/version"))
+                v_up = fake.sends[-1][1]
+                check("service: /version update -> latest + apply command",
+                      "0.5.70" in v_up and "aidog_update.py apply" in v_up,
+                      v_up[:170])
+                st_after = json.loads(
+                    (state1 / "release_notice.json").read_text())
+                check("service: /version consumes the staged notice (no dup)",
+                      not st_after.get("pending")
+                      and st_after.get("notified") == "0.5.70",
+                      str(st_after))
+
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", None, fail=True)
+                svc.handle_update(mk_update(32, 111, 123456789, "/version"))
+                v_err = fake.sends[-1][1]
+                check("service: /version offline -> honest unknown + installed",
+                      "unknown" in v_err and "0.5.69" in v_err
+                      and "RuntimeError" in v_err, v_err[:170])
+
+                # daily check: stages once, day-capped, then one-shot attach
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.70")
+                (state1 / "release_notice.json").unlink(missing_ok=True)
+                svc._maybe_release_check()
+                n1 = fetch_calls["n"]
+                svc._maybe_release_check()          # same UTC day -> no refetch
+                check("service: release check is day-capped (one network call)",
+                      fetch_calls["n"] == n1, f"{n1} -> {fetch_calls['n']}")
+                stg = json.loads(
+                    (state1 / "release_notice.json").read_text())
+                check("service: newer release stages exactly one pending notice",
+                      stg.get("pending") == "0.5.70", str(stg))
+
+                svc.handle_update(mk_update(33, 111, 123456789, "hello again"))
+                note1 = fake.sends[-1][1]
+                check("service: next message carries the release note once",
+                      "0.5.70" in note1 and "pong" in note1, note1[:220])
+                svc.handle_update(mk_update(34, 111, 123456789, "and again"))
+                note2 = fake.sends[-1][1]
+                check("service: the note is one-shot (second message clean)",
+                      note2 == "pong", repr(note2))
+
+                # commands never carry the note; the pending survives them
+                staged({"day": "x", "pending": "0.5.70"})
+                svc.handle_update(mk_update(35, 111, 123456789, "/help"))
+                h_txt = fake.sends[-1][1]
+                check("service: commands do not carry the release note",
+                      "/version" in h_txt and "0.5.70" not in h_txt,
+                      h_txt[:90])
+                st_h = json.loads(
+                    (state1 / "release_notice.json").read_text())
+                check("service: an unconsumed pending survives a command",
+                      st_h.get("pending") == "0.5.70", str(st_h))
+
+                # already-upgraded guard: pending == VERSION on disk -> cleared
+                ver = (Path(svc.repo) / "VERSION").read_text().strip()
+                staged({"day": "x", "pending": ver})
+                svc.handle_update(mk_update(36, 111, 123456789, "hello three"))
+                g_txt = fake.sends[-1][1]
+                check("service: pending == installed (already upgraded) sends no note",
+                      g_txt == "pong", repr(g_txt))
+
+                # fail-soft: a failed check marks the day, stages nothing,
+                # logs one type word, and never raises into the loop.
+                # "yesterday" in the state makes the day-cap let it run
+                # WITHOUT touching the shared test clock.
+                staged({"day": "1969-01-01"})
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", None, fail=True)
+                svc._maybe_release_check()
+                st_f = json.loads(
+                    (state1 / "release_notice.json").read_text())
+                check("service: failed check marks the day, stages nothing, logs RELEASE_ERR",
+                      st_f.get("pending") is None
+                      and "RELEASE_ERR" in svc.log.read_text(), str(st_f))
+
+                check("service: /help lists /version in both packs",
+                      "/version" in _i18n.get("en", "cmd.help.body")
+                      and "/version" in _i18n.get("zh", "cmd.help.body"))
+            finally:
+                svc_mod._load_update_mod = real_loader
+                (state1 / "release_notice.json").unlink(missing_ok=True)
+
             # evolution commands (Phase A loop — offline, tmp repo root)
             evo_repo = tdp / "evo_repo"
             (evo_repo / "web").mkdir(parents=True)

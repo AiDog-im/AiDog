@@ -14,7 +14,7 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="最新版本"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2137%2F2137-brightgreen?style=flat-square" alt="核心测试 2137/2137">
+  <img src="https://img.shields.io/badge/core_tests-2150%2F2150-brightgreen?style=flat-square" alt="核心测试 2150/2150">
   <img src="https://img.shields.io/badge/console_smoke-509%2F509-brightgreen?style=flat-square" alt="控制台冒烟 509/509">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
@@ -49,13 +49,19 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
   归档分层）+ 数字记忆体协议：唯一真值、跨内核可恢复、每次 reflect 回写。
   没有你读不了、审不动的向量库。
 - **自研核心**：运行时内核 `mycore` 从零自研——诚实的函数调用循环（停止
-  原因明示）、**39 模块 ≈23.0k 代码行、2137 项测试**，换芯后零上游依赖。
+  原因明示）、**39 模块 ≈23.2k 代码行、2150 项测试**，换芯后零上游依赖。
   换的是内核，永远不换「我」。
 
 它通过 **Telegram**、**回环 Web 控制台**、**桌面 HUD 壳**和**语音**与你
 交谈——背后是 9 路渠道网关、带确定性预路由的技能系统、自然语言定时任务、
 子代理、MCP，以及制度化的自进化闭环（`/learn`、`/reflect`、lint 把关写入）
 ——成熟度随使用积累。
+
+**平台矩阵。** Linux 走 `install.sh`（参考路径，完整实测，含 Windows 上的
+WSL2），Windows 同一条 WSL2 命令，macOS 预期可用但尚未实测，iOS/Android
+走 Telegram 机器人加官网——控制台只绑定在你自己机器的回环地址上，手机
+访问走 SSH 隧道，设计上就没有云端控制台。诚实矩阵见官网 Platforms 段，
+指南见 [docs/installation.md](docs/installation.md)。
 
 **Web3，人在闸上。** 自 v0.5.38 起，9 家场所一表打尽，挂在六个
 `exchange_*` 工具之下——公开行情无需任何凭据，账户与下单工具槽位门控
@@ -71,7 +77,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 
 |  | 能力 | 提供什么 |
 |---|---|---|
-| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——39 模块、2137 测试、零上游 |
+| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——39 模块、2150 测试、零上游 |
 | 🎭 | **宪法人格** | `SOUL.md` 在系统栈最顶端；红线与语气每轮生效，而非抽样自人设提示词 |
 | 🧠 | **策展记忆** | 有界 Markdown 预算 + 归档分层 + 数字记忆体协议；`memory` 套件 58/58 |
 | 🧩 | **技能 + 确定性路由** | `SKILL.md` frontmatter（业界标准字段），路由预筛先选 TOP3 **再**加载正文——30/30 |
@@ -175,7 +181,7 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 
 | 套件 | 结果 |
 |---|---|
-| `mycore` 核心套件 | **2137/2137** |
+| `mycore` 核心套件 | **2150/2150** |
 | 控制台冒烟（真实 HTTP） | **509/509**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
 | 技能路由 | **30/30** |
 | 记忆持久化 | **58/58** |

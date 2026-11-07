@@ -5,6 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>I'm AiDog</title>
 <link rel="icon" href="/static/favicon.png" type="image/png">
+<!-- car G (PWA, adjudicated 2026-11-02): manifest + theme only — NO service
+     worker, this page always reflects live local state. The install prompt
+     appears only when the page is reachable (loopback or your own HTTPS
+     tunnel); there is no offline copy of a console that must stay truthful. -->
+<link rel="manifest" href="/static/manifest.webmanifest">
+<meta name="theme-color" content="#2892ff">
+<link rel="apple-touch-icon" href="/static/icon-192.png">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -2086,6 +2093,9 @@
                PAINTED here from the loopback /api/console facts — a lost-token
                user sees exactly where to run the grep above. -->
           <div class="stat-note" id="accessInstall" hidden></div>
+          <!-- car G (#5): honest phone/LAN note — the PWA install chip only
+               appears over HTTPS; no cloud endpoint exists by design. -->
+          <div class="stat-note" data-i18n="onb.accessLan">Using this console on a phone or another machine: the server binds 127.0.0.1 only, so reach it through an SSH tunnel you control (for example ssh -L 19167:127.0.0.1:19167) — there is no cloud endpoint. Once the page answers over HTTPS it installs to your home screen as an app; over a plain http:// tunnel the browser will not offer the install.</div>
           <div class="ctl-row token-row">
             <label data-i18n="ctl.token" title="WEB_TOKEN">Access token</label>
             <input type="password" id="tokenInput" autocomplete="off"
