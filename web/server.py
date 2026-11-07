@@ -4325,8 +4325,10 @@ def chat_context_usage() -> dict:
                  "compaction_enabled": budget is not None,
                  "over_budget": None}
     try:
-        stack = build_system_stack(context_dirs=resolve_context_dirs(),
-                                   user_rules=resolve_user_rules())
+        stack = build_system_stack(
+            context_dirs=resolve_context_dirs(),
+            user_rules=resolve_user_rules(),
+            runtime_facts=cli.resolve_runtime_facts())
         history = [m for m in Session(chat_session_path()).load()
                    if m.get("role") != "system"]
         sys_chars = measure(stack)
@@ -4673,8 +4675,10 @@ def _run_webhook_turn(text: str, sender: str):
         history = []
     history = [m for m in history if m.get("role") != "system"]
 
-    stack = build_system_stack(context_dirs=resolve_context_dirs(),
-                               user_rules=resolve_user_rules())
+    stack = build_system_stack(
+        context_dirs=resolve_context_dirs(),
+        user_rules=resolve_user_rules(),
+        runtime_facts=cli.resolve_runtime_facts(cfg.model))
     messages = stack + history
     pre_ids = {id(m) for m in messages}
     messages.append({"role": "user", "content": text})
@@ -8332,8 +8336,10 @@ class Handler(BaseHTTPRequestHandler):
             history = []
         history = [m for m in history if m.get("role") != "system"]
 
-        stack = build_system_stack(context_dirs=resolve_context_dirs(),
-                                   user_rules=resolve_user_rules())
+        stack = build_system_stack(
+            context_dirs=resolve_context_dirs(),
+            user_rules=resolve_user_rules(),
+            runtime_facts=cli.resolve_runtime_facts(cfg.model))
         messages = stack + history
         pre_ids = {id(m) for m in messages}
         content = text
@@ -8476,8 +8482,10 @@ class Handler(BaseHTTPRequestHandler):
         folded request history, and this turn's user input. Stateless: no
         Session file is opened or written on this path."""
         cfg = cli.resolve_model_config()
-        messages = build_system_stack(context_dirs=resolve_context_dirs(),
-                                      user_rules=resolve_user_rules())
+        messages = build_system_stack(
+            context_dirs=resolve_context_dirs(),
+            user_rules=resolve_user_rules(),
+            runtime_facts=cli.resolve_runtime_facts(cfg.model))
         if client_system:
             messages.append({"role": "system", "content": client_system})
         messages.extend(history)
