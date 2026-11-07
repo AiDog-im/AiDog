@@ -44,6 +44,10 @@ with `$EDITOR secrets.env`:
   slot stays empty (fail-closed);
 - **every write is read back and syntax-checked** (`own-line KEY=value` for
   `secrets.env`, JSON re-parse for `web/settings.json`);
+- **one explicit region question** — `region [global/cn]` (ENTER keeps the
+  current value): a local feature-visibility choice, never detected (no
+  geo/locale probing); under `cn` the Telegram slots become optional in the
+  report;
 - at the end it offers to run the installer (doctor + boot + verify), or skip
   with `--no-boot`.
 
@@ -57,6 +61,40 @@ Non-interactive variants (CI / scripted):
 
 A non-TTY `aidog setup` (no flags) falls back to `--yes`, so scripts keep the
 old provision + boot + verify behavior without ever blocking on a prompt.
+
+## Windows (native shell over the WSL2 console)
+
+The console itself runs in WSL2 with the same `install.sh` command as
+Linux — that is where Python, tmux and the watchdog live. On top of it you
+can run the **native portable shell**:
+
+1. Install and boot the console in WSL2 (the Quick start above).
+2. Download `aidog-desktop-<version>-win.zip` from the
+   [GitHub Releases page](https://github.com/AiDog-im/AiDog/releases),
+   extract it anywhere — no installer, no registry entries.
+3. Start `aidog-desktop.exe`. The shell probes `http://127.0.0.1:19167`
+   (WSL2 forwards localhost) and attaches to the running console. If it
+   cannot find your install, set `AIDOG_REPO` to the clone path — the
+   shell's error page says the same thing.
+
+Honest boundaries: the Windows shell is **attach-only** — it never spawns
+the console (there is no python3/tmux stack to spawn on Windows); the
+artifact is **unsigned**; no macOS build is published. Verified 2026-11-03
+with the shell's own `--selftest` on Windows (attach + HUD bridge + IPC
+roundtrip green).
+
+## iOS / Android (phone access)
+
+There is no cloud console by design — the server binds loopback-only on
+your machine. From a phone you get the two supported faces:
+
+- **A chat channel** (the Telegram bot, or any of the nine adapters —
+  Feishu, DingTalk, WeChat, …): full assistant conversation, no tunnel
+  needed.
+- **The web console over an SSH tunnel you control**, for example
+  `ssh -L 19167:127.0.0.1:19167 <your-machine>`, then open
+  `http://127.0.0.1:19167` on the phone and add it to the home screen (the
+  console is a PWA; over plain http the browser may not offer the install).
 
 ## What the installer does
 
