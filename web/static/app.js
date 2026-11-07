@@ -70,6 +70,7 @@ async function loadLang(lang) {
   renderProfiles();            // profile rows (X11)
   refreshCheckpoints();        // checkpoint note (X10)
   refreshSkills();             // armory tags + descriptions (repaints ORCH too)
+  renderSkillCatalog();        // car H: chips/badges follow the pack too (rows cached)
   refreshEvolution();          // evolution badge / status / log
   loadBridgeStatus();          // bridge status line (car 6)
   renderOvState();             // round C (P4): status sentence follows the pack
@@ -2589,25 +2590,224 @@ async function refreshSkills() {
     const grid = document.getElementById("galGrid");
     const count = document.getElementById("galCount");
     const list = d.skills || [];
+    skillsMounted = new Set(list.map(s => s && s.id).filter(Boolean));
     count.textContent = list.length ? `×${list.length}` : "";
     if (!list.length) {
       grid.innerHTML = `<div class="gal-empty">${escapeHtml(t("gal.empty", "no skills mounted"))}</div>`;
+      renderSkillCatalog();
       return;
     }
-    grid.innerHTML = list.map(s => `
+    grid.innerHTML = list.map(s => {
+      const installed = s.source === "installed";
+      const enabled = s.enabled !== false;   // absent field = pre-car-H row
+      return `
       <div class="gal-card" data-id="${escapeHtml(s.id)}" tabindex="0">
         <span class="gal-tag ${escapeHtml(s.source)}">${escapeHtml(
           t("gal." + s.source, s.source))}</span>
         <div class="gal-name">${escapeHtml(s.name)}</div>
         <div class="gal-desc">${escapeHtml(s.desc || "—")}</div>
-      </div>`).join("");
+        <div class="gal-act" data-skl-act>
+          <button class="toggle" type="button" data-skl-toggle="${escapeHtml(s.id)}"
+                  aria-pressed="${enabled ? "true" : "false"}"
+                  title="${escapeHtml(t("skl.switch", "switch routing on/off"))}"><span></span></button>
+          <span class="stat-note">${enabled
+            ? escapeHtml(t("skl.on", "routes"))
+            : escapeHtml(t("skl.off", "never loads"))}</span>
+          ${installed ? `<button class="btn" type="button" data-skl-uninstall="${escapeHtml(s.id)}">${escapeHtml(t("skl.uninstall", "REMOVE"))}</button>` : ""}
+        </div>
+      </div>`;
+    }).join("");
     grid.querySelectorAll(".gal-card").forEach(el => {
-      const flip = () => el.classList.toggle("open");
+      const flip = e => {
+        if (e.target && e.target.closest && e.target.closest("[data-skl-act]")) return;
+        el.classList.toggle("open");
+      };
       el.addEventListener("click", flip);
       el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") {
-        e.preventDefault(); flip(); } });
+        e.preventDefault(); flip(e); } });
     });
+    renderSkillCatalog();
   } catch (e) { /* keep last render */ }
+}
+
+/* ---------------------------------- car H (§3.2 / brief 5.2): catalog ------
+   The official catalog browser: category chips + one card per row of
+   GET /api/skills/remote — the ONLY source (a fail-soft ladder, so an
+   unavailable catalog renders an honest banner and zero cards; never a
+   marketplace). INSTALL copies the staged package locally (no network, no
+   execution); availability chips come from the existing available/missing
+   projection. Every write is a Bearer POST with the server's own detail
+   rendered verbatim (bridge-card posture; values are never echoed by the
+   server, so nothing sensitive can land here). */
+let sklCat = "all";
+let skillsMounted = new Set();
+
+function sklMsg(text, err) {
+  const el = document.getElementById("sklMsg");
+  if (!el) return;
+  el.className = "save-state" + (err ? " err" : "");
+  el.textContent = text || "";
+}
+
+async function sklPost(path, payload) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    sklMsg(t("skl.needToken", "access token required — set it in Access"), true);
+    return null;
+  }
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload),
+    });
+    const doc = await res.json().catch(() => ({}));
+    return { ok: res.ok, doc };
+  } catch (e) {
+    return { ok: false, doc: { error: t("px.err", "console unreachable — try again") } };
+  }
+}
+
+function sklErr(res) {
+  if (!res) return "";
+  const details = Array.isArray(res.doc && res.doc.details) ? res.doc.details : [];
+  return details.length ? details.join("; ")
+    : String((res.doc && res.doc.error) || "");
+}
+
+function renderSkillCatalog() {
+  const grid = document.getElementById("sklCatalog");
+  const cats = document.getElementById("sklCats");
+  const unav = document.getElementById("sklUnavail");
+  const cnt = document.getElementById("sklCatCount");
+  if (!grid) return;
+  const rows = remoteSkillRows();
+  if (!rows || !rows.length) {
+    grid.innerHTML = "";
+    if (cats) cats.innerHTML = "";
+    if (cnt) cnt.textContent = "";
+    if (unav) {
+      const err = skillsRemoteData && skillsRemoteData.error
+        ? String(skillsRemoteData.error).slice(0, 160) : "";
+      unav.hidden = false;
+      unav.textContent = t("skl.unavail",
+        "official catalog unavailable right now — the bundled skills below are unaffected")
+        + (err ? " · " + err : "");
+    }
+    return;
+  }
+  if (unav) unav.hidden = true;
+  const used = [...new Set(rows.map(r => String(r.category || "")).filter(Boolean))].sort();
+  if (cats) {
+    const chips = [["all", t("skl.all", "ALL")],
+                   ...used.map(c => [c, t("skl.cat." + c, c)])];
+    if (!chips.some(c => c[0] === sklCat)) sklCat = "all";
+    cats.innerHTML = chips.map(([key, label]) =>
+      `<button class="skl-chip" type="button" data-skl-cat="${escapeHtml(key)}"
+               aria-pressed="${key === sklCat ? "true" : "false"}">${escapeHtml(label)}</button>`
+    ).join("");
+  }
+  const shown = rows.filter(r => sklCat === "all"
+    || String(r.category || "") === sklCat);
+  if (cnt) cnt.textContent = shown.length ? `×${shown.length}` : "";
+  grid.innerHTML = shown.map(r => {
+    const slug = String(r.slug || "");
+    const bundled = r.install_status === "bundled";
+    const installed = skillsMounted.has(slug);
+    const missing = Array.isArray(r.missing) ? r.missing : [];
+    const reqs = Array.isArray(r.requires) ? r.requires : [];
+    const reqHtml = reqs.map(name =>
+      `<span class="skl-req${missing.includes(name) ? " miss" : ""}">${escapeHtml(name)}</span>`
+    ).join("");
+    let action;
+    if (bundled) {
+      action = `<span class="skl-badge">${escapeHtml(t("skl.bundled", "BUNDLED"))}</span>`;
+    } else if (installed) {
+      action = `<span class="skl-badge done">✓ ${escapeHtml(t("skl.installedBadge", "INSTALLED"))}</span>`;
+    } else {
+      action = `<button class="btn primary" type="button" data-skl-install="${escapeHtml(slug)}">${escapeHtml(t("skl.install", "INSTALL"))}</button>`;
+    }
+    return `
+    <div class="gal-card skl-cat-card" data-skl-row="${escapeHtml(slug)}">
+      <span class="gal-tag">${escapeHtml(String(r.category || ""))}</span>
+      <div class="gal-name">${escapeHtml(String(r.name || slug))}<span class="skl-ver">v${escapeHtml(String(r.version || "?"))}</span></div>
+      <div class="gal-desc">${escapeHtml(String(r.description || "—"))}</div>
+      <div class="skl-reqs">${reqHtml}</div>
+      <div class="skl-act">${action}</div>
+    </div>`;
+  }).join("");
+}
+
+async function sklInstall(slug) {
+  sklMsg(t("skl.installing", "installing…"), false);
+  const res = await sklPost("/api/skills/install", { slug });
+  if (res && res.ok) {
+    sklMsg(t("skl.msg.installed", "{s} installed ✓ (mounted below)")
+      .replace("{s}", slug), false);
+    beep(880, 0.06);
+    await refreshSkills();       // repaints gallery + catalog badge together
+  } else {
+    sklMsg(sklErr(res) || t("skl.msg.installFailed", "install failed"), true);
+  }
+}
+
+async function sklToggle(id, on) {
+  const res = await sklPost("/api/skills/toggle", { slug: id, enabled: on });
+  if (res && res.ok) {
+    sklMsg(on ? t("skl.msg.routed", "{s} routes again ✓")
+              : t("skl.msg.muted", "{s} installed but never loads ✓")
+        .replace("{s}", id), false);
+    await refreshSkills();
+  } else {
+    sklMsg(sklErr(res) || t("skl.msg.toggleFailed", "switch failed"), true);
+  }
+}
+
+async function sklUninstall(id) {
+  const res = await sklPost("/api/skills/uninstall", { slug: id });
+  if (res && res.ok) {
+    sklMsg(t("skl.msg.removed", "{s} removed (reinstall anytime from the catalog)")
+      .replace("{s}", id), false);
+    beep(660, 0.06);
+    await refreshSkills();
+  } else {
+    sklMsg(sklErr(res) || t("skl.msg.removeFailed", "remove failed"), true);
+  }
+}
+
+/* one delegated listener for the whole Skills view — chips, install,
+   switches and removals; bound exactly once at boot */
+function wireSkillsActions() {
+  const view = document.getElementById("view-skills");
+  if (!view || view.dataset.sklWired) return;
+  view.dataset.sklWired = "1";
+  view.addEventListener("click", e => {
+    const chip = e.target.closest("[data-skl-cat]");
+    if (chip) {
+      sklCat = String(chip.getAttribute("data-skl-cat") || "all");
+      renderSkillCatalog();
+      return;
+    }
+    const inst = e.target.closest("[data-skl-install]");
+    if (inst) {
+      const slug = String(inst.getAttribute("data-skl-install") || "");
+      if (slug) sklInstall(slug);
+      return;
+    }
+    const tog = e.target.closest("[data-skl-toggle]");
+    if (tog) {
+      const id = String(tog.getAttribute("data-skl-toggle") || "");
+      const on = tog.getAttribute("aria-pressed") === "true";
+      if (id) sklToggle(id, !on);
+      return;
+    }
+    const un = e.target.closest("[data-skl-uninstall]");
+    if (un) {
+      const id = String(un.getAttribute("data-skl-uninstall") || "");
+      if (id) sklUninstall(id);
+    }
+  });
 }
 
 /* ------------------------------------------------------------ evolution -- */
@@ -3410,6 +3610,8 @@ async function saveSettings() {
   if (chanDirty) payload.channels = channelsPayload();
   // car 6: a half-edited bridge block joins the save like every other block
   if (bridgeDirty) payload.bridge = bridgePayload();
+  // car H: the outbound proxy card rides the same dirty-block contract
+  if (proxyDirty) payload.outbound_proxy = proxyPayload();
   // car 7 (D11): guardrails + obedience ride the same dirty-block contract.
   if (guardDirty) {
     payload.guardrails = {
@@ -3521,6 +3723,7 @@ async function saveSettings() {
     chanDirty = false; usageDirty = false; mycDirty = false;
     mycRestartDirty = false;
     bridgeDirty = false;
+    proxyDirty = false;
     guardDirty = false; obedDirty = false;
     ledDirty = false;
     if (payload.ledger) loadLedgerStatus();
@@ -3531,6 +3734,7 @@ async function saveSettings() {
     if (hookPatch) { hookDirty.clear(); renderHooks(); }
     if (payload.channels) { renderChannels(); loadChanStatus(); }
     if (payload.bridge) { bridgePrefill(); loadBridgeStatus(); }
+    if (payload.outbound_proxy) proxyPrefill();
     if (toolsDirty) { toolsDirty = false; renderToolsOff(); }
     beep(880, 0.06);
     scheduleRefresh();
@@ -4106,6 +4310,162 @@ function wireBridge() {
          () => connTest(document.getElementById(btnId), name, outId)));
 }
 
+/* --------------------------- car H (§3.4): outbound proxy card ------------
+   Bridge-card posture: its OWN save button (TEST always reports the SAVED
+   state, never a half-typed edit), a dirty flag that joins the global save
+   exactly like the bridge's, and NO credential field — the auth lives in
+   the AIDOG_PROXY_AUTH slot row (settings.json carries no credentials by
+   design: the model-facing `settings get` reads that file). */
+let proxyDirty = false;
+
+function proxyPayload() {
+  const tog = document.getElementById("proxyToggle");
+  return {
+    enabled: !!tog && tog.getAttribute("aria-pressed") === "true",
+    url: (((document.getElementById("proxyUrl") || {}).value) || "").trim(),
+  };
+}
+
+function proxyPrefill() {
+  const b = (settings.outbound_proxy && typeof settings.outbound_proxy === "object")
+    ? settings.outbound_proxy : {};
+  const el = document.getElementById("proxyUrl");
+  if (el) el.value = b.url == null ? "" : String(b.url);
+  const tog = document.getElementById("proxyToggle");
+  if (tog) tog.setAttribute("aria-pressed",
+                            b.enabled === true ? "true" : "false");
+  proxyDirty = false;
+}
+
+async function postProxy(partial) {
+  const msg = document.getElementById("proxyMsg");
+  const say = (text, err) => {
+    if (!msg) return;
+    msg.className = "save-state" + (err ? " err" : "");
+    msg.textContent = text;
+  };
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    say(t("cred.needToken", "access token required — set it in Access"), true);
+    return false;
+  }
+  say(t("px.working", "saving…"), false);
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ outbound_proxy: partial }),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      // verbatim server details — grammar words, never a value
+      const details = Array.isArray(body.details) ? body.details : [];
+      say(details.length ? details.join("; ")
+           : (body.error || ("HTTP " + res.status)), true);
+      return false;
+    }
+    settings = Object.assign(settings, body.settings || {});
+    proxyDirty = false;
+    say(body.changed === true ? t("save.ok", "saved ✓")
+                              : t("save.same", "no change ✓"), false);
+    // sync ONLY the switch from server truth (an edit is never discarded)
+    const tog = document.getElementById("proxyToggle");
+    const stored = settings.outbound_proxy || {};
+    if (tog) tog.setAttribute("aria-pressed",
+                              stored.enabled === true ? "true" : "false");
+    beep(880, 0.06);
+    return true;
+  } catch (e) {
+    say(t("px.err", "console unreachable — try again"), true);
+    return false;
+  }
+}
+
+async function proxyTest() {
+  const out = document.getElementById("proxyTestOut");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!out) return;
+  if (!token) {
+    out.className = "save-state err";
+    out.textContent = t("cred.needToken", "access token required — set it in Access");
+    return;
+  }
+  out.className = "save-state";
+  out.textContent = t("px.testing", "testing…");
+  try {
+    const res = await fetch("/api/outbound_proxy/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: "{}",
+    });
+    const doc = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const details = Array.isArray(doc.details) ? doc.details : [];
+      out.className = "save-state err";
+      out.textContent = details.length ? details.join("; ")
+        : (doc.error || ("HTTP " + res.status));
+      return;
+    }
+    if (doc.ok === true) {
+      out.className = "save-state";
+      out.textContent = t("px.testOk", "test ok ✓ ({ms} ms)")
+        .replace("{ms}", String(doc.ms == null ? "?" : doc.ms));
+    } else {
+      const word = String(doc.reason_word || "unreachable");
+      out.className = "save-state err";
+      out.textContent = t("px.testFail", "test failed: {w}").replace("{w}", word)
+        + (word === "disabled"
+          ? " — " + t("px.testDisabledHint", "switch it on, SAVE, then TEST") : "");
+    }
+  } catch (e) {
+    out.className = "save-state err";
+    out.textContent = t("px.err", "console unreachable — try again");
+  }
+}
+
+function renderProxyCred(body) {
+  const box = document.getElementById("proxyCred");
+  if (!box) return;
+  box.textContent = "";
+  const slots = Array.isArray(body && body.slots) ? body.slots : [];
+  const writable = !body || body.writable !== false;
+  const slot = slots.find(s => s && s.name === "AIDOG_PROXY_AUTH");
+  if (!slot) return;                 // honest absence: no invented row
+  const head = document.createElement("div");
+  head.className = "stat-note";
+  head.style.marginTop = "10px";
+  head.dataset.i18n = "px.authHead";
+  head.textContent = t("px.authHead", "proxy credentials (slot — set user:pass)");
+  box.appendChild(head);
+  box.appendChild(credRow(slot, writable));
+}
+
+function wireProxy() {
+  const once = (el, ev, fn) => {
+    if (!el || el.dataset.wired) return;
+    el.dataset.wired = "1";
+    el.addEventListener(ev, fn);
+  };
+  once(document.getElementById("proxyToggle"), "click", () => {
+    const tog = document.getElementById("proxyToggle");
+    const on = tog && tog.getAttribute("aria-pressed") === "true";
+    if (tog) tog.setAttribute("aria-pressed", on ? "false" : "true");
+    proxyDirty = true;
+    const msg = document.getElementById("proxyMsg");
+    if (msg) { msg.className = "save-state"; msg.textContent = ""; }
+  });
+  once(document.getElementById("proxyUrl"), "input", () => {
+    proxyDirty = true;
+    const msg = document.getElementById("proxyMsg");
+    if (msg) { msg.className = "save-state"; msg.textContent = ""; }
+  });
+  once(document.getElementById("proxySave"), "click",
+       () => postProxy(proxyPayload()));
+  once(document.getElementById("proxyTest"), "click", proxyTest);
+}
+
 async function loadCreds() {
   const list = document.getElementById("credList");
   const tgList = document.getElementById("tgCredList");
@@ -4121,6 +4481,7 @@ async function loadCreds() {
     renderCreds(body);
     renderTgCreds(body);
     renderConnections(body);
+    renderProxyCred(body);        // car H: AIDOG_PROXY_AUTH row on its own card
     list.hidden = false;
     credHintReason = body.writable === false ? "readOnly"
       : ((localStorage.getItem(TOKEN_KEY) || "") ? "" : "needToken");
@@ -4129,6 +4490,7 @@ async function loadCreds() {
     list.hidden = true;
     if (tgList) { tgList.textContent = ""; tgList.hidden = true; }
     renderConnections(null);
+    renderProxyCred(null);        // honest absence (no invented credential row)
     credHintReason = "unavailable";
   }
   paintCredHint();
@@ -4249,7 +4611,7 @@ function wireCredList() {
       credWrite(name, "", wrap, input);
     }
   };
-  ["credList", "tgCredList", "connListCF", "connListGH"].forEach(id => {
+  ["credList", "tgCredList", "connListCF", "connListGH", "proxyCred"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
   });
@@ -5536,6 +5898,8 @@ function initSettingsPanels() {
   missionPrefillCfg();         // car 3: quiet hours + min_interval <- settings
   bridgePrefill();             // car 6: bridge fields <- settings.bridge
   wireBridge();                // car 6: switch, save, kill, test, template
+  proxyPrefill();              // car H: outbound proxy <- settings.outbound_proxy
+  wireProxy();                 // car H: switch, own save, TEST
   loadBridgeStatus();          // car 6: routing state + the audit tail
 }
 
@@ -5548,7 +5912,8 @@ function initSettingsPanels() {
    SAVE runs the very same saveSettings(). */
 const SAVE_BAR_SKIP = "#credList, #tokenInput, #profCreate, #chanTestText, "
   + "#chanTestTarget, #chanTestRoute, #backupCard, #bridgeCard, "
-  + "#connectionsCard, #missionCard, #orchCard, #discPanel, #mycModelAdd";
+  + "#proxyCard, #connectionsCard, #missionCard, #orchCard, #discPanel, "
+  + "#mycModelAdd";
 let saveBarCardEl = null;
 
 function saveBarPaint(text, kind) {
@@ -7641,6 +8006,7 @@ async function loadSkillsRemote() {
     skillsRemoteData = null;        // fail-soft: the row falls back, honestly
   }
   renderOrch();
+  renderSkillCatalog();         // car H: the catalog pane follows the ladder
 }
 
 /* the expandable breakdown under the skills row: one line per catalog skill
@@ -10791,6 +11157,7 @@ setView(currentView, false);      // deep link applied before the first paint
 loadLang(startLang);
 loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); renderExtensions(); });
 refreshStatus(); refreshUsage(); refreshSelf(); refreshEvents(); refreshVersion(); refreshSkills();
+wireSkillsActions();        // car H: chips / install / switch / remove (once)
 refreshControl();      // car 7 (D11): tail row + guardrails status at boot
 loadSkillsRemote();  // car 5: per-skill availability for the ORCHESTRATION row
 refreshEvolution();

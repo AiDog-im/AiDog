@@ -21,6 +21,7 @@ English comments per repo i18n policy.
 """
 from __future__ import annotations
 
+import base64
 import fnmatch
 import hashlib
 import json
@@ -30,6 +31,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -40,6 +42,7 @@ from typing import Callable
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 from . import bridge as _bridge  # noqa: E402  (car 6: user-owned bridge)
+from . import envslots as _envslots  # noqa: E402  (car H: proxy auth slot reader)
 
 DEFAULT_ALLOWED_ROOTS = (str(REPO), tempfile.gettempdir())
 MAX_RESULT_CHARS = 24000          # ABSOLUTE ceiling — never exceeded, ever
@@ -485,9 +488,228 @@ def _glob(pattern: str, path: str = ".",
     return "\n".join(rels) + ("" if len(rels) < 200 else "\n[stopped at 200 paths]")
 
 
+# ------------------------------------------ outbound proxy (car H, #8) ----
+# Owner ruling #8 + ecosystem_car_design §3.4 (Q3=A): an OPT-IN settings
+# block `outbound_proxy {enabled, url}` routes aidog's OWN http_fetch
+# traffic through a self-hosted HTTP(S) proxy. Three properties:
+#   * default OFF  — disabled/absent == stock direct behavior byte-identical;
+#   * fail-closed  — once enabled a proxy failure is an honest WORD error,
+#                    never a silent direct retry (the bridge falls back
+#                    MARKED because it is an optimization; this is a POLICY
+#                    the owner set: "leave by the proxy");
+#   * zero echo    — the URL may carry user:pass@; it is read for use and
+#                    never appears in an error, a log line or a response.
+# Ambient NO_PROXY env keeps its standard meaning (exempt hosts — typically
+# loopback — stay direct): that env is the machine owner's own choice, and
+# proxying loopback is never useful.
+OUTBOUND_PROXY_KEYS = ("enabled", "url")
+OUTBOUND_PROXY_URL_MAX = 2048
+_PROXY_URL_RE = re.compile(r"^https?://[^\s]+$", re.IGNORECASE)
+
+_outbound_settings_override: dict | None = None
+
+
+def set_outbound_settings_for_tests(doc: dict | None) -> None:
+    """Test seam: pin the document outbound_config() reads (None restores
+    the production read). Production callers never pass it."""
+    global _outbound_settings_override
+    _outbound_settings_override = doc
+
+
+def _proxy_host(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).hostname or ""
+    except ValueError:
+        return ""
+
+
+def _proxy_netloc(url: str) -> str:
+    try:
+        return urllib.parse.urlsplit(url).netloc
+    except ValueError:
+        return ""
+
+
+def _proxy_auth_header() -> str:
+    """Basic-auth header for the proxy hop, from the AIDOG_PROXY_AUTH slot
+    (`user:pass`). Env wins over secrets.env — the envslots contract that an
+    operator override is never silently ignored (slot_value itself reads the
+    file; the env-first composition lives here). Empty = no credential
+    configured, or a value without a colon (a username alone cannot
+    authenticate — the proxy answers and the failure stays honest). The
+    VALUE never enters a string that can leave here except the header
+    itself, and it is never echoed anywhere."""
+    raw = (os.environ.get("AIDOG_PROXY_AUTH", "").strip()
+           or _envslots.slot_value("AIDOG_PROXY_AUTH") or "")
+    if ":" not in raw:
+        return ""
+    user, secret = raw.split(":", 1)
+    if not user:
+        return ""
+    return "Basic " + base64.b64encode(f"{user}:{secret}".encode()).decode("ascii")
+
+
+class _ProxyAuthHandler(urllib.request.ProxyHandler):
+    """ProxyHandler that attaches the slot credential to the PROXY hop only:
+
+    * ONLY for `http://` targets — an absolute-form request goes to the
+      proxy itself, where Proxy-Authorization belongs (hop-by-hop, RFC 7235:
+      the proxy strips it before forwarding);
+    * NEVER for `https://` targets — stdlib puts request headers INSIDE the
+      CONNECT tunnel, i.e. in front of the ORIGIN, and a redirect from an
+      http target to an https one re-enters proxy_open with type https:
+      attaching here would leak the credential to arbitrary origins. Direct
+      https fetches are refused earlier with the `auth` word (the clearer
+      report); this type check is the defense in depth for the redirect hop;
+    * add_unredirected_header keeps it off redirect COPIES — a redirect
+      re-enters proxy_open and gets it re-attached only if still http.
+    """
+
+    def __init__(self, proxies: dict, auth_header: str):
+        super().__init__(proxies)
+        self._auth_header = auth_header
+
+    def proxy_open(self, req, proxy, type_):  # noqa: N802 — stdlib signature
+        if self._auth_header and req.type == "http":
+            req.add_unredirected_header("Proxy-Authorization", self._auth_header)
+        return super().proxy_open(req, proxy, type_)
+
+
+def outbound_validate(doc) -> tuple[dict, list[str]]:
+    """Grammar for the settings `outbound_proxy` block — bridge-grammar
+    style: fail-closed, unknown keys rejected, and the offending VALUE is
+    never echoed (the URL may carry user:pass@). Partial patches are legal:
+    only the fields present come back for merging."""
+    if not isinstance(doc, dict):
+        return {}, ["outbound_proxy must be an object"]
+    errors: list[str] = []
+    clean: dict = {}
+    for key in doc:
+        if key not in OUTBOUND_PROXY_KEYS:
+            errors.append("outbound_proxy accepts only enabled and url")
+    if "enabled" in doc:
+        if isinstance(doc["enabled"], bool):
+            clean["enabled"] = doc["enabled"]
+        else:
+            errors.append("outbound_proxy.enabled must be a boolean")
+    if "url" in doc:
+        url = doc["url"]
+        if not isinstance(url, str):
+            errors.append("outbound_proxy.url must be a string")
+        elif len(url) > OUTBOUND_PROXY_URL_MAX:
+            errors.append("outbound_proxy.url is too long")
+        elif url and not _PROXY_URL_RE.match(url):
+            errors.append("outbound_proxy.url must be an http:// or https:// URL")
+        elif url and "@" in _proxy_netloc(url):
+            # the settings file holds NO credentials (the `settings get`
+            # invariant): auth lives in the AIDOG_PROXY_AUTH slot instead
+            errors.append("outbound_proxy.url must not embed credentials — "
+                          "set the AIDOG_PROXY_AUTH slot instead")
+        elif url and not _proxy_host(url):
+            errors.append("outbound_proxy.url must name a host")
+        else:
+            clean["url"] = url
+    return clean, errors
+
+
+def outbound_config(settings: dict | None = None) -> dict:
+    """Resolved configuration -> {state: off|ready|bad_url, url}. Fail-soft
+    READ, fail-closed SEMANTICS: unconfigured or disabled collapses to
+    "off" (stock direct, byte-identical); ENABLED with an unusable URL is
+    "bad_url" — the fetch refuses instead of quietly going direct."""
+    if settings is None:
+        settings = _outbound_settings_override
+    if settings is None:
+        try:
+            settings = json.loads(pp.settings_path(REPO).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            settings = {}
+    block = settings.get("outbound_proxy") if isinstance(settings, dict) else None
+    if not isinstance(block, dict) or block.get("enabled") is not True:
+        return {"state": "off", "url": ""}
+    url = block.get("url")
+    url = url.strip() if isinstance(url, str) else ""
+    if (not url or not _PROXY_URL_RE.match(url) or not _proxy_host(url)
+            or "@" in _proxy_netloc(url)):
+        # a hand-edited URL with embedded credentials is ALSO bad_url: the
+        # invariant says settings.json carries none, so runtime refuses it
+        # instead of silently routing without (or with) half the policy
+        return {"state": "bad_url", "url": ""}
+    return {"state": "ready", "url": url}
+
+
+def outbound_opener(cfg: dict) -> urllib.request.OpenerDirector:
+    """Opener that sends every request through the owner's proxy. The URL
+    carries NO credential (validate refuses userinfo — settings.json holds
+    none); when the AIDOG_PROXY_AUTH slot is set, a Basic header rides the
+    PROXY hop via _ProxyAuthHandler. Neither the URL nor the slot value is
+    ever built into a message here."""
+    proxies = {"http": cfg["url"], "https": cfg["url"]}
+    auth = _proxy_auth_header()
+    handler = (_ProxyAuthHandler(proxies, auth) if auth
+               else urllib.request.ProxyHandler(proxies))
+    return urllib.request.build_opener(handler)
+
+
+def outbound_reason(exc: BaseException) -> str:
+    """Map a proxy-path failure onto the honest word the skill documents
+    (refused / timeout / tls / dns / unreachable). The word IS the whole
+    report — classification only, no message text and no URL."""
+    text = f"{type(exc).__name__} {exc}".lower()
+    if "refused" in text:
+        return "refused"
+    if isinstance(exc, TimeoutError) or "timed out" in text or "timeout" in text:
+        return "timeout"
+    if "ssl" in text or "certificate" in text:
+        return "tls"
+    if ("name or service" in text or "getaddrinfo" in text
+            or "nodename nor servname" in text or "name resolution" in text):
+        return "dns"
+    return "unreachable"
+
+
+def outbound_probe(target: str, timeout: float = 8.0) -> dict:
+    """Live diagnostic (car H §3.4): ONE fetch of `target` THROUGH the
+    configured proxy — the fail-closed path, no direct fallback, 8s ceiling.
+    Any HTTP status counts as ok (the tunnel answered); only a transport
+    failure carries a reason word. Returns {ok, reason_word, ms}; the proxy
+    URL never appears in the result. `target` is the CALLER's business (the
+    web layer owns the product endpoint, tests pass a local one) — mycore
+    hardcodes no domain here."""
+    if not isinstance(target, str) or not target.startswith(("http://", "https://")):
+        return {"ok": False, "reason_word": "bad_url", "ms": 0}
+    cfg = outbound_config()
+    if cfg["state"] == "off":
+        return {"ok": False, "reason_word": "disabled", "ms": 0}
+    if cfg["state"] == "bad_url":
+        return {"ok": False, "reason_word": "bad_url", "ms": 0}
+    if target.startswith("https://") and _proxy_auth_header():
+        # the credential would ride INSIDE the CONNECT tunnel to the ORIGIN
+        # (stdlib behaviour) — refuse honestly instead of leaking it
+        return {"ok": False, "reason_word": "auth", "ms": 0}
+    started = time.time()
+    req = urllib.request.Request(target, method="GET",
+                                 headers={"User-Agent": "mycore/probe"})
+    try:
+        with outbound_opener(cfg).open(req, timeout=min(timeout, 60)) as resp:
+            resp.read(64)
+        out = {"ok": True, "reason_word": ""}
+    except urllib.error.HTTPError:
+        out = {"ok": True, "reason_word": ""}   # a status = the tunnel worked
+    except Exception as e:  # noqa: BLE001 — the word is the whole report
+        out = {"ok": False, "reason_word": outbound_reason(e)}
+    out["ms"] = int((time.time() - started) * 1000)
+    return out
+
+
 def _http_fetch(url: str, timeout: int = 20,
                 max_chars: int = 8000) -> str:
     """GET a URL and return text (cap applied). Loopback/http(s) only.
+
+    Car H (§3.4, ruling Q3=A): when settings `outbound_proxy` is enabled the
+    request rides the owner's proxy (fail-closed — a proxy failure is
+    `proxy fetch failed (<word>)`, never a silent direct retry); disabled or
+    absent keeps this path byte-identical to stock.
 
     Car 6 (line 5, ruling D9): a target whose host is on the USER-owned
     bridge allow-list is fetched through the user's Worker first. If the
@@ -511,13 +733,38 @@ def _http_fetch(url: str, timeout: int = 20,
             note = f"... [bridge {e.reason} - fetched directly instead]\n"
     req = urllib.request.Request(url, method="GET",
                                  headers={"User-Agent": "mycore/0.4 (fetch)"})
+    proxy_cfg = outbound_config()
+    if proxy_cfg["state"] == "bad_url":
+        # enabled + unusable URL is a broken POLICY, never an invitation to
+        # fall back to direct (car H §3.4 fail-closed semantics)
+        raise ToolError("proxy fetch failed (bad_url)")
+    if proxy_cfg["state"] == "ready" and url.startswith("https://") \
+            and _proxy_auth_header():
+        # same leak guard as outbound_probe: stdlib would deliver the proxy
+        # credential to the ORIGIN inside the tunnel — refuse with the word
+        raise ToolError("proxy fetch failed (auth)")
     try:
-        with urllib.request.urlopen(req, timeout=min(timeout, 60)) as resp:
-            raw = resp.read(max_chars * 4)
+        if proxy_cfg["state"] == "ready":
+            with outbound_opener(proxy_cfg).open(
+                    req, timeout=min(timeout, 60)) as resp:
+                raw = resp.read(max_chars * 4)
+        else:
+            with urllib.request.urlopen(req, timeout=min(timeout, 60)) as resp:
+                raw = resp.read(max_chars * 4)
+    except ToolError:
+        raise                       # our own honest word travels unchanged
     except urllib.error.HTTPError as e:
+        # An HTTP status reached THROUGH the proxy still means the tunnel
+        # answered — the target's own status is reported exactly as stock.
         raise ToolError(f"HTTP {e.code} from {url}") from None
     except (urllib.error.URLError, TimeoutError, OSError) as e:
+        if proxy_cfg["state"] == "ready":
+            raise ToolError(f"proxy fetch failed ({outbound_reason(e)})") from None
         raise ToolError(f"fetch failed: {type(e).__name__}") from None
+    except Exception:  # noqa: BLE001 — fail-closed: nothing slips past the proxy
+        if proxy_cfg["state"] == "ready":
+            raise ToolError("proxy fetch failed (unreachable)") from None
+        raise
     text = note + raw.decode("utf-8", errors="replace")
     return text if len(text) <= max_chars else text[:max_chars] + "\n... [truncated]"
 
