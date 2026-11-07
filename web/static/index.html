@@ -1125,6 +1125,26 @@
             </select>
           </div>
           <div class="stat-note" data-i18n="exnav.hint">auto shows the nav item once an exchange API key is configured; stored in this browser</div>
+          <!-- Car A2 (port standard, owner decree 2026-11-01): the console
+               port is visible and editable here (default 19167; recommend
+               keeping it). GET /api/console reports the RUNNING port and its
+               source truthfully; the write pins web/port.local behind the
+               Bearer gate and says a restart is required — the console never
+               re-binds mid-response, and an env override refuses the write. -->
+          <div id="portBlock" style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);">
+            <div class="ctl-row token-row" style="margin-bottom:6px;">
+              <label data-i18n="port.label">Console port</label>
+              <span class="save-state" id="portState" role="status"></span>
+            </div>
+            <div class="stat-note" data-i18n="port.hint">listens on 127.0.0.1 only · default 19167 · changing it needs a console restart (keep it unless another service owns the port)</div>
+            <div class="cron-create" style="margin-top:8px;">
+              <input type="number" id="portInput" min="1024" max="65535" autocomplete="off"
+                     aria-label="console port">
+              <div class="ctl-actions">
+                <button class="btn primary" id="portSaveBtn" type="button" data-i18n="port.save">SAVE PORT</button>
+              </div>
+            </div>
+          </div>
           <!-- Wave 5 (X11): profile management — the `aidog profile` CLI's
                console leg. The catalog (GET /api/profiles) is read-only
                presence/counts: a slot value never renders, and the active

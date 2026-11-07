@@ -4,7 +4,7 @@
 //
 // What this proves, end to end, on a real machine:
 //   R1  an ISOLATED console (own port, own throwaway profile) boots; the
-//       production console on :8790 and the production secrets.env are never
+//       production console on :19167 and the production secrets.env are never
 //       touched (the profile dir is removed afterwards);
 //   R2..R6  the export ladder: 401 without a token / with a wrong token,
 //       400 on an unknown `include` section, 200 with the contract envelope,

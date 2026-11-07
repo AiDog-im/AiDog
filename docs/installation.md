@@ -60,7 +60,7 @@ old provision + boot + verify behavior without ever blocking on a prompt.
 
 ## What the installer does
 
-1. **Preflight** — Python 3.10+, tmux, port sanity (`:8790` free or already ours).
+1. **Preflight** — Python 3.10+, tmux, port sanity (`:19167` free or already ours).
 2. **Provisions machine-local files, only when missing** (all gitignored):
    | File | From template | Purpose |
    |---|---|---|
@@ -135,7 +135,7 @@ and exits `2` — that is an honest "no brain configured yet", not a crash.
 
 | Symptom | Fix |
 |---|---|
-| `port 8790 is used by another service` | stop the foreign process or run with `AIDOG_WEB_PORT=<free port>` |
+| `port 19167 is used by another service` | stop the foreign process or run with `AIDOG_WEB_PORT=<free port>` |
 | `tmux not found` | install tmux |
 | chat service stays `PENDING` | fill `MYCORE_TG_TOKEN` + `AIDOG_TG_ALLOWED_USERS`, re-run `aidog setup` |
 | model endpoint unreachable | set `mycore.base_url` to a live OpenAI-compatible endpoint |

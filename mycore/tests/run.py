@@ -6757,7 +6757,7 @@ def test_browser() -> None:
     from mycore import browser as br
 
     # --- URL policy: http/https only, browser-UI/local-file schemes refused
-    allowed = ("http://127.0.0.1:8790/x", "https://example.com/a?b=1")
+    allowed = ("http://127.0.0.1:19167/x", "https://example.com/a?b=1")
     check("browser: http/https urls pass the policy",
           all(br._check_url(u) == u for u in allowed), str(allowed))
     blocked = ("chrome://settings", "about:blank", "file:///etc/passwd",

@@ -44,7 +44,12 @@ set -uo pipefail
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 1
 
-WEB_PORT="${AIDOG_WEB_PORT:-8790}"
+# Car A2 (port standard 2026-11-01): env override > web/port.local > 19167.
+WEB_PORT="${AIDOG_WEB_PORT:-}"
+if [ -z "$WEB_PORT" ] && [ -f "$REPO/web/port.local" ]; then
+  WEB_PORT="$(tr -cd '0-9' < "$REPO/web/port.local")"
+fi
+WEB_PORT="${WEB_PORT:-19167}"
 PENDING=0
 
 # --check: report-only mode (T-3 delivery gap). Only this flag is parsed;
@@ -75,7 +80,7 @@ if [ ! -d "$REPO/.git" ]; then
   note "WARN: not a git checkout — updates unavailable (fine for archives)"
 fi
 
-# Port 8790 must be free, our own console, or a hard conflict.
+# Port 19167 must be free, our own console, or a hard conflict.
 code="$(curl -s -o /dev/null -m 2 -w '%{http_code}' "http://127.0.0.1:$WEB_PORT/api/health" 2>/dev/null || true)"
 if [ "$code" = "200" ]; then
   note "web console :$WEB_PORT already healthy (reusing it)"

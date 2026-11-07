@@ -7,15 +7,32 @@
 
 const path = require('path');
 
-const DEFAULT_PORT = '8790';
+// Car A2 (port standard): same chain as web/server.py _resolve_web_port —
+// AIDOG_WEB_PORT env > <repo>/web/port.local > 19167 product default.
+const DEFAULT_PORT = '19167';
 
-function portFromEnv(env) {
+function portFromEnv(env, pinned) {
   const raw = env && env.AIDOG_WEB_PORT;
-  return raw && String(raw).trim() ? String(raw).trim() : DEFAULT_PORT;
+  if (raw && String(raw).trim()) return String(raw).trim();
+  if (pinned && String(pinned).trim()) return String(pinned).trim();
+  return DEFAULT_PORT;
 }
 
-function baseUrl(env) {
-  return `http://127.0.0.1:${portFromEnv(env)}`;
+// Best-effort read of <repo>/web/port.local (one integer line). Any read or
+// parse failure falls back to the default — never throws.
+function readPinnedPort(repoDir, fsLike) {
+  const fs = fsLike || require('fs');
+  try {
+    const raw = fs.readFileSync(path.join(repoDir, 'web', 'port.local'), 'utf8').trim();
+    const port = Number(raw);
+    return Number.isInteger(port) && port >= 1024 && port <= 65535 ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+function baseUrl(env, pinned) {
+  return `http://127.0.0.1:${portFromEnv(env, pinned)}`;
 }
 
 // A candidate repo is valid when <dir>/web/server.py exists.
@@ -89,8 +106,10 @@ function candidates(env, opts) {
 function resolveRepo(opts) {
   const env = opts.env || {};
   const fsLike = opts.fsLike || require('fs');
-  const base = baseUrl(env);
   const repo = pickCandidate(candidates(env, opts), fsLike);
+  // Car A2: base follows the resolved repo's port chain (env > port.local
+  // > 19167) — computed AFTER repo resolution so a pinned port.local wins.
+  const base = baseUrl(env, repo ? readPinnedPort(repo, fsLike) : null);
   if (repo && opts.cacheDir) writeCache(opts.cacheDir, repo, fsLike); // best-effort refresh
   return { repo, base };
 }
@@ -98,6 +117,7 @@ function resolveRepo(opts) {
 module.exports = {
   DEFAULT_PORT,
   portFromEnv,
+  readPinnedPort,
   baseUrl,
   isRepo,
   pickCandidate,

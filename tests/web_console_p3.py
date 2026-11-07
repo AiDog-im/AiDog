@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """P3 web console smoke test — endpoints, auth gate, validation, idempotency.
 
-Runs against a live console (default http://127.0.0.1:8790). The access token
+Runs against a live console (default http://127.0.0.1:19167). The access token
 is read in-process from secrets.env and never printed or written anywhere.
 Exit code 0 = all assertions passed; exit 77 = skipped (no provisioned
 install on this machine — secrets.env absent; the suite drives a live
@@ -19,7 +19,7 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:8790"
+BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:19167"
 SECRETS = Path(__file__).resolve().parent.parent / "secrets.env"
 
 PASS: list[str] = []
@@ -596,6 +596,46 @@ def main() -> int:
     check("GET /api/control gate allows a fresh turn",
           isinstance(ctl, dict) and ctl.get("gate", {}).get("allowed") is True,
           str(ctl.get("gate")))
+
+    # --- car A2 (port standard): /api/console read + /api/console/port write --
+    s, con = get("/api/console")
+    check("GET /api/console shape (no auth, no secrets)",
+          s == 200 and isinstance(con, dict)
+          and isinstance(con.get("port"), int) and 1024 <= con["port"] <= 65535
+          and con.get("source") in ("env", "file", "default")
+          and isinstance(con.get("restart_required"), bool)
+          and con.get("url", "").startswith("http://127.0.0.1:"),
+          f"got {s} {con}")
+    check("GET /api/console never leaks a credential",
+          isinstance(con, dict)
+          and "Bearer" not in json.dumps(con) and "secrets.env" not in json.dumps(con),
+          str(con)[:200])
+    check("POST /api/console/port no token -> 401",
+          post("/api/console/port", {"port": 19167}, None)[0] == 401)
+    s, _b = post("/api/console/port", {"port": 99}, token)
+    check("POST /api/console/port below range -> 400",
+          s == 400 and "1024" in str(_b), f"got {s} {_b}")
+    s, _b = post("/api/console/port", {"port": "abc"}, token)
+    check("POST /api/console/port non-integer -> 400",
+          s == 400, f"got {s} {_b}")
+    # Idempotent write of the RUNNING port: pin it, then restore port.local
+    # to its pre-test state so the suite never leaves an artifact behind.
+    port_file = SECRETS.parent / "web" / "port.local"
+    before = port_file.read_bytes() if port_file.exists() else None
+    run_port = con.get("port") if isinstance(con, dict) else None
+    s, body = post("/api/console/port", {"port": run_port}, token)
+    check("POST /api/console/port running port -> 200, no restart",
+          s == 200 and isinstance(body, dict)
+          and body.get("restart_required") is False
+          and body.get("port") == run_port,
+          f"got {s} {body}")
+    try:
+        if before is None:
+            port_file.unlink(missing_ok=True)
+        else:
+            port_file.write_bytes(before)
+    except OSError:
+        pass
 
     # --- car 7: POST /api/control gates + actions --------------------------
     s, body = post("/api/control", {"action": "stop"}, None)

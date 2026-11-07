@@ -275,7 +275,7 @@
   "sniff.howto1": "After install, open the Console → SENSE: add a source (a Home Assistant url + token slot, a URL + extract regex, or a bridge name from mycore.mcp), then add a rule like sensor.temp > 30 for 10m.",
   "sniff.howto2": "Hit SWEEP NOW (or wait out the interval): hits land in the FINDINGS timeline and stay on your machine — rules marked speak reach you first, with quiet hours, the digest cap and PAUSE deciding when.",
   "hero.lead": "A personal AI that runs on your own machine: talk to it in Telegram or the console, it remembers what matters, and it keeps the jobs you scheduled.",
-  "start.done": "Then open http://127.0.0.1:8790 — the console is already running.",
+  "start.done": "Then open http://127.0.0.1:19167 — the console is already running.",
   "start.docsCta": "Full install guide — prerequisites, every slot, troubleshooting",
   "skills.curationNote": "Curated on purpose — every entry passed a machine gate (structure, format, leak scan) and a human review. No marketplace, no surprise code.",
   "skills.moreCta": "See all twelve in the skills directory",

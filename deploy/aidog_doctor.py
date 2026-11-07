@@ -569,7 +569,15 @@ def check_mycore_secrets() -> None:
 
 def check_mycore_web() -> None:
     """Console liveness (loopback GET only)."""
-    port = int(os.environ.get("AIDOG_WEB_PORT", "8790"))
+    # Car A2 port chain: env > web/port.local > 19167 (mirrors server.py).
+    port = int(os.environ.get("AIDOG_WEB_PORT", "").strip() or 0)
+    if not port:
+        try:
+            port = int((REPO / "web" / "port.local").read_text(encoding="utf-8").strip())
+        except (OSError, ValueError):
+            port = 0
+    if not 1024 <= port <= 65535:
+        port = 19167
     try:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/health", timeout=5) as r:
             doc = json.load(r)

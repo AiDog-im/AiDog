@@ -17,7 +17,7 @@
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-2081%2F2081-brightgreen?style=flat-square" alt="core tests 2081/2081">
-  <img src="https://img.shields.io/badge/console_smoke-432%2F432-brightgreen?style=flat-square" alt="console smoke 432/432">
+  <img src="https://img.shields.io/badge/console_smoke-438%2F438-brightgreen?style=flat-square" alt="console smoke 438/438">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -158,7 +158,7 @@ value. Flags: `--check` (read-only report), `--yes` (non-interactive),
 
 Then:
 
-1. Open the console at **http://127.0.0.1:8790**
+1. Open the console at **http://127.0.0.1:19167**
 2. Settings panel → add your model endpoint + key, Telegram bot token +
    allowlist (or run `aidog setup` instead)
 3. Chat card → send one message — a streamed reply means the model chain is
@@ -192,7 +192,7 @@ Every release is cut only after these run green on a clean tree:
 | Suite | Result |
 |---|---|
 | `mycore` core suite | **2081/2081** |
-| Console smoke (live HTTP) | **432/432** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
+| Console smoke (live HTTP) | **438/438** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
 | Setup wizard | **99/99** |

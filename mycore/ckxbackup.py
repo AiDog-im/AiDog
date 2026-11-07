@@ -251,9 +251,14 @@ def _loopback_export() -> bytes:
     if not token:
         raise CkxError("WEB_TOKEN slot is not set (console export gate)")
     try:
-        port = int(os.environ.get("AIDOG_WEB_PORT", "8790") or 8790)
-    except ValueError:
-        raise CkxError("AIDOG_WEB_PORT is not a number") from None
+        # Car A2 port chain: env > web/port.local > 19167 (mirrors server.py).
+        port = int(os.environ.get("AIDOG_WEB_PORT", "").strip() or 0)
+        if not port:
+            port = int((REPO / "web" / "port.local").read_text(encoding="utf-8").strip())
+        if not 1024 <= port <= 65535:
+            raise ValueError
+    except (OSError, ValueError):
+        raise CkxError("AIDOG_WEB_PORT / web/port.local is not a valid port number") from None
     url = f"http://127.0.0.1:{port}/api/backup/export"
     req = urllib.request.Request(
         url, headers={"Authorization": "Bearer " + token,

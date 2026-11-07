@@ -8,7 +8,7 @@
 // All collaborators are injectable (fetchImpl / spawnImpl / logger) so
 // node --test can exercise every branch with fakes -- no real ports.
 
-const { baseUrl, portFromEnv } = require('./repo');
+const { baseUrl, portFromEnv, readPinnedPort } = require('./repo');
 
 const PROBE_TIMEOUT_MS = 1500;
 const READY_TIMEOUT_MS = 10000;
@@ -45,7 +45,11 @@ async function ensureConsole(opts = {}) {
   const fetchImpl = opts.fetchImpl || ((...a) => fetch(...a));
   const spawnImpl = opts.spawnImpl || require('child_process').spawn;
   const logger = opts.logger || defaultLogger;
-  const base = opts.base || baseUrl(env);
+  // Car A2: the shell follows the SAME port chain as the server (env >
+  // <repo>/web/port.local > 19167), so an operator who pinned the port in
+  // the settings card gets an attach/spawn on that exact port.
+  const pinned = opts.repo ? readPinnedPort(opts.repo) : null;
+  const base = opts.base || baseUrl(env, pinned);
   const repo = opts.repo;
   const readyTimeoutMs = opts.readyTimeoutMs ?? READY_TIMEOUT_MS;
   const readyIntervalMs = opts.readyIntervalMs ?? READY_INTERVAL_MS;
@@ -64,7 +68,7 @@ async function ensureConsole(opts = {}) {
   logger(`console unhealthy at ${base} -- spawning python3 server.py in ${repo}/web`);
   const child = spawnImpl('python3', ['server.py'], {
     cwd: require('path').join(repo, 'web'),
-    env: { ...env, AIDOG_WEB_PORT: portFromEnv(env) },
+    env: { ...env, AIDOG_WEB_PORT: portFromEnv(env, pinned) },
     stdio: ['ignore', 'ignore', 'pipe'],
   });
   child.on?.('error', (err) => logger(`spawn error: ${err.message}`));
