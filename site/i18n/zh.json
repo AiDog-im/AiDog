@@ -110,7 +110,7 @@
   "caps.c6T": "9 路通道网关",
   "caps.c6B": "Telegram 已在线；九路适配器——Discord / Slack / Email / Webhook / 钉钉 / 飞书 / 微信 / WhatsApp / Signal——每路如实报状态，未配置就保持沉默。",
   "caps.c7T": "桌面 HUD 外壳",
-  "caps.c7B": "Electron 无边框外壳：透明度滑杆、始终置顶、托盘——Linux 打包已验证，Win/macOS 老实说还没做；桌面套件 15/15。",
+  "caps.c7B": "Electron 无边框外壳：透明度滑杆、始终置顶、托盘——Linux 打包已验证，Win/macOS 老实说还没做；桌面套件 16/16。",
   "caps.c8T": "多 profile 隔离",
   "caps.c8B": "AIDOG_PROFILE 选择完全隔离的 profile——设置、密钥、状态、身体层各归各——63/63 隔离闸与 18 腿实机 E2E 作证。",
   "caps.c9T": "终端后端与代码执行",

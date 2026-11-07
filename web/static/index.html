@@ -182,6 +182,15 @@
              aborts the turn running right now; PAUSE holds new turns and
              the automatic legs until a human resumes (fail-closed). -->
         <div class="view-actions">
+          <!-- car B (D3): the tail's readable mood rides NEXT to the text
+               (never replacing it — the words stay the accessible truth) -->
+          <span class="tail-mood" id="tailMood" data-state="idle" aria-hidden="true">
+            <svg viewBox="0 0 16 16" width="16" height="16" focusable="false">
+              <path d="M3 14 C 3 9 5 5 9 3.5 C 11.5 2.6 13.5 3 14.5 4"
+                    fill="none" stroke="currentColor" stroke-width="2"
+                    stroke-linecap="round"/>
+            </svg>
+          </span>
           <span class="stat-note" id="tailState" role="status">–</span>
           <button class="btn" id="ctlStopBtn" type="button"
                   data-i18n="ctl.stop" data-i18n-t="ctl.stopHint"
@@ -1333,6 +1342,25 @@
             <input type="text" id="mycUrl" maxlength="256" placeholder="http://127.0.0.1:3460/v1"
                    data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
           </div>
+          <!-- car B: three one-click presets (mass-market onboarding 4.1).
+               They only FILL the two fields above and raise dirty through the
+               normal input event — saveSettings() stays the single writer.
+               Ollama / LM Studio are the loopback addresses the server-side
+               probe (mycore.localmodels) already knows; OpenAI-compatible is
+               the shipped local gateway default. -->
+          <div class="ctl-row preset-row">
+            <label data-i18n="myc.presets">Quick setup (presets)</label>
+            <div class="preset-btns">
+              <button class="btn" type="button" id="presetOaiBtn"
+                      data-i18n="myc.presetOpenai">OpenAI-compatible</button>
+              <button class="btn" type="button" id="presetOllamaBtn"
+                      data-i18n="myc.presetOllama">Ollama</button>
+              <button class="btn" type="button" id="presetLmBtn"
+                      data-i18n="myc.presetLmstudio">LM Studio</button>
+              <span class="save-state" id="presetMsg" role="status"></span>
+            </div>
+          </div>
+          <div class="stat-note" data-i18n="myc.presetHint">fills the endpoint above — nothing is written until you press SAVE; local model servers are auto-detected at page load</div>
           <!-- chips terminal state (round D car 2, owner-approved): the
                whitelist editor is the chip list + manual add box. #mycModels
                stays in the DOM as the HIDDEN source of truth, so every write
@@ -1945,7 +1973,7 @@
              language and carries the internal name as a hover title only. -->
         <div class="card" data-setgroup="always" id="accessCard">
           <h2 data-i18n="set.group.access">Access</h2>
-          <div class="stat-note" data-i18n="onb.accessHint">The access token is WEB_TOKEN — the unlock password for this console, written into secrets.env when you installed. Paste it once below and this browser remembers it; after that saving settings, approvals and service restarts all work. It cannot be changed from this page: to rotate it, edit WEB_TOKEN in secrets.env, then paste the new value here.</div>
+          <div class="stat-note" data-i18n="onb.accessHint">The access token is WEB_TOKEN — the unlock password for this console, written into secrets.env when you installed. Lost it? Run `grep WEB_TOKEN secrets.env` in your install folder to see it, then paste it once below and this browser remembers it; after that saving settings, approvals and service restarts all work. It cannot be changed from this page: to rotate it, edit WEB_TOKEN in secrets.env, then paste the new value here.</div>
           <div class="ctl-row token-row">
             <label data-i18n="ctl.token" title="WEB_TOKEN">Access token</label>
             <input type="password" id="tokenInput" autocomplete="off"
@@ -1967,6 +1995,11 @@
         <span class="save-bar-card" id="saveBarCard"></span>
         <span class="save-bar-state" id="saveBarState" data-i18n="save.dirty">unsaved changes</span>
         <button class="btn primary" id="saveBarBtn" type="button" data-i18n="ctl.save">SAVE</button>
+        <!-- car B (#17): CANCEL discards every pending edit and repaints the
+             form from the SERVER's truth (same prefill path as boot) — it
+             never guesses a "previous value" from a stale local snapshot -->
+        <button class="btn" id="saveBarCancelBtn" type="button"
+                data-i18n="save.cancel">CANCEL</button>
       </div>
     </section>
 

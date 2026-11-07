@@ -1908,3 +1908,24 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 @media (max-width: 640px) {
   .disc-row { align-items: flex-start; }
 }
+
+/* ---------------------------------------- car B: tail mood + model presets --
+   D3: the tail's mood rides NEXT to the words (the text stays the accessible
+   truth). One AA-safe hue per state + a small wag while WORKING; the global
+   prefers-reduced-motion rule above already kills the animation. */
+.tail-mood { display: inline-flex; align-items: center; margin-right: 2px;
+  color: var(--blue-dim); }
+.tail-mood svg { display: block; }
+.tail-mood[data-state="working"] { color: var(--ok);
+  animation: tail-wag .9s ease-in-out infinite; transform-origin: 3px 14px; }
+.tail-mood[data-state="paused"] { color: var(--amber); }
+.tail-mood[data-state="blocked"] { color: var(--red); }
+@keyframes tail-wag {
+  0%, 100% { transform: rotate(0deg); }
+  50% { transform: rotate(14deg); }
+}
+/* mass-market onboarding 4.1: three preset buttons under the endpoint field */
+.preset-btns { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;
+  flex: 1; min-width: 0; }
+.preset-btns .btn { font-size: 12px; padding: 4px 10px; }
+.preset-btns .save-state { flex: 1; min-width: 120px; }

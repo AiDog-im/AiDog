@@ -2457,6 +2457,24 @@ def collect_usage_self() -> dict:
     pricing = (settings.get("usage") or {}).get("model_pricing")
     pricing = pricing if isinstance(pricing, dict) else {}
     cost = model_meter.estimate_cost(usage, pricing)
+    # car B (mass-market 5.3): a cost-transparency block for THIS month,
+    # read from the SAME local meter (no new telemetry, no network). The
+    # window is month-to-date in UTC: 1..31 daily files, still bounded by
+    # the meter's RETENTION_DAYS. Pricing degradations stay honest: an
+    # unconfigured price table -> total_cny null, never 0.
+    _now = datetime.now(timezone.utc)
+    _mread = model_meter.read(days=_now.day)
+    _mcost = model_meter.estimate_cost(_mread, pricing)
+    month = {
+        "days": _now.day,
+        "requests": _mread.get("requests", 0),
+        "ok": _mread.get("ok", 0),
+        "fail": _mread.get("fail", 0),
+        "in_tokens": _mread.get("in_tokens", 0),
+        "out_tokens": _mread.get("out_tokens", 0),
+        "total_cny": _mcost["total_cny"],
+        "unpriced": _mcost["unpriced"],
+    }
     out.update({
         "available": True,
         "window_days": usage.get("days") or [],
@@ -2480,6 +2498,7 @@ def collect_usage_self() -> dict:
                     "total_cny": cost["total_cny"],
                     "per_model": cost["per_model"],
                     "unpriced": cost["unpriced"]},
+        "month": month,
         "display": display_fx(settings),
     })
     return out
