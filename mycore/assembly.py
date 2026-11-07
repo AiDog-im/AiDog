@@ -234,6 +234,15 @@ def resolve_user_rules(settings_path: Path | None = None) -> dict | None:
     return {"rules": rules, "forbidden": forbidden}
 
 
+def resolve_capability_path() -> Path | None:
+    """Car C (agent foundation): the curated capability map under the active
+    body root — the path when the file is present, None otherwise (absent =
+    the pre-car-C stack, byte-for-byte). Presence-only like the learned
+    slot; the body layer owns the file, so a profile flip re-resolves."""
+    path = pp.capability_path(REPO)
+    return path if path.is_file() else None
+
+
 def _obedience_message(rules: dict) -> str:
     """The injected system message (car 7 / D11 constitution_over_rules):
     priority order stated EXACTLY as ruled — constitution > these user rules
@@ -268,7 +277,8 @@ def build_system_stack(constitution_path: Path | None = None,
                        memory_paths: tuple[Path, ...] | None = None,
                        learned_path: Path | None | object = _AUTO,
                        context_dirs: tuple[Path, ...] = (),
-                       user_rules: dict | None = None) -> list[dict]:
+                       user_rules: dict | None = None,
+                       capability_path: Path | None = None) -> list[dict]:
     """-> system messages ready for the loop. Absent files become notices
     (the optional learned slot and the configured context dirs are the silent
     exceptions — see module doc). context_dirs defaults to OFF so every
@@ -285,7 +295,14 @@ def build_system_stack(constitution_path: Path | None = None,
     test keeps today's stack shape byte-for-byte; production turn paths pass
     resolve_user_rules(). When a non-empty block is given it is injected
     IMMEDIATELY after the constitution (priority order is part of the
-    message), never anywhere else."""
+    message), never anywhere else.
+
+    `capability_path` (car C / agent foundation) follows the user_rules
+    precedent: OFF by default (byte-identical stacks for every caller and
+    test); production turn paths pass resolve_capability_path(). When the
+    file is present it is injected as the LAST reference slot (after the
+    learned slot, before project context) — orientation material, never
+    rules; the constitution and the operator's rules always outrank it."""
     constitution_path = constitution_path or pp.constitution_path(REPO)
     if memory_paths is None:
         memory_paths = pp.memory_slots(REPO)
@@ -321,6 +338,16 @@ def build_system_stack(constitution_path: Path | None = None,
         learned = _read_slot(learned_path)
         if learned is not None:                # present-only: absent = normal
             stack.append({"role": "system", "content": learned})
+
+    # Car C (agent foundation): the curated product capability map —
+    # present-only like the learned slot (a missing file is the normal
+    # pre-car-C state, never a notice). Reference material, not rules.
+    if capability_path is not None:
+        capmap = _read_slot(capability_path)
+        if capmap is not None:
+            stack.append({"role": "system",
+                          "content": f"[product] capability map "
+                                     f"(orientation, not rules):\n{capmap}"})
 
     # 2c. configured project context — present-only per file (a missing
     # AGENTS.md/CLAUDE.md is the normal state, never a notice), injected

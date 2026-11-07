@@ -84,9 +84,35 @@ def _select(registry: ToolRegistry, wanted: list[str]) -> list[str]:
     return sorted(set(DEFAULT_READ_ONLY) | set(granted))
 
 
+def _limits() -> tuple[int, int]:
+    """Owner-configurable sub-agent bounds (car C): settings block
+    `mycore.subagent = {max_parallel, max_iters}` — both clamped to the
+    shipped safety bounds (1..5 parallel, 1..25 iters) by the console's
+    validator; this reader clamps AGAIN so a hand-edited file can never
+    exceed them. Absent/invalid -> the shipped defaults (3 / 12). Read
+    lazily at call time like every other settings seam, never cached."""
+    par, iters = MAX_PARALLEL, SUB_MAX_ITERS
+    try:
+        from . import cli  # local import: keeps the module graph acyclic
+        stored = json.loads(pp.settings_path(cli.REPO)
+                            .read_text(encoding="utf-8"))
+        blk = stored.get("mycore", {}).get("subagent") \
+            if isinstance(stored, dict) else None
+        if isinstance(blk, dict):
+            v = blk.get("max_parallel")
+            if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 5:
+                par = v
+            v = blk.get("max_iters")
+            if isinstance(v, int) and not isinstance(v, bool) and 1 <= v <= 25:
+                iters = v
+    except Exception:  # noqa: BLE001 — unreadable settings -> defaults
+        pass
+    return par, iters
+
+
 def _one(task: str, idx: int, total: int, sub_registry: ToolRegistry,
          chat: Callable[..., dict], budget: int | None,
-         model: str | None = None) -> str:
+         model: str | None = None, max_iters: int = SUB_MAX_ITERS) -> str:
     """Run one sub-agent turn. Never raises; every outcome is a labelled
     block so the parent sees exactly which task produced what. `model`
     (validated against the settings whitelist by the caller) overrides the
@@ -102,7 +128,7 @@ def _one(task: str, idx: int, total: int, sub_registry: ToolRegistry,
             return base(**kw)
     try:
         res = run_turn(messages, chat, sub_registry,
-                       max_iters=SUB_MAX_ITERS, budget_chars=budget)
+                       max_iters=max_iters, budget_chars=budget)
     except Exception as e:  # noqa: BLE001 — belt: run_turn never raises
         return f"[{idx}/{total}] failed ({type(e).__name__})"
     body = res.text.strip()
@@ -126,8 +152,9 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
     if not isinstance(tasks, list) or not tasks:
         raise ToolError("tasks must be a non-empty array of task strings "
                         "or {task, model} objects")
-    if len(tasks) > MAX_PARALLEL:
-        raise ToolError(f"at most {MAX_PARALLEL} tasks per call "
+    max_parallel, max_iters = _limits()   # car C: owner-configurable bounds
+    if len(tasks) > max_parallel:
+        raise ToolError(f"at most {max_parallel} tasks per call "
                         f"(got {len(tasks)})")
     clean: list[tuple[str, str | None]] = []
     for i, t in enumerate(tasks, 1):
@@ -178,10 +205,11 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
         i, text, model, why = item
         if why:
             return f"[{i}/{total}] error: {why}"
-        return _one(text, i, total, sub_registry, chat, budget, model)
+        return _one(text, i, total, sub_registry, chat, budget, model,
+                    max_iters=max_iters)
 
     if total == 1:
         return _run(plan[0])
-    with ThreadPoolExecutor(max_workers=min(MAX_PARALLEL, total)) as pool:
+    with ThreadPoolExecutor(max_workers=min(max_parallel, total)) as pool:
         parts = list(pool.map(_run, plan))
     return "\n\n".join(parts)
