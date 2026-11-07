@@ -15,7 +15,7 @@
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="最新版本"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-2124%2F2124-brightgreen?style=flat-square" alt="核心测试 2124/2124">
-  <img src="https://img.shields.io/badge/console_smoke-471%2F471-brightgreen?style=flat-square" alt="控制台冒烟 471/471">
+  <img src="https://img.shields.io/badge/console_smoke-477%2F477-brightgreen?style=flat-square" alt="控制台冒烟 477/477">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
 
@@ -176,7 +176,7 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 | 套件 | 结果 |
 |---|---|
 | `mycore` 核心套件 | **2124/2124** |
-| 控制台冒烟（真实 HTTP） | **471/471**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
+| 控制台冒烟（真实 HTTP） | **477/477**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
 | 技能路由 | **30/30** |
 | 记忆持久化 | **58/58** |
 | 安装向导 | **99/99** |

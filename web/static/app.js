@@ -942,11 +942,17 @@ async function exProbe() {
    plans, venues, tools, probe + the new quote and external-link cards);
    Home/Vehicle are thin launchers onto the SENSE board — they call the very
    same setView() the sidebar uses and never duplicate SNIFF collection. */
+/* car D: which tab is open — declared BEFORE the first setExtTab() call
+   (the boot path switches to finance during script evaluation, so a later
+   `let` would be a TDZ ReferenceError that kills the whole page). */
+let extLastTab = "finance";
+
 function setExtTab(name) {
   const tabs = Array.prototype.slice.call(
     document.querySelectorAll("#view-exchange .ext-tab"));
   if (!tabs.length) return;
   if (!tabs.some(b => b.dataset.tab === name)) name = tabs[0].dataset.tab;
+  extLastTab = name;              // car D: user tabs re-render keeps the view
   tabs.forEach(b => {
     const on = b.dataset.tab === name;
     b.classList.toggle("is-active", on);
@@ -5656,6 +5662,8 @@ function settingsRelang() {
   renderFileFace();            // round C: file face text follows the pack
   renderModelChips();          // D1: chip remove labels follow the pack
   paintInstallFolder();      // novice recovery: the install-folder line follows the pack
+  renderJourney();           // car D: journey chips + moments follow the pack
+  renderExtensions();        // car D: curated board tabs follow the pack too
   paintLedgerStatus();        // D2: ledger card dynamic rows follow the pack too
   renderAgentPlans();         // car C: plan rows follow the pack too
   renderRecovery();           // car K: recovery rows follow the pack too
@@ -6430,7 +6438,16 @@ function renderSetup() {
         `${escapeHtml(t("act.startTip",
           "Tip: the Model card has one-click presets — OpenAI-compatible / " +
           "Ollama / LM Studio — with local-server auto-detection " +
-          "(a local server needs no API key)."))}</div>`;
+          "(a local server needs no API key)."))}</div>` +
+        // car D (5.1, keyless branch): the watchdog mode is a REAL start —
+        // no brain, no key, no terminal. One button to the SENSE board.
+        `<div class="stat-note" style="margin-top:4px;">` +
+        `${escapeHtml(t("act.startKeyless",
+          "No API key yet? Start in watchdog mode — no brain needed: watch " +
+          "a page or set a reminder on the SENSE board, and add a brain " +
+          "later."))} ` +
+        `<button class="btn" type="button" data-jrn-go="sniff" ` +
+        `data-i18n="act.startKeylessGo">OPEN THE SENSE BOARD</button></div>`;
     }
   }
   const items = Array.isArray(setupData.items) ? setupData.items : [];
@@ -9051,6 +9068,8 @@ function setView(name, fromUser) {
     if (fromUser || !agentPlanData) refreshAgentPlans();
     if (fromUser || !recData) refreshRecovery();   // car K: recovery facts
   }
+  // car D: the journey card loads when Overview opens (local facts only)
+  if (name === "overview" && (fromUser || !jrnData)) refreshJourney();
   // SNIFF car: the SENSE board lazy-loads on the same rule — first open, then
   // only on a user nav click (the sweep state changes server-side anyway).
   if (name === "sniff" && (fromUser || !sniffData)) refreshSniff();
@@ -9509,10 +9528,216 @@ if (extQuoteMarketEl) extQuoteMarketEl.addEventListener("change", () => {
   if (!cur || cur === "sh600519" || cur === "AAPL")
     inp.value = extQuoteDefault(extQuoteMarketEl.value);
 });
-const extHomeGoEl = document.getElementById("extHomeGo");
-if (extHomeGoEl) extHomeGoEl.addEventListener("click", () => setView("sniff", true));
-const extVehicleGoEl = document.getElementById("extVehicleGo");
-if (extVehicleGoEl) extVehicleGoEl.addEventListener("click", () => setView("sniff", true));
+/* ---------------------- car D (#10): the curated Extensions board -------
+   The board is USER-curated: settings.extensions.categories drives the
+   user tabs + panels (a category appears only when the owner adds it); the
+   old fixed Home/Vehicle stubs became inert PRESET EXAMPLES — adopt is one
+   console settings write, and nothing runs until real sources exist on the
+   SENSE board. The ASSISTANT still can only propose settings (car C); the
+   owner's own console writes directly, like every other settings card. */
+const EXT_PRESETS = [
+  { id: "home", nameKey: "ext.tab.home", name: "Home",
+    bodyKey: "ext.preset.home",
+    body: "Home sources — Home Assistant bridges, sensors and web pages — live on the SENSE board. Adopt this category to keep them in their own space." },
+  { id: "vehicle", nameKey: "ext.tab.vehicle", name: "Vehicle",
+    bodyKey: "ext.preset.vehicle",
+    body: "Vehicle sources — MCP bridges, telematics feeds and web pages — live on the SENSE board. Adopt this category to keep them in their own space." },
+  { id: "smart-diet", nameKey: "ext.preset.dietName", name: "Smart diet",
+    bodyKey: "ext.preset.diet",
+    body: "Track menus, prices and nutrition pages: add a web source per page on the SENSE board, give it an extract pattern, and let a rule speak when your diet goal needs attention." },
+];
+
+function extCats() {
+  return (settings.extensions && Array.isArray(settings.extensions.categories))
+    ? settings.extensions.categories : [];
+}
+
+function extSlugify(name) {
+  let s = String(name).toLowerCase().replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "").slice(0, 32);
+  if (!s) {   // non-latin names (CJK etc.) get a stable codepoint slug
+    s = ("c-" + Array.from(String(name))
+      .map(ch => ch.codePointAt(0).toString(36)).join("-")).slice(0, 32);
+  }
+  return s || "cat";
+}
+
+async function extWriteCats(cats, okKey, okFallback) {
+  const msg = document.getElementById("extMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err"; msg.textContent = badTokenText(); }
+    return;
+  }
+  if (msg) { msg.className = "save-state"; msg.textContent = "\u2026"; }
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ extensions: { categories: cats } }) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      if (msg) { msg.className = "save-state err"; msg.textContent = badTokenText(); }
+      return;
+    }
+    if (!res.ok) {
+      const det = ((body && (body.details || [body.error])) || ["error"])
+        .join("; ");
+      if (msg) { msg.className = "save-state err"; msg.textContent = det.slice(0, 160); }
+      return;
+    }
+    settings = Object.assign(settings, body.settings || {});
+    if (msg) { msg.className = "save-state";
+      msg.textContent = "\u2713 " + t(okKey, okFallback); }
+    renderExtensions();
+  } catch (e) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = String(e).slice(0, 80); }
+  }
+}
+
+function renderExtensions() {
+  const tabsBox = document.getElementById("extUserTabs");
+  const panelsBox = document.getElementById("extUserPanels");
+  if (!tabsBox || !panelsBox) return;
+  const cats = extCats();
+  tabsBox.innerHTML = cats.map(c =>
+    `<button class="ext-tab" type="button" role="tab" ` +
+    `data-tab="u-${escapeHtml(c.id)}" aria-selected="false">` +
+    `${escapeHtml(c.name)}</button>`).join("");
+  panelsBox.innerHTML = cats.map(c =>
+    `<div class="ext-panel" data-tabpanel="u-${escapeHtml(c.id)}" hidden>` +
+    `<div class="ov-grid"><section class="card span-4">` +
+    `<h2>${escapeHtml(c.name)}</h2>` +
+    `<p class="auth-lead">${escapeHtml(t("ext.userPanel",
+      "Your space for {n} — add this domain's sources, rules and sweeps on " +
+      "the SENSE board; nothing runs until you add them.")
+      .replace("{n}", c.name))}</p>` +
+    `<div class="ctl-actions">` +
+    `<button class="btn primary" type="button" data-ext-go ` +
+    `data-i18n="ext.home.go">OPEN THE SNIFF BOARD</button>` +
+    `<button class="btn" type="button" data-ext-remove="${escapeHtml(c.id)}" ` +
+    `data-i18n="ext.removeCat">REMOVE</button></div>` +
+    `</section></div></div>`).join("");
+  Array.prototype.forEach.call(tabsBox.querySelectorAll(".ext-tab"), b => {
+    b.addEventListener("click", () => setExtTab(b.dataset.tab));
+  });
+  panelsBox.querySelectorAll("[data-ext-go]").forEach(b =>
+    b.addEventListener("click", () => setView("sniff", true)));
+  panelsBox.querySelectorAll("[data-ext-remove]").forEach(b =>
+    b.addEventListener("click", () => {
+      if (!window.confirm(t("ext.confirmRemove",
+          "Remove this category from the board? (Nothing else is touched.)")))
+        return;
+      extWriteCats(extCats().filter(c => c.id !== b.dataset.extRemove),
+                   "ext.removed", "category removed");
+    }));
+  // preset examples: adoptable while the board has room — inert until then
+  const area = document.getElementById("extPresetArea");
+  const list = document.getElementById("extPresetList");
+  if (area && list) {
+    const have = new Set(cats.map(c => c.id));
+    const room = EXT_PRESETS.filter(p => !have.has(p.id));
+    area.hidden = room.length === 0 || cats.length >= 8;
+    list.innerHTML = room.map(p =>
+      `<section class="card span-4"><h2>${escapeHtml(t(p.nameKey, p.name))}</h2>` +
+      `<p class="auth-lead">${escapeHtml(t(p.bodyKey, p.body))}</p>` +
+      `<div class="ctl-actions"><button class="btn" type="button" ` +
+      `data-ext-adopt="${escapeHtml(p.id)}" data-i18n="ext.adopt">` +
+      `ADD TO MY BOARD</button></div></section>`).join("");
+    list.querySelectorAll("[data-ext-adopt]").forEach(b =>
+      b.addEventListener("click", () => {
+        const p = EXT_PRESETS.find(x => x.id === b.dataset.extAdopt);
+        if (!p) return;
+        extWriteCats(extCats().concat([{ id: p.id, name: t(p.nameKey, p.name) }]),
+                     "ext.adopted", "category added");
+      }));
+  }
+  setExtTab(cats.some(c => "u-" + c.id === extLastTab)
+            || extLastTab === "finance" ? extLastTab : "finance");
+}
+
+const extAddCatEl = document.getElementById("extAddCat");
+if (extAddCatEl) extAddCatEl.addEventListener("click", () => {
+  const name = (window.prompt(t("ext.promptName",
+    "Category name (e.g. Smart diet):")) || "").trim().slice(0, 40);
+  if (!name) return;
+  const cats = extCats();
+  if (cats.length >= 8) return;
+  let id = extSlugify(name);
+  let n = 2;
+  while (cats.some(c => c.id === id)) id = extSlugify(name) + "-" + (n++);
+  extWriteCats(cats.concat([{ id, name }]),
+               "ext.added", "category added");
+});
+
+/* car D: the adoption ladder + the five ritual moments (GET /api/journey —
+   LOCAL facts only, no telemetry). Relationship framing per the L0–L4
+   doctrine: parked at any level is a success; each level adds ONE
+   concept; the next action is ONE deep link, never a checklist. */
+let jrnData = null;
+const JRN_LABELS = {
+  l0: ["jrn.l0", "Watchdog"], l1: ["jrn.l1", "Brain"],
+  l2: ["jrn.l2", "Skills"], l3: ["jrn.l3", "Pocket"],
+  l4: ["jrn.l4", "Geek full-open"] };
+const JRN_NEXT = {
+  l1: ["jrn.next.l1", "Next: give it a brain — one click in Settings → Model (OpenAI-compatible / Ollama / LM Studio).",
+       "settings"],
+  l2: ["jrn.next.l2", "Next: adopt a skill — the armory ships research and helper skills; one click each.",
+       "skills"],
+  l3: ["jrn.next.l3", "Next: put it in your pocket — create a Telegram bot (FatherBot) and paste the token in Settings → Telegram.",
+       "settings"],
+  l4: ["jrn.next.l4", "It is fully yours: the advanced surfaces (CLI, gateway, profiles) were always here — you are simply ready to see them.",
+       null] };
+const JRN_MOMENTS = {
+  bark: ["jrn.m.bark", "First bark — the first time it reached you first"],
+  response: ["jrn.m.response", "First response — the first thing it understood and kept"],
+  job: ["jrn.m.job", "First job — the first skill it worked for you"],
+  pocket: ["jrn.m.pocket", "Pocket dog — its first message on your phone"],
+  remembers: ["jrn.m.remembers", "It remembers you — the first time it quoted your own past"] };
+
+function renderJourney() {
+  const card = document.getElementById("journeyCard");
+  const stages = document.getElementById("jrnStages");
+  const next = document.getElementById("jrnNext");
+  const moments = document.getElementById("jrnMoments");
+  if (!card || !stages || !next || !moments) return;
+  const d = jrnData;
+  if (!d || typeof d !== "object") { card.hidden = true; return; }
+  card.hidden = false;
+  const st = (d.stages && typeof d.stages === "object") ? d.stages : {};
+  stages.innerHTML = ["l0", "l1", "l2", "l3", "l4"].map(k => {
+    const done = st[k] === true;
+    return `<span class="jrn-chip${done ? " is-done" : ""}` +
+      `${k === d.next ? " is-next" : ""}" ` +
+      `data-i18n="${JRN_LABELS[k][0]}">${escapeHtml(t(JRN_LABELS[k][0], JRN_LABELS[k][1]))}</span>`;
+  }).join("");
+  const nx = JRN_NEXT[d.next] || JRN_NEXT.l4;
+  next.innerHTML = escapeHtml(t(nx[0], nx[1])) +
+    (nx[2] ? ` <button class="btn" type="button" data-jrn-go="${nx[2]}" ` +
+              `data-i18n="jrn.go">GO</button>` : "");
+  const mo = (d.moments && typeof d.moments === "object") ? d.moments : {};
+  moments.innerHTML = Object.keys(JRN_MOMENTS).map(k => {
+    const got = mo[k] === true;
+    return `<div class="stat-note" style="margin-top:2px;">` +
+      `${got ? "\u2713" : "\u25cb"} ` +
+      `${escapeHtml(t(JRN_MOMENTS[k][0], JRN_MOMENTS[k][1]))}</div>`;
+  }).join("");
+}
+
+async function refreshJourney() {
+  try { jrnData = await fetch("/api/journey").then(r => r.json()); }
+  catch (e) { /* keep the last paint */ }
+  renderJourney();
+}
+
+/* one delegated listener for every journey/welcome deep link in Overview */
+const overviewSecEl = document.getElementById("view-overview");
+if (overviewSecEl) overviewSecEl.addEventListener("click", e => {
+  const b = e.target.closest("[data-jrn-go]");
+  if (b) setView(b.dataset.jrnGo, true);
+});
 /* UX round 2 (B2): the Overview backup pointer opens the one real card */
 const ovBackupOpenEl = document.getElementById("ovBackupOpen");
 if (ovBackupOpenEl) ovBackupOpenEl.addEventListener("click", () => openBackupCard());
@@ -10306,7 +10531,7 @@ const startLang = QS_LANG || localStorage.getItem(LANG_KEY) || "en";
 runBoot();
 setView(currentView, false);      // deep link applied before the first paint
 loadLang(startLang);
-loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); });
+loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); renderExtensions(); });
 refreshStatus(); refreshUsage(); refreshSelf(); refreshEvents(); refreshVersion(); refreshSkills();
 refreshControl();      // car 7 (D11): tail row + guardrails status at boot
 loadSkillsRemote();  // car 5: per-skill availability for the ORCHESTRATION row
@@ -10320,6 +10545,8 @@ loadChatHistory();   // console session restored at boot (read-only route)
 refreshVoiceCap();   // engine status visible before the first orb tap (#4)
 refreshCaps();       // media face: stt/image presence for the chat cards
 renderExchange();    // exchange panel paints its honest fallback at once
+renderExtensions();  // car D: the curated board renders from settings
+refreshJourney();    // car D: adoption ladder + moments (local facts)
 wireExNav();         // 0.5.56: group chips + search + exchange nav toggle
 setInterval(tickClock, 1000); tickClock();
 setInterval(tickModeltier, 1000);   // X6 cooling countdown (hidden = no-op)
