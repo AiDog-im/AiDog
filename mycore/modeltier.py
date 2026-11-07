@@ -153,6 +153,9 @@ def parse_upstreams(spec: str) -> tuple[Upstream, ...]:
             raise ValueError(f"entry {i}: bad url") from None
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ValueError(f"entry {i}: url must be http(s) with a host")
+        if parsed.username or parsed.password:
+            raise ValueError(f"entry {i}: url must not embed credentials "
+                             "(use a key slot)")
         key_env = parts[1] if len(parts) > 1 else ""
         if key_env:
             slots = tuple(s for s in key_env.split(","))
@@ -206,6 +209,9 @@ def parse_endpoints(raw: object) -> tuple[Upstream, ...]:
             raise ValueError(f"entry {i}: bad url") from None
         if parsed.scheme not in ("http", "https") or not parsed.hostname:
             raise ValueError(f"entry {i}: url must be http(s) with a host")
+        if parsed.username or parsed.password:
+            raise ValueError(f"entry {i}: url must not embed credentials "
+                             "(use a key slot)")
         model = entry.get("model", "")
         if model is None:
             model = ""

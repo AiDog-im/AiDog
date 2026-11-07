@@ -4,7 +4,8 @@ import { EventEmitter } from 'node:events';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { ensureConsole, stopSpawned } = require('../supervisor.js');
+const { ensureConsole, stopSpawned, verifyConsole, readWebToken } = require('../supervisor.js');
+const crypto = require('node:crypto');
 
 // ---- fakes -------------------------------------------------------------
 
@@ -227,4 +228,85 @@ test('stopSpawned in attached mode is a no-op', async () => {
   assert.equal(stopSpawned(res), false);
   assert.equal(stopSpawned(null), false);
   assert.equal(stopSpawned({ mode: 'attached', base: BASE }), false);
+});
+
+// ---- W4-02: health signature verification -------------------------------
+
+// fetch fake that answers BOTH plain health and ?nonce= health: the nonce
+// leg returns `sig` computed with `token` (a correct listener) or a wrong
+// one (a hostile listener that stole the port).
+function makeSignedFetch({ token = 'test-token', good = true } = {}) {
+  const seen = [];
+  const fn = async (url, init) => {
+    seen.push(String(url));
+    const u = new URL(String(url));
+    const nonce = u.searchParams.get('nonce');
+    let body = { status: 'ok', version: '0.0.0', ts: 1 };
+    if (nonce) {
+      const key = good ? token : 'attacker-guess';
+      body.sig = crypto.createHmac('sha256', key).update(nonce).digest('hex');
+    }
+    return { ok: true, status: 200, json: async () => body };
+  };
+  return { fn, seen };
+}
+
+test('W4-02: valid health signature verifies -> console accepted', async () => {
+  const f = makeSignedFetch({ token: 'sekrit', good: true });
+  const ok = await verifyConsole({
+    base: BASE, repo: '/r', fetchImpl: f.fn,
+    readToken: () => 'sekrit', logger: silent,
+  });
+  assert.equal(ok, true);
+  assert.equal(f.seen.length, 1);
+  assert.ok(f.seen[0].includes('nonce='), f.seen[0]);
+});
+
+test('W4-02: hostile listener (wrong sig) is refused', async () => {
+  const f = makeSignedFetch({ token: 'sekrit', good: false });
+  const ok = await verifyConsole({
+    base: BASE, repo: '/r', fetchImpl: f.fn,
+    readToken: () => 'sekrit', logger: silent,
+  });
+  assert.equal(ok, false);
+});
+
+test('W4-02: listener that omits the sig entirely is refused', async () => {
+  const fetchFake = async () => ({
+    ok: true, status: 200, json: async () => ({ status: 'ok' }),
+  });
+  const ok = await verifyConsole({
+    base: BASE, repo: '/r', fetchImpl: fetchFake,
+    readToken: () => 'sekrit', logger: silent,
+  });
+  assert.equal(ok, false);
+});
+
+test('W4-02: no WEB_TOKEN configured (fresh install) skips the check', async () => {
+  let called = false;
+  const fetchFake = async () => { called = true; throw new Error('must not fetch'); };
+  const ok = await verifyConsole({
+    base: BASE, repo: '/r', fetchImpl: fetchFake,
+    readToken: () => null, logger: silent,
+  });
+  assert.equal(ok, true);
+  assert.equal(called, false);
+});
+
+test('W4-02: readWebToken parses the own-line slot (profile-aware)', () => {
+  const fsFake = {
+    readFileSync(p) {
+      if (String(p).endsWith('profiles/beta/secrets.env'))
+        return 'A=x\nWEB_TOKEN=abc123\nZ=y\n';
+      if (String(p).endsWith('secrets.env')) return 'WEB_TOKEN=base-token\n';
+      throw new Error('enoent');
+    },
+  };
+  assert.equal(readWebToken('/r', {}, fsFake), 'base-token');
+  assert.equal(readWebToken('/r', { AIDOG_PROFILE: 'beta' }, fsFake), 'abc123');
+  // invalid profile name fails closed -> null (never another profile's brain)
+  assert.equal(readWebToken('/r', { AIDOG_PROFILE: '../evil' }, fsFake), null);
+  // missing file -> null (fresh install)
+  const none = { readFileSync() { throw new Error('enoent'); } };
+  assert.equal(readWebToken('/r', {}, none), null);
 });

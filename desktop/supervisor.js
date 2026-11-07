@@ -5,9 +5,22 @@
 //   unhealthy -> spawn `python3 server.py` (cwd <repo>/web), poll health
 //                up to ~10s -> { mode: 'spawned', base, child }
 //   failure -> throws with a clear message.
-// All collaborators are injectable (fetchImpl / spawnImpl / logger) so
-// node --test can exercise every branch with fakes -- no real ports.
+// Wrap-up audit W4-02: a healthy probe is NOT enough -- a hostile local
+// listener can steal the port and answer 200. Before the shell loads the
+// console origin (whose localStorage holds WEB_TOKEN) it requires the
+// listener to prove it knows WEB_TOKEN: GET /api/health?nonce=<hex> must
+// come back with sig = HMAC-SHA256(WEB_TOKEN, nonce). The shell reads the
+// token from the SAME file the console does (never echoed, never sent), a
+// hostile listener cannot forge the sig, and a replay dies on the fresh
+// nonce. Installations with no WEB_TOKEN yet (fresh provision) skip the
+// check -- there is no token in localStorage to steal either.
+// All collaborators are injectable (fetchImpl / spawnImpl / readToken /
+// logger) so node --test can exercise every branch with fakes -- no real
+// ports and no real secrets.env.
 
+const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
 const { baseUrl, portFromEnv, readPinnedPort } = require('./repo');
 
 const PROBE_TIMEOUT_MS = 1500;
@@ -16,6 +29,77 @@ const READY_INTERVAL_MS = 250;
 
 function defaultLogger() {
   /* silent by default */
+}
+
+// Own-line WEB_TOKEN read from <repo>/secrets.env -- mirrors web/server.py
+// _slot_value and lib/profile_paths.secrets_path (AIDOG_PROFILE ->
+// <profiles>/<name>/secrets.env, invalid name fails closed to "no token"
+// exactly like profile_paths.ProfileError refuses to resolve). Returns null
+// when the file or the slot is absent/unreadable; the value never leaves
+// this function except as the verifyConsole key.
+function readWebToken(repo, env, fsLike) {
+  try {
+    const f = fsLike || fs;
+    const e = env || {};
+    const prof = String(e.AIDOG_PROFILE || '').trim();
+    let file;
+    if (prof) {
+      if (!/^[a-z0-9][a-z0-9_-]{0,31}$/.test(prof)) return null;
+      const root = String(e.AIDOG_PROFILES_DIR || '').trim() ||
+        path.join(repo, 'profiles');
+      file = path.join(root, prof, 'secrets.env');
+    } else {
+      file = path.join(repo, 'secrets.env');
+    }
+    const m = /^WEB_TOKEN=(\S[^\r\n]*)$/m.exec(f.readFileSync(file, 'utf8'));
+    return m ? m[1].trim() : null;
+  } catch {
+    return null;
+  }
+}
+
+// Challenge-response against {base}/api/health?nonce=<hex> (see header).
+// Resolves true when the listener proved knowledge of WEB_TOKEN, when no
+// token is configured (nothing to protect), or when no repo is known (the
+// file cannot be located -- production always passes a resolved repo).
+async function verifyConsole({ base, repo, env, fetchImpl, readToken, logger }) {
+  let token = null;
+  if (readToken) {
+    token = readToken(repo, env);
+  } else if (repo) {
+    token = readWebToken(repo, env);
+  }
+  if (!token) return true; // fresh install: no token -> no sig expected
+  const nonce = crypto.randomBytes(16).toString('hex');
+  try {
+    const res = await fetchImpl(`${base}/api/health?nonce=${nonce}`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(PROBE_TIMEOUT_MS),
+    });
+    if (!res || !res.ok) return false;
+    const body = await res.json();
+    const expect = crypto.createHmac('sha256', token).update(nonce).digest('hex');
+    const got = body && typeof body.sig === 'string' ? body.sig : '';
+    const ok = got.length === expect.length &&
+      crypto.timingSafeEqual(Buffer.from(got), Buffer.from(expect));
+    if (!ok && logger) logger(`console at ${base} failed the health signature check -- refusing to attach`);
+    return ok;
+  } catch {
+    return false;
+  }
+}
+
+// Probe + verify in one verdict (both attach and spawn-poll use THIS).
+async function healthy(base, opts) {
+  if (!(await probeHealth(base, opts.fetchImpl))) return false;
+  return verifyConsole({
+    base,
+    repo: opts.repo,
+    env: opts.env,
+    fetchImpl: opts.fetchImpl,
+    readToken: opts.readToken,
+    logger: opts.logger,
+  });
 }
 
 // Probe {base}/api/health. Resolves true only on a 2xx JSON-ish answer.
@@ -54,7 +138,7 @@ async function ensureConsole(opts = {}) {
   const readyTimeoutMs = opts.readyTimeoutMs ?? READY_TIMEOUT_MS;
   const readyIntervalMs = opts.readyIntervalMs ?? READY_INTERVAL_MS;
 
-  if (await probeHealth(base, fetchImpl)) {
+  if (await healthy(base, { repo, env, fetchImpl, readToken: opts.readToken, logger })) {
     logger(`console healthy at ${base} -- attaching`);
     return { mode: 'attached', base };
   }
@@ -87,7 +171,7 @@ async function ensureConsole(opts = {}) {
 
   const deadline = Date.now() + readyTimeoutMs;
   for (;;) {
-    if (await probeHealth(base, fetchImpl)) {
+    if (await healthy(base, { repo, env, fetchImpl, readToken: opts.readToken, logger })) {
       return { mode: 'spawned', base, child };
     }
     if (Date.now() >= deadline) {
@@ -119,4 +203,4 @@ function stopSpawned(state) {
   }
 }
 
-module.exports = { ensureConsole, stopSpawned, probeHealth, PROBE_TIMEOUT_MS, READY_TIMEOUT_MS };
+module.exports = { ensureConsole, stopSpawned, probeHealth, verifyConsole, readWebToken, PROBE_TIMEOUT_MS, READY_TIMEOUT_MS };

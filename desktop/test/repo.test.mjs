@@ -114,6 +114,29 @@ test('base honors AIDOG_WEB_PORT for probe/spawn port', () => {
   assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '' }), 'http://127.0.0.1:19167');
 });
 
+test('W4-01: hostile/corrupt AIDOG_WEB_PORT never reaches the URL', () => {
+  // wrap-up audit W4-01: `19167@evil:443` would make baseUrl()
+  // `http://127.0.0.1:19167@evil:443` (userinfo@host -> loadURL loads the
+  // attacker origin). Every non-integer value falls through the SAME chain
+  // as web/server.py _resolve_web_port: env -> pinned -> default.
+  const inject = '19167@evil.example:443';
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: inject }),
+    'http://127.0.0.1:19167');                 // -> default
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: inject }, '19200'),
+    'http://127.0.0.1:19200');                 // -> pinned
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: 'abc' }),
+    'http://127.0.0.1:19167');
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '80x80' }),
+    'http://127.0.0.1:19167');
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '99999' }),
+    'http://127.0.0.1:19167');                 // out of range
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '-5' }),
+    'http://127.0.0.1:19167');
+  // valid integers still win over pinned (car A2 contract preserved)
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '20001' }, '19200'),
+    'http://127.0.0.1:20001');
+});
+
 test('car A2 port chain: pinned port.local beats the default, env beats the file', () => {
   // env > pinned > default — the SAME order as web/server.py.
   assert.equal(repo.baseUrl({}, '19200'), 'http://127.0.0.1:19200');
