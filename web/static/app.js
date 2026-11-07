@@ -2041,6 +2041,16 @@ function renderEndpoints() {
     test.textContent = t("myc.epTest", "TEST");
     test.addEventListener("click", () => epTestRow(row, test));
     keys.appendChild(test);
+    // console fix car (owner 2026-11-05): every ROUTE row can discover its
+    // own model directory (the primary row's discover IS the #discPanel
+    // above — its model field lives in the Kernel model input, not here).
+    if (idx >= 0) {
+      const disc = document.createElement("button");
+      disc.type = "button"; disc.className = "btn ep-test ep-disc";
+      disc.textContent = t("myc.discover", "DISCOVER MODELS");
+      disc.addEventListener("click", () => epDiscRow(row, disc));
+      keys.appendChild(disc);
+    }
     el.appendChild(keys);
     const res = document.createElement("div");
     res.className = "ep-result"; res.hidden = true;
@@ -2070,7 +2080,7 @@ function renderEndpoints() {
     const note = document.createElement("div");
     note.className = "stat-note";
     note.textContent = t("myc.epEmpty",
-      "primary endpoint only — add failover endpoints below");
+      "primary endpoint only — add model source routes below");
     list.appendChild(note);
   }
 }
@@ -2114,6 +2124,97 @@ async function epTestRow(row, btn) {
       (slot ? " · " + slot : ""));
   } catch (e) {
     return show(false, t("myc.testNet", "request failed — ") +
+      String((e && e.message) || e).slice(0, 60));
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+/* console fix car (owner 2026-11-05): per-route model discovery — one
+   read-only GET of THIS row's model directory (the same D1 endpoint the
+   #discPanel uses, with the row's first SET key slot so an authenticated
+   route discovers too). The result renders into the row's existing
+   .ep-result as a <select>: picking an option writes the row's model by
+   dispatching a REAL input event on the model field, so the row listener,
+   the sticky save bar and mycoreExtraPayload() all see it exactly like a
+   typed edit — nothing lands until SAVE. The primary row has no button
+   (its discover is the #discPanel above). */
+async function epDiscRow(row, btn) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  const el = btn.closest(".ep-row");
+  const res = el ? el.querySelector(".ep-result") : null;
+  const show = (ok, text) => {
+    if (!res) return;
+    res.hidden = false;
+    res.className = "ep-result " + (ok ? "ok" : "bad");
+    res.textContent = (ok ? "✓ " : "✗ ") + text;
+  };
+  if (!token) return show(false, t("cred.needToken", "access token required — set it in Access"));
+  const url = String(row.url || "").trim();
+  if (!url) return show(false, t("myc.epNoUrl", "endpoint url required"));
+  const slot = (row.keys || []).find(s => epPresence[s]) || "";
+  const modelInput = el.querySelector(".ep-model");
+  const readonly = !!(modelInput && modelInput.disabled);
+  btn.disabled = true;
+  if (res) {
+    res.hidden = false;
+    res.className = "ep-result";
+    res.textContent = t("myc.discoverRun", "reading the model directory…");
+  }
+  try {
+    const r = await fetch("/api/models/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(slot ? { base_url: url, slot } : { base_url: url })
+    });
+    let body = null;
+    try { body = await r.json(); } catch (e) { body = null; }
+    if (!r.ok) {
+      const det = (body && Array.isArray(body.details)) ? body.details : [];
+      return show(false, r.status + " · " +
+        (det[0] || (body && body.error) || t("myc.testFail", "test failed")));
+    }
+    if (!body || body.ok !== true) {
+      return show(false, t("myc.discoverFail", "discovery failed — {reason}")
+        .replace("{reason}", String((body && body.reason) || "?")));
+    }
+    const models = (Array.isArray(body.models) ? body.models : [])
+      .map(m => (m && typeof m === "object") ? String(m.id || "") : "")
+      .filter(Boolean);
+    if (!models.length) {
+      return show(false, t("myc.discoverNone", "the endpoint answered, but listed no models"));
+    }
+    if (!res) return;
+    // success: the select IS the result (no new locale keys — the
+    // placeholder reuses myc.epModelPh, whose meaning fits exactly)
+    res.hidden = false;
+    res.className = "ep-result ok";
+    res.textContent = "";
+    const sel = document.createElement("select");
+    sel.className = "ep-disc-sel";
+    const ph = document.createElement("option");
+    ph.value = "";
+    ph.textContent = t("myc.epModelPh", "model (empty = inherit)");
+    sel.appendChild(ph);
+    models.forEach(id => {
+      const o = document.createElement("option");
+      o.value = id;
+      o.textContent = id;
+      sel.appendChild(o);
+    });
+    if (row.model && models.indexOf(row.model) >= 0) sel.value = row.model;
+    if (readonly) sel.disabled = true;   // env-sourced rows never gain a write
+    sel.addEventListener("change", () => {
+      if (!modelInput) return;
+      modelInput.value = sel.value;
+      // a REAL input event: the row listener sets row.model + epDirty, the
+      // delegated saveBarDirty lights the sticky bar, the payload ships it
+      modelInput.dispatchEvent(new Event("input", { bubbles: true }));
+    });
+    res.appendChild(sel);
+  } catch (e) {
+    show(false, t("myc.testNet", "request failed — ") +
       String((e && e.message) || e).slice(0, 60));
   } finally {
     btn.disabled = false;
@@ -4027,6 +4128,7 @@ function renderCreds(body) {
     list.appendChild(head);
     items.forEach(s => list.appendChild(credRow(s, writable)));
   });
+  associateSettingsLabels();
 }
 
 /* -------------------------------------------------- Telegram card (0.5.43) --
@@ -4062,6 +4164,7 @@ function renderTgCreds(body) {
     shown++;
   });
   list.hidden = shown === 0;
+  associateSettingsLabels();
 }
 
 /* ------------------------------------------- Connections card (car 6) ------
@@ -4085,6 +4188,7 @@ function renderConnections(body) {
     if (!slot) return;
     box.appendChild(credRow(slot, writable));
   });
+  associateSettingsLabels();
 }
 
 /* One TEST button per provider: POST /api/slots/verify for that ONE slot,
@@ -4464,6 +4568,7 @@ function renderProxyCred(body) {
   head.textContent = t("px.authHead", "proxy credentials (slot — set user:pass)");
   box.appendChild(head);
   box.appendChild(credRow(slot, writable));
+  associateSettingsLabels();       // proxy slot row (fourth credRow caller)
 }
 
 function wireProxy() {
@@ -4833,6 +4938,7 @@ function renderChannels() {
   });
   paintChanChips();
   paintRegionNotes();            // car I: cn-tier dim/notes for the fresh rows
+  associateSettingsLabels();
 }
 
 function paintChanChips() {
@@ -5106,6 +5212,7 @@ function renderHooks() {
     add.textContent = t("hook.add", "+ ADD");
     add.addEventListener("click", () => {
       blk.appendChild(hookRowEl([], null));
+      associateSettingsLabels();       // the fresh row's timeout label
       hookDirty.add(ev);
       updateHookCount(blk);
     });
@@ -5122,6 +5229,7 @@ function renderHooks() {
     list.appendChild(blk);
   });
   updateHookCounts();
+  associateSettingsLabels();
 }
 
 /* Only the events the operator edited enter the payload; an event whose
@@ -5299,6 +5407,15 @@ function mycoreExtraPayload() {
       // the server enforces 5..600 and its refusal is the honest signal
       if (Number.isFinite(n) && n !== (Number(stored.timeout) || 120)) {
         out.timeout = n;
+      }
+    }
+    const mxEl = document.getElementById("mycMaxTokens");
+    if (mxEl && String(mxEl.value || "").trim() !== "") {
+      const n = parseInt(mxEl.value, 10);
+      // untouched default (4096) never rides along — same dirty-block rule;
+      // the server enforces 128..65536 and its refusal is the honest signal
+      if (Number.isFinite(n) && n !== (Number(stored.max_tokens) || 4096)) {
+        out.max_tokens = n;
       }
     }
     // X12/X15 opt-in switches: they enter the payload only when they really
@@ -5712,6 +5829,11 @@ async function refreshSecurity(fromButton) {
     const res = await fetch("/api/security", {
       headers: { "Authorization": "Bearer " + token } });
     if (res.status === 401) {
+      // e2e_shell root cause (console fix car 0.5.78): an unread error body
+      // never finishes the request in Chromium — `networkidle` then never
+      // settles and every networkidle navigation hangs. Drain the 25-byte
+      // body before the early return (same rule any other fetch follows).
+      await res.text().catch(() => "");
       if (msg) { msg.className = "save-state err";
         msg.textContent = badTokenText(); }
       return;
@@ -5843,6 +5965,55 @@ async function postControl(action) {
   }
 }
 
+/* UX fix car (2026-11-06): static AND dynamic controls were unlabeled —
+   visible text sat next to the field but never named it for assistive tech
+   (WCAG 1.3.1/4.1.2). Pair every unpaired <label> with its control when the
+   box holds exactly one of each (never guess on ambiguity). Shapes in this
+   DOM: (0) ADJACENCY — the label's next sibling is the field it names (the
+   builder convention everywhere; also the only wire for mixed rows like
+   hookRowEl = textarea + label + timeout); (1) label + control in one box
+   (cred rows) — direct child first, then nested (Backup file rides inside
+   .file-face); (2) a label-only box whose control FOLLOWS as the next
+   sibling — bare textarea (missionGoal/usageModelPricing/mycMcp) or its own
+   .ctl-row (obRules); (3) JS-built rows whose input never got an id —
+   synthesize a unique one (a11yctl-N, never repeats) so for= can reference
+   it. htmlFor is language-neutral (the label TEXT repaints on lang switch,
+   the link does not), so no staleness. Idempotent: wired labels are skipped;
+   re-run after every row rebuild (renderCreds/renderChannels/renderHooks). */
+let a11yCtlSeq = 0;             // synthetic id counter — unique across re-renders
+function associateSettingsLabels() {
+  const CTL = "input, select, textarea";
+  const wire = (lab, ctl) => {
+    if (!ctl.id) ctl.id = "a11yctl-" + (++a11yCtlSeq);
+    lab.htmlFor = ctl.id;
+  };
+  document.querySelectorAll("label").forEach(lab => {
+    if (lab.htmlFor) return;
+    const p = lab.parentElement;
+    if (!p) return;
+    if (p.querySelectorAll(":scope > label").length !== 1) return;
+    // (0) adjacency: the label's NEXT sibling is the control it names —
+    //     the builder convention everywhere (label precedes its field), and
+    //     the ONLY way to wire a mixed row (hookRowEl = textarea + label +
+    //     timeout: the label names the number, not the command box).
+    const nxt = lab.nextElementSibling;
+    if (nxt && nxt.matches && nxt.matches(CTL)) { wire(lab, nxt); return; }
+    // (1) control in the same box
+    let ctls = p.querySelectorAll(":scope > " + CTL);
+    if (!ctls.length) ctls = p.querySelectorAll(CTL);
+    if (ctls.length === 1) { wire(lab, ctls[0]); return; }
+    if (ctls.length > 1) return;          // several controls: never guess
+    // (2) label-only box: the control follows as the next sibling
+    const q = p.nextElementSibling;
+    if (!q) return;
+    if (q.matches && q.matches(CTL)) { wire(lab, q); return; }
+    if (q.classList && q.classList.contains("ctl-row")
+        && !q.querySelector("label") && q.querySelectorAll(CTL).length === 1) {
+      wire(lab, q.querySelector(CTL));
+    }
+  });
+}
+
 function initSettingsPanels() {
   const u = (settings.usage && typeof settings.usage === "object")
     ? settings.usage : {};
@@ -5882,6 +6053,9 @@ function initSettingsPanels() {
   // DEFAULT (120) when absent; programmatic fill fires no input event, so an
   // untouched field never raises mycDirty.
   setField("mycTimeout", myc.timeout == null ? 120 : myc.timeout);
+  // console fix car (owner 2026-11-05): output cap — stored value, the
+  // DEFAULT (4096) when absent (same fill pattern as timeout above).
+  setField("mycMaxTokens", myc.max_tokens == null ? 4096 : myc.max_tokens);
   // Wave 6 delta2: the two opt-in switches round-trip like the other fields
   setField("mycPrune", myc.session_prune_days);
   setField("mycEffort", myc.reasoning_effort || "");
@@ -6451,10 +6625,15 @@ function capRowsOf(c) {
   const w3 = (c.web3 && typeof c.web3 === "object") ? c.web3 : null;
   push("cap.web3", "Web3 auto caps",
     (w3 && w3.auto_usd_per_tx !== undefined && w3.auto_usd_daily !== undefined)
-      ? t("ex.thr.perTx", "per-tx cap {v} USD")
-          .replace("{v}", exNum(w3.auto_usd_per_tx)) + " · " +
-        t("ex.thr.daily", "daily cap {v} USD")
-          .replace("{v}", exNum(w3.auto_usd_daily))
+      ? ((Number(w3.auto_usd_per_tx) === 0 && Number(w3.auto_usd_daily) === 0)
+          // console fix car (owner 2026-11-05): both caps at 0 IS the
+          // fail-closed off state — "0 USD · 0 USD" noise becomes the honest
+          // verdict (the exchange view keeps the full hint sentence).
+          ? t("cap.web3Off", "off — nothing auto-approves")
+          : t("ex.thr.perTx", "per-tx cap {v} USD")
+              .replace("{v}", exNum(w3.auto_usd_per_tx)) + " · " +
+            t("ex.thr.daily", "daily cap {v} USD")
+              .replace("{v}", exNum(w3.auto_usd_daily)))
       : null);
 
   push("cap.env", "Environment overrides",
@@ -9943,7 +10122,7 @@ if (exCapSaveBtnEl) exCapSaveBtnEl.addEventListener("click", exCapSave);
     mycDirty = true; mycRestartDirty = true;
   });
 });
-["mycUpstreams", "mycModels", "mycBudget", "mycPrune", "mycEffort", "mycTimeout"].forEach(id => {
+["mycUpstreams", "mycModels", "mycBudget", "mycPrune", "mycEffort", "mycTimeout", "mycMaxTokens"].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener("input", () => { mycDirty = true; });
 });
@@ -11312,7 +11491,7 @@ const startLang = QS_LANG || localStorage.getItem(LANG_KEY) || "en";
 runBoot();
 setView(currentView, false);      // deep link applied before the first paint
 loadLang(startLang);
-loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); renderExtensions(); });
+loadSettings().then(() => { scheduleRefresh(); renderVoice(); initSettingsPanels(); renderExtensions(); associateSettingsLabels(); });
 refreshStatus(); refreshUsage(); refreshSelf(); refreshEvents(); refreshVersion(); refreshSkills();
 wireSkillsActions();        // car H: chips / install / switch / remove (once)
 refreshControl();      // car 7 (D11): tail row + guardrails status at boot

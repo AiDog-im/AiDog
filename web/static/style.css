@@ -540,6 +540,11 @@ body {
   min-height: 32px; border-radius: 6px; }
 .ctl-row select:focus, .ctl-row input:focus { outline: none;
   border-color: var(--blue); box-shadow: var(--glow); }
+/* console fix car (owner 2026-11-05): the Model card's numeric knobs carry
+   informative defaults ("4096 = default (128..65536)") that clipped in the
+   104px slot — one width for the whole stack keeps rows uniform and the
+   full range visible (border-box: clientWidth = 208 >= 201 needed). */
+#modelCard .ctl-row input[type="number"] { min-width: 210px; }
 .ctl-row textarea { background: #fff; border: 1px solid var(--line);
   color: var(--text); font: inherit; font-size: 13px; padding: 6px 9px;
   border-radius: 6px; flex: 1; min-width: 0; resize: vertical; }
@@ -560,7 +565,11 @@ body {
   background: rgba(40, 146, 255, .14); }
 .toggle[aria-pressed="true"] span { left: 22px; background: var(--blue);
   box-shadow: 0 0 8px rgba(40, 146, 255, .6); }
-.ctl-actions { display: flex; gap: 10px; align-items: center; margin-top: 4px; }
+.ctl-actions { display: flex; gap: 10px; align-items: center; margin-top: 4px;
+  /* console fix car (owner 2026-11-05): the Recovery card packs 7 buttons —
+     without wrap they overflowed the card and the page (268px of
+     horizontal scroll at 1440). Wrap keeps every action reachable. */
+  flex-wrap: wrap; }
 .save-state { font-size: 12.5px; color: var(--ok); font-family: var(--mono); }
 .save-state.err { color: var(--red); }
 
@@ -1921,12 +1930,14 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
   color: var(--blue-dim); }
 .tail-mood svg { display: block; }
 .tail-mood[data-state="working"] { color: var(--ok);
-  animation: tail-wag .9s ease-in-out infinite; transform-origin: 3px 14px; }
+  animation: tail-pulse 1.2s ease-in-out infinite; }
 .tail-mood[data-state="paused"] { color: var(--amber); }
 .tail-mood[data-state="blocked"] { color: var(--red); }
-@keyframes tail-wag {
-  0%, 100% { transform: rotate(0deg); }
-  50% { transform: rotate(14deg); }
+/* the dot breathes while working (the old rotate was invisible on a circle;
+   the global reduced-motion rule disables this for those users) */
+@keyframes tail-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: .35; }
 }
 /* mass-market onboarding 4.1: three preset buttons under the endpoint field */
 .preset-btns { display: flex; flex-wrap: wrap; gap: 6px; align-items: center;

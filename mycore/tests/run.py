@@ -1984,7 +1984,9 @@ def test_typewriter() -> None:
     legs over the injected send/edit/now seams: threshold and delay first
     sends, edit throttling, every failure collapsing to `dead` (shown text
     never rolls back), and the finalize ownership contract that decides
-    preview-vs-single-send at the delivery point."""
+    preview-vs-single-send at the delivery point — including the owner
+    2026-11-05 recovery: a dead/failed final edit delivers the full text
+    as ONE new message instead of silently truncating."""
     from mycore.service import (_Typewriter, STREAM_FIRST_CHARS,
                                 STREAM_FIRST_DELAY, STREAM_EDIT_CHARS,
                                 STREAM_EDIT_INTERVAL, STREAM_MAX_EDITS)
@@ -2051,7 +2053,7 @@ def test_typewriter() -> None:
     check("typewriter: next window edits again", len(edited) == 2,
           str(edited))
 
-    # --- edit failure -> dead: the shown text STAYS, finalize keeps it ---
+    # --- edit failure -> dead: the shown text STAYS, finalize recovers it ---
     before = len(edited)
     def edit_boom(mid, text):
         edited.append((mid, text))
@@ -2065,9 +2067,12 @@ def test_typewriter() -> None:
     tw3.push("i" * STREAM_EDIT_CHARS)
     check("typewriter: dead stream ignores further deltas",
           len(edited) == before + 1, str(len(edited)))
-    check("typewriter: dead started stream owns delivery (no re-send)",
+    # owner 2026-11-05: a dead preview must NOT silently truncate the
+    # reply — finalize retries the edit, and on failure delivers the full
+    # text as ONE new message (the shown partial stays above it).
+    check("typewriter: dead preview finalize delivers the full text",
           tw3.finalize("whatever the final text is") is True
-          and sent == ["abcd …"], str(sent))
+          and sent == ["abcd …", "whatever the final text is"], str(sent))
 
     # --- first-send failure -> stays unstarted -> finalize False ---
     sent.clear()
@@ -2302,19 +2307,26 @@ def test_service() -> None:
             check("service: /reset confirms in one line",
                   "archived" in fake.sends[-1][1], fake.sends[-1][1])
 
+            # console fix car: the model id is OWNER-CONFIGURABLE (settings
+            # page) — derive it instead of hardcoding, so a config change
+            # never crashes this leg (the /model command mechanics are the
+            # contract, not the specific id).
+            _ok = svc._allowed_models()[0]
             svc.handle_update(mk_update(8, 111, 123456789, "/model zeta-9"))
             check("service: /model rejects id outside configured list",
                   "unknown model id" in fake.sends[-1][1] and
-                  "mimo-v2.6-flash" in fake.sends[-1][1], fake.sends[-1][1])
-            svc.handle_update(mk_update(9, 111, 123456789, "/model mimo-v2.6-flash"))
+                  _ok in fake.sends[-1][1], fake.sends[-1][1])
+            svc.handle_update(mk_update(9, 111, 123456789, f"/model {_ok}"))
             check("service: /model writes session override file",
                   (state1 / "sessions" / "123456789.model").read_text().strip()
-                  == "mimo-v2.6-flash" and "model set" in fake.sends[-1][1])
+                  == _ok and "model set" in fake.sends[-1][1])
             svc.handle_update(mk_update(10, 111, 123456789, "/model"))
             show = fake.sends[-1][1]
+            _host = svc_mod.endpoint_host(
+                svc._model_for_chat(123456789).base_url)
             check("service: /model show = id @ endpoint host, no key",
-                  show.startswith("model: mimo-v2.6-flash @") and
-                  "127.0.0.1:3460" in show and "key" not in show.lower()
+                  show.startswith(f"model: {_ok} @") and
+                  _host in show and "key" not in show.lower()
                   and "sk-" not in show, show)
 
             # /model with a configured models list (settings block)
@@ -2341,7 +2353,7 @@ def test_service() -> None:
             svc.handle_update(mk_update(14, 111, 123456789, "/status"))
             status = fake.sends[-1][1]
             check("service: /status one line (turns/model/uptime)",
-                  status.startswith("turns=2 model=mimo-v2.6-flash uptime=")
+                  status.startswith(f"turns=2 model={_ok} uptime=")
                   and "\n" not in status, status)
             svc.handle_update(mk_update(15, 111, 123456789, "/frobnicate"))
             check("service: unknown command hints /help",
