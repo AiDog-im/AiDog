@@ -4222,7 +4222,22 @@ async function saveSettings() {
       .replace("{f}", lab ? lab.textContent.trim() : urlBad);
     return;
   }
-  if (input.value) localStorage.setItem(TOKEN_KEY, input.value.trim());
+  if (input.value) {
+    // E2 hint fix: `aidog secrets shell-env` prints an `export WEB_TOKEN=…`
+    // line — users paste it whole and 401. Unwrap that known prefix (and a
+    // bare `WEB_TOKEN=` line from grep) instead of rejecting a right value;
+    // anything else is stored verbatim.
+    let pasted = input.value.trim();
+    const m = pasted.match(/^(?:export\s+)?WEB_TOKEN\s*=\s*(.*)$/);
+    if (m && m[1].trim()) pasted = m[1].trim();
+    // shell-env quotes values via shlex — drop a matching pair of quotes
+    if (pasted.length > 1 &&
+        ((pasted[0] === "\x27" && pasted[pasted.length - 1] === "\x27") ||
+         (pasted[0] === '"' && pasted[pasted.length - 1] === '"'))) {
+      pasted = pasted.slice(1, -1);
+    }
+    localStorage.setItem(TOKEN_KEY, pasted);
+  }
   const token = localStorage.getItem(TOKEN_KEY) || "";
   const payload = {
     language: document.documentElement.lang,

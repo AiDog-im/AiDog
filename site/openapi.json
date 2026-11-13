@@ -1,0 +1,139 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "I'm AiDog public site API",
+    "version": "1.0.0",
+    "description": "Anonymous, read-only aggregate endpoints served by the aidog.im marketing site. No authentication, no per-install records: reports carry model names, request counts and token totals only — never prompts, files, paths or credentials."
+  },
+  "servers": [{ "url": "https://aidog.im" }],
+  "paths": {
+    "/api/stats": {
+      "get": {
+        "operationId": "getUsageStats",
+        "summary": "Public usage aggregates",
+        "description": "All-time totals, the last seven UTC days, and the per-model / per-scenario breakdowns rendered by the Models page. Returns 503 with an error object when the ledger is not configured — never a fabricated zero.",
+        "responses": {
+          "200": {
+            "description": "Aggregate usage statistics",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "updated": { "type": "string", "format": "date-time", "nullable": true },
+                    "installs": { "type": "integer", "description": "Distinct anonymous install pseudonyms" },
+                    "reports": { "type": "integer", "description": "Daily reports received" },
+                    "totals": {
+                      "type": "object",
+                      "properties": {
+                        "requests": { "type": "integer" },
+                        "tokens": {
+                          "type": "object",
+                          "properties": {
+                            "in": { "type": "integer" },
+                            "out": { "type": "integer" }
+                          }
+                        }
+                      }
+                    },
+                    "daily": {
+                      "type": "array",
+                      "description": "Last seven UTC days",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "day": { "type": "string", "format": "date" },
+                          "requests": { "type": "integer" },
+                          "in": { "type": "integer" },
+                          "out": { "type": "integer" },
+                          "installs": { "type": "integer" }
+                        }
+                      }
+                    },
+                    "models": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "model": { "type": "string" },
+                          "requests": { "type": "integer" },
+                          "share": { "type": "number" }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Ledger not configured",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/visits": {
+      "get": {
+        "operationId": "getVisitCount",
+        "summary": "Approximate page-view counter",
+        "description": "One increment per page load; approximate by design, includes crawlers and refreshes. Append ?format=text for plain-text output.",
+        "responses": {
+          "200": {
+            "description": "Counter value",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "count": { "type": "integer" },
+                    "unit": { "type": "string", "example": "page views" },
+                    "note": { "type": "string" }
+                  }
+                }
+              }
+            }
+          },
+          "503": {
+            "description": "Counter not configured",
+            "content": { "application/json": { "schema": { "type": "object" } } }
+          }
+        }
+      }
+    },
+    "/api/ledger": {
+      "post": {
+        "operationId": "submitUsageReport",
+        "summary": "Anonymous daily usage report",
+        "description": "One whitelist-exact report per install per UTC day; last write wins, so retries are idempotent. Verification canary rows (install_id starting with _) are stored but never aggregated.",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["install_id", "day"],
+                "properties": {
+                  "install_id": { "type": "string", "description": "Random per-install pseudonym, not a device fingerprint" },
+                  "day": { "type": "string", "format": "date" },
+                  "requests": { "type": "integer" },
+                  "tokens_in": { "type": "integer" },
+                  "tokens_out": { "type": "integer" },
+                  "model": { "type": "string" }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Stored",
+            "content": { "application/json": { "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } } } }
+          },
+          "400": { "description": "Validation refused; nothing stored" },
+          "503": { "description": "Ledger not configured" }
+        }
+      }
+    }
+  }
+}

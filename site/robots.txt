@@ -1,3 +1,42 @@
+# AI crawler policy — explicit allow per family (AFR A1: 14 engine UAs).
+# The site is public, permanently free and published for machines to read;
+# every known AI crawler is welcome. RFC 9309: longest matching group wins.
+
+# Search / citation (9)
+User-agent: OAI-SearchBot
+Allow: /
+User-agent: Claude-SearchBot
+Allow: /
+User-agent: PerplexityBot
+Allow: /
+User-agent: Googlebot
+Allow: /
+
+# Hybrid (6)
+User-agent: ChatGPT-User
+Allow: /
+User-agent: Claude-User
+Allow: /
+User-agent: Perplexity-User
+Allow: /
+User-agent: Google-Extended
+Allow: /
+
+# Training (10)
+User-agent: GPTBot
+Allow: /
+User-agent: ClaudeBot
+Allow: /
+User-agent: CCBot
+Allow: /
+User-agent: Bytespider
+Allow: /
+User-agent: Amazonbot
+Allow: /
+User-agent: Applebot-Extended
+Allow: /
+
+# Everything else — same open policy as the groups above.
 User-agent: *
 Allow: /
 
