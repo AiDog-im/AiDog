@@ -165,6 +165,17 @@ Routes:
                                    cancel} -> {plan} | 400 invalid action |
                                    404 unknown plan id (the ONLY approval
                                    surface: the model has no such route)
+  GET  /api/agent/settings-plans -> car C: the owner-facing proposal list,
+                                   newest first, each pending row carrying
+                                   a DRY validation verdict (the same
+                                   validator a hand-typed save runs)
+  POST /api/agent/settings-plans/<id>
+                                   -> Bearer WEB_TOKEN; {action: approve|
+                                   reject} -> approve re-validates the
+                                   stored patch and applies it through the
+                                   SAME write core as POST /api/settings;
+                                   invalid plan = 400 (stays pending) |
+                                   404 unknown id | 409 already closed
   POST /api/extensions/intent    -> Bearer WEB_TOKEN; {text} -> car 4 call
                                    site 1: which Extensions tab owns the
                                    request (Jev choice over finance/home/
@@ -510,7 +521,11 @@ DEFAULT_SETTINGS: dict = {
                # settings write can never aim another slot at an external
                # service. Empty url/model = the vendor defaults.
                "decision": {"enabled": False, "url": "", "model": "",
-                            "router_model": ""}},
+                            "router_model": ""},
+               # Car C (agent foundation): sub-agent bounds — absent ==
+               # these defaults == today's shipped behavior (3 parallel, 12
+               # iters). Live: mycore.subagent reads them per delegate call.
+               "subagent": {"max_parallel": 3, "max_iters": 12}},
     "usage": {"metrics_url": "http://127.0.0.1:3456/metrics",
               "pricing_config": "", "log_dir": "", "model_pricing": {}},
     # Inbound/outbound channel adapters (car C): non-secret config only —
@@ -583,7 +598,7 @@ USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
-               "max_tpm", "sniff", "decision")
+               "max_tpm", "sniff", "decision", "subagent")
 # Car 4 (D6): fields the mycore.decision block accepts — the key slot is NOT
 # one of them (see the DEFAULT_SETTINGS note).
 DECISION_KEYS = ("enabled", "url", "model", "router_model")
@@ -1571,6 +1586,38 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             block[field] = value
                     if bad:
                         errors.append(f"mycore.decision: {bad}")
+                        continue
+                    clean_mc[key] = block
+                    continue
+                if key == "subagent":
+                    # Car C (agent foundation): sub-agent bounds. Both keys
+                    # optional inside the block (a partial patch deep-merges);
+                    # each value is an int inside the shipped safety range —
+                    # the range IS the product's promise (never unbounded
+                    # parallelism, never an unbounded sub-turn).
+                    if not isinstance(val, dict):
+                        errors.append("mycore.subagent must be an object")
+                        continue
+                    unknown = [k for k in val
+                               if k not in ("max_parallel", "max_iters")]
+                    if unknown:
+                        errors.append("unknown mycore.subagent key: "
+                                      f"{str(unknown[0])[:40]}")
+                        continue
+                    block = {}
+                    bad = ""
+                    bounds = {"max_parallel": (1, 5), "max_iters": (1, 25)}
+                    for field, (lo, hi) in bounds.items():
+                        if field not in val:
+                            continue
+                        v = val[field]
+                        if isinstance(v, bool) or not isinstance(v, int) \
+                                or not lo <= v <= hi:
+                            bad = f"{field} must be an integer in {lo}..{hi}"
+                            break
+                        block[field] = v
+                    if bad:
+                        errors.append(f"mycore.subagent: {bad}")
                         continue
                     clean_mc[key] = block
                     continue
@@ -5985,6 +6032,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_quotes()
         if path == "/api/exchange/plans":
             return self._handle_exchange_plans()
+        if path == "/api/agent/settings-plans":
+            return self._handle_agent_settings_plans()
         if path.startswith("/api/media/"):
             return self._serve_media(path[len("/api/media/"):])
         if path.startswith("/static/i18n/"):
@@ -6060,6 +6109,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/exchange/plans/"):
             return self._handle_exchange_plan_decide(
                 path[len("/api/exchange/plans/"):])
+        if path.startswith("/api/agent/settings-plans/"):
+            return self._handle_agent_settings_plan_decide(
+                path[len("/api/agent/settings-plans/"):])
         return self._json({"error": "not found"}, 404)
 
     # ------------------------------------------ credential-slot endpoints ---
@@ -8277,6 +8329,86 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "plan decision failed"}, 502)
         return self._json({"plan": plan})
 
+    # ------------------------------------ car C: agent settings plans ------
+    def _handle_agent_settings_plans(self) -> None:
+        """GET /api/agent/settings-plans — the owner-facing approval list
+        (car C, agent foundation). Read face like the exchange plans: newest
+        first, with a DRY validation verdict per pending plan — the SAME
+        validate_settings_patch a hand-typed save runs — so the owner sees
+        an invalid proposal honestly BEFORE clicking. Settings keys only,
+        never a credential (settings.json holds none by design)."""
+        try:
+            from mycore import agentplan as _agentplan
+        except Exception as e:  # noqa: BLE001 — module absent = honest 503
+            sys.stderr.write(f"agent plans import failed err={type(e).__name__}\n")
+            return self._json({"error": "plan store unavailable"}, 503)
+        rows: list[dict] = []
+        try:
+            for row in _agentplan.summarize():
+                valid, errors = None, []
+                if row.get("status") == "pending":
+                    plan = _agentplan.get_plan(str(row.get("id") or ""))
+                    _clean, errs = validate_settings_patch(
+                        plan.get("patch") if plan else None)
+                    valid = not errs
+                    errors = errs[:4]
+                rows.append({**row, "valid": valid, "errors": errors})
+        except Exception as e:  # noqa: BLE001 — store trouble, not a 500
+            sys.stderr.write(f"agent plans read failed err={type(e).__name__}\n")
+            return self._json({"error": "plan store unreadable"}, 502)
+        return self._json({"plans": rows})
+
+    def _handle_agent_settings_plan_decide(self, plan_id: str) -> None:
+        """POST /api/agent/settings-plans/<id> — THE approval surface (car C).
+        Bearer first (the model has no token and therefore no approve path),
+        then {action: approve|reject}. Approve RE-VALIDATES the stored patch
+        through validate_settings_patch — the same validator as a hand-typed
+        save — and applies it through the same write core; an invalid plan
+        is refused with the validator's honest details and STAYS pending
+        (the owner can reject it). Unknown id 404, closed plan 409."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if not isinstance(action, str) or action not in ("approve", "reject"):
+            return self._json(
+                {"error": "invalid action",
+                 "details": ["action must be one of approve|reject"]}, 400)
+        pid = str(urllib.parse.unquote(plan_id) or "").strip()
+        try:
+            from mycore import agentplan as _agentplan
+        except Exception as e:  # noqa: BLE001 — module absent = honest 503
+            sys.stderr.write(f"agent plans import failed err={type(e).__name__}\n")
+            return self._json({"error": "plan store unavailable"}, 503)
+        plan = _agentplan.get_plan(pid)
+        if plan is None:
+            return self._json({"error": "unknown plan id"}, 404)
+        if plan.get("status") != "pending":
+            return self._json(
+                {"error": f"plan is {plan.get('status')}, not pending"}, 409)
+        if action == "reject":
+            ok, err = _agentplan.record(pid, "rejected",
+                                        result="rejected by owner")
+            if not ok:
+                return self._json({"error": err or "reject failed"}, 409)
+            return self._json({"ok": True, "plan_id": pid,
+                               "status": "rejected"})
+        # approve: re-validate, then apply through the SAME write core
+        clean, errors = validate_settings_patch(plan.get("patch"))
+        if errors:
+            return self._json({"error": "validation failed",
+                               "details": errors[:6], "plan_id": pid}, 400)
+        code, body = self._apply_clean_settings(clean)
+        if code != 200:
+            return self._json(body, code)
+        _agentplan.record(pid, "approved",
+                          result="changed" if body.get("changed")
+                                 else "no change")
+        return self._json({"ok": True, "plan_id": pid,
+                           "changed": bool(body.get("changed"))})
+
     def _serve_media(self, name: str) -> None:
         """GET /api/media/<name> — one generated image, and nothing else:
         the name must match the [A-Za-z0-9_.-] whitelist, resolve to a file
@@ -8367,10 +8499,15 @@ class Handler(BaseHTTPRequestHandler):
         clean, errors = validate_settings_patch(patch)
         if errors:
             return self._json({"error": "validation failed", "details": errors}, 400)
-        # Merge onto the RAW stored document — never onto load_settings()'s
-        # filtered view (bug fix §1.7): an unknown hand-written key must
-        # survive a console save. GET keeps the validated view (fail-closed
-        # display); only the validated patch is written.
+        code, body = self._apply_clean_settings(clean)
+        return self._json(body, code)
+
+    def _apply_clean_settings(self, clean: dict) -> tuple[int, dict]:
+        """THE settings write core (shared by the console save and the car-C
+        agent-plan approve): merge onto the RAW stored document — never onto
+        load_settings()'s filtered view (bug fix §1.7): an unknown hand-
+        written key must survive a console save. GET keeps the validated
+        view (fail-closed display); only the validated patch is written."""
         try:
             stored = json.loads(SETTINGS_FILE.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -8383,7 +8520,7 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 atomic_write_json(SETTINGS_FILE, merged)
             except OSError as e:  # noqa: BLE001
-                return self._json({"error": f"persist failed: {type(e).__name__}"}, 500)
+                return 500, {"error": f"persist failed: {type(e).__name__}"}
             sys.stderr.write(f"settings updated keys={','.join(sorted(clean))}\n")
             mc_patch = clean.get("mycore")
             if isinstance(mc_patch, dict) and "session_prune_days" in mc_patch:
@@ -8394,8 +8531,8 @@ class Handler(BaseHTTPRequestHandler):
             if {"currency", "fx_rate", "usage"} & set(clean):
                 with _usage_lock:
                     _usage_cache["ts"], _usage_cache["data"] = 0.0, None
-        return self._json({"ok": True, "changed": changed,
-                           "settings": load_settings()})
+        return 200, {"ok": True, "changed": changed,
+                     "settings": load_settings()}
 
     def _handle_console_port_write(self) -> None:
         """POST /api/console/port {port: 1024..65535} — the settings card's

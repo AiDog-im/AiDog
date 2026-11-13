@@ -74,7 +74,10 @@ RESULT_CAPS: dict[str, int] = {
     "exchange_prepare_order": 4000, "exchange_execute_order": 4000,
     "exchange_plans": 4000,
     "browser_open": 4000, "browser_click": 4000, "browser_type": 4000,
-    "browser_screenshot": 4000, "browser_close": 4000}
+    "browser_screenshot": 4000, "browser_close": 4000,
+    # car C: the settings tool answers short lists/confirmations (the plan
+    # store is bounded); a full `get` rides the default cap + compression
+    "settings": 6000}
 # Same-session dedupe: a result at least this long must be byte-identical to be
 # suppressed (content-addressed, so an edited file / a changed quote never
 # collides). The store keeps only (seq, chars, tool) per hash — bounded memory.
@@ -109,7 +112,10 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     # slot-gated on at least one CEX credential slot) + W2 order car
     # (prepare/execute/plans ride the SAME slot gate as the account reads)
     "exchange_markets", "exchange_portfolio", "exchange_orders",
-    "exchange_prepare_order", "exchange_execute_order", "exchange_plans"})
+    "exchange_prepare_order", "exchange_execute_order", "exchange_plans",
+    # car C (agent foundation): propose console settings on the owner's
+    # behalf — writes stay impossible from the tool (owner-approved plans)
+    "settings"})
 
 # settings key mycore.tools_off + env MYCORE_TOOLS_OFF (owner-approved design)
 TOOLS_OFF_ENV = "MYCORE_TOOLS_OFF"
@@ -749,6 +755,67 @@ def _backup_run(state_dir: str | Path | None) -> str:
     return json.dumps(meta, ensure_ascii=False)
 
 
+def _settings_get(keys: list | None) -> str:
+    """`settings get`: read-only view of web/settings.json (which by design
+    holds NO credentials — those live in secret slots). `keys` filters by
+    dotted top-level paths (e.g. "mycore.model"); an absent key is honestly
+    omitted, never guessed as null."""
+    from lib import profile_paths as pp  # local import: keeps graph acyclic
+    try:
+        stored = json.loads(pp.settings_path(REPO).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        stored = {}
+    if not isinstance(stored, dict):
+        stored = {}
+    if not keys:
+        return json.dumps(stored, ensure_ascii=False)
+    out: dict = {}
+    for key in keys:
+        parts = str(key).split(".")
+        cur = stored
+        for part in parts:
+            if not isinstance(cur, dict) or part not in cur:
+                cur = None
+                break
+            cur = cur[part]
+        if cur is not None:
+            out[str(key)] = cur
+    return json.dumps(out, ensure_ascii=False)
+
+
+def _settings_tool(action: str, keys=None, patch=None, id=None) -> str:
+    """The `settings` tool handler (car C, agent foundation).
+
+    list    -> pending + recent plans (identity + summary, never a write)
+    get     -> read-only settings values (optional dotted-key filter)
+    propose -> file an owner-approval plan; NEVER writes settings
+    withdraw-> retract the agent's own pending plan
+
+    Every write path is the console's approve endpoint, gated by the owner —
+    this tool has no path to settings.json. Expected failures are honest
+    ToolError reasons (no path, no credential)."""
+    from . import agentplan  # local import: keeps the module graph acyclic
+    action = str(action or "")
+    if action == "list":
+        return json.dumps({"plans": agentplan.summarize()}, ensure_ascii=False)
+    if action == "get":
+        if keys is not None and not isinstance(keys, list):
+            raise ToolError("keys must be a list of dotted paths")
+        return _settings_get(keys)
+    if action == "propose":
+        plan, err = agentplan.propose(patch)
+        if plan is None:
+            raise ToolError(err)
+        return (f"plan {plan['id']} filed — pending the owner's approval "
+                "in the console (nothing was written)")
+    if action == "withdraw":
+        ok, err = agentplan.withdraw(str(id or ""))
+        if not ok:
+            raise ToolError(err)
+        return f"plan {id} withdrawn"
+    raise ToolError("action must be one of: list | get | propose | withdraw")
+
+
 def _generate_image(prompt: str, size: str = "1024x1024") -> str:
     """`generate_image` handler (car 4c): configuration resolves at call
     time — an unconfigured endpoint is an honest ERROR line, never a missing
@@ -1117,6 +1184,24 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                "exhausted.",
                {"type": "object", "properties": {}},
                lambda: _backup_run(state_dir))
+    # car C (agent foundation): the settings tool. PROPOSE-ONLY by design —
+    # every write is an owner-approved plan (mycore.agentplan) applied by
+    # the console's own validator; this tool can never reach settings.json.
+    r.register("settings",
+               "Inspect or propose console settings on the owner's behalf. "
+               "action: list (pending + recent plans) | get (read-only "
+               "values; optional dotted keys filter) | propose (file an "
+               "owner-approval plan — NEVER writes) | withdraw (retract "
+               "your own pending plan by id).",
+               {"type": "object", "properties": {
+                   "action": {"type": "string",
+                              "enum": ["list", "get", "propose", "withdraw"]},
+                   "keys": {"type": "array", "items": _STR},
+                   "patch": {"type": "object"},
+                   "id": _STR},
+                "required": ["action"]},
+               lambda action, keys=None, patch=None, id=None:
+                   _settings_tool(action, keys, patch, id))
     # --- car 4b: browser automation (capability-honest, like MCP fail-soft) ---
     # The six browser_* tools register ONLY when a browser binary is
     # discoverable (fast probe — discovery never launches anything). No
