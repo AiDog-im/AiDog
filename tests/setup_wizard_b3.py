@@ -24,6 +24,11 @@ Contracts locked here (regression wall):
   - dispatch: `aidog setup --check/--yes/--no-boot` passes flags through;
     a non-TTY `aidog setup` (no flags) falls back to --yes (never blocks on
     prompts in scripts); --help lists the flags; unknown flags exit 2
+  - ops dispatch (owner 2026-11-10: docs advertise these commands): `aidog
+    doctor` forwards to deploy/aidog_doctor.py and `aidog update
+    [check|apply] [--json]` forwards to deploy/aidog_update.py — argv shape
+    (default check, verb+flags verbatim) and exit-code propagation are the
+    contract; the fake repo's STUB targets record argv + honor FAKE_RC
   - zero-key onboarding (car 4b): the INTERACTIVE wizard probes local model
     servers between settings.json creation and the manual base_url prompt —
     a live AIDOG_LOCAL_MODEL_PROBES endpoint is adopted (base_url/model in
@@ -98,6 +103,16 @@ def make_repo(t: Path) -> Path:
     (t / "web").mkdir(parents=True, exist_ok=True)
     for name in ("aidog_setup.py", "aidog_persist.py"):
         shutil.copy2(REPO / "deploy" / name, t / "deploy" / name)
+    # Ops-dispatch stubs: record argv + honor FAKE_RC (the DISPATCHER
+    # contract under test — the real doctor/update scripts keep their own
+    # gates: doctor = release health gate, aidog_update = version channel).
+    stub = ("import os, sys\n"
+            "from pathlib import Path\n"
+            "Path(__file__).with_suffix('.marker').write_text("
+            "' '.join(sys.argv[1:]), encoding='utf-8')\n"
+            "sys.exit(int(os.environ.get('FAKE_RC', '0')))\n")
+    (t / "deploy" / "aidog_doctor.py").write_text(stub, encoding="utf-8")
+    (t / "deploy" / "aidog_update.py").write_text(stub, encoding="utf-8")
     # zero-key onboarding probe module (namespace package — no mycore/
     # __init__.py copied, so the import stays light in the fake repo)
     (t / "mycore").mkdir(exist_ok=True)
@@ -429,6 +444,61 @@ def test_dispatch_flags(t: Path) -> None:
           not (t2 / "deploy" / "install.marker").exists())
 
 
+def test_ops_dispatch(base: Path) -> None:
+    """`aidog doctor` / `aidog update` dispatch (owner 2026-11-10: README and
+    docs advertise both commands, so the dispatcher must make that true).
+    The fake repo's stub targets record their argv and honor FAKE_RC — this
+    locks the FORWARDING contract (argv shape + exit-code propagation)."""
+    t = make_repo(sub(base, "ops"))
+    doc_m = t / "deploy" / "aidog_doctor.marker"
+    upd_m = t / "deploy" / "aidog_update.marker"
+
+    rc, out = run(persist_py(t), ["--help"])
+    check("aidog --help lists doctor + update",
+          rc == 0 and "doctor" in out and "update" in out, out[:300])
+
+    rc, _ = run(persist_py(t), ["doctor"])
+    check("`aidog doctor` delegates to aidog_doctor.py (exit 0)",
+          rc == 0 and doc_m.is_file(), f"rc={rc}")
+    check("doctor received no arguments",
+          doc_m.is_file() and doc_m.read_text(encoding="utf-8") == "",
+          doc_m.read_text(encoding="utf-8")[:80] if doc_m.exists()
+          else "missing")
+    rc, _ = run(persist_py(t), ["doctor"], extra_env={"FAKE_RC": "7"})
+    check("`aidog doctor` propagates the target's exit code (7 -> 7)",
+          rc == 7, f"rc={rc}")
+    check("`aidog doctor` never touched the update target",
+          not upd_m.exists())
+
+    rc, _ = run(persist_py(t), ["update"])
+    check("`aidog update` defaults to check on aidog_update.py",
+          rc == 0 and upd_m.is_file()
+          and upd_m.read_text(encoding="utf-8") == "check",
+          upd_m.read_text(encoding="utf-8") if upd_m.exists() else "missing")
+    upd_m.unlink(missing_ok=True)
+    rc, _ = run(persist_py(t), ["update", "apply", "--json"])
+    check("`aidog update apply --json` forwards verb + flag verbatim",
+          rc == 0 and upd_m.is_file()
+          and upd_m.read_text(encoding="utf-8") == "apply --json",
+          upd_m.read_text(encoding="utf-8") if upd_m.exists() else "missing")
+    upd_m.unlink(missing_ok=True)
+    rc, _ = run(persist_py(t), ["update", "--json"])
+    check("`aidog update --json` = check --json (leading flag accepted)",
+          rc == 0 and upd_m.is_file()
+          and upd_m.read_text(encoding="utf-8") == "check --json",
+          upd_m.read_text(encoding="utf-8") if upd_m.exists() else "missing")
+    upd_m.unlink(missing_ok=True)
+    rc, _ = run(persist_py(t), ["update", "bogus"])
+    check("an unknown update verb passes through (the target owns its "
+          "grammar)",
+          rc == 0 and upd_m.is_file()
+          and upd_m.read_text(encoding="utf-8") == "bogus",
+          upd_m.read_text(encoding="utf-8") if upd_m.exists() else "missing")
+    rc, out = run(persist_py(t), ["doctor", "--help"])
+    check("`aidog doctor --help` is the dispatcher's help (exit 0)",
+          rc == 0 and "doctor" in out, out[:200])
+
+
 def test_url_userinfo_guard() -> None:
     """Wrap-up audit W2-01/W4-05 (v0.5.74): the wizard's URL helpers refuse
     embedded credentials and redact userinfo before any print — in-process
@@ -622,6 +692,7 @@ def main() -> int:
         test_wizard_endpoint_and_boot_yes(base)
         test_region_prompt_and_check(base)
         test_dispatch_flags(base)
+        test_ops_dispatch(base)
         test_url_userinfo_guard()
 
         test_local_model_detected_adopt(base)

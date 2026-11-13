@@ -60,7 +60,7 @@
   <div class="update-banner" id="updateBanner" hidden>
     <span class="upd-dot"></span>
     <span id="updateText">update available</span>
-    <code class="upd-cmd">python3 deploy/aidog_update.py apply</code>
+    <code class="upd-cmd">aidog update apply</code>
     <button class="btn primary" id="updateApplyBtn" type="button"
             data-i18n="upd.apply" hidden>APPLY</button>
     <button class="btn-x" id="updateDismiss" aria-label="dismiss">×</button>
@@ -152,6 +152,18 @@
           <path d="M2.7 9.3a5.5 5.5 0 0 0 9.7.6"/>
           <path d="M3.3 2.9v3.3h3.3M12.7 13.1V9.8H9.4"/></svg></span>
         <span class="nav-label" data-i18n="view.evolution.title">Evolution</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+      <!-- discoverability car: the Help view — commands, CLI and docs in one
+           honest place (owner report 2026-11-09: the console had no help
+           face). Static content, no fetch. -->
+      <button class="nav-item" type="button" data-view="help">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="8" r="5.9"/>
+          <path d="M6.4 6.4a1.7 1.7 0 1 1 2.4 1.6c-.6.3-.8.6-.8 1.1"/>
+          <path d="M8 11.3h.01"/></svg></span>
+        <span class="nav-label" data-i18n="view.help.title">Help</span>
         <span class="nav-drop" aria-hidden="true"></span>
       </button>
       <button class="nav-item" type="button" data-view="settings">
@@ -1122,6 +1134,41 @@
       </section>
     </section>
 
+    <!-- HELP (discoverability car): the console's help face — the TG command
+         list (rendered from the SAME cmd.help.body pack key /help answers
+         with, so the two can never drift), the local CLI and the docs links.
+         Static content: no fetch, no state, nothing invented. -->
+    <section class="view" id="view-help" data-view="help">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.help.title">Help</h2>
+          <p class="view-sub" data-i18n="view.help.sub">Commands, CLI and documentation</p>
+        </div>
+      </div>
+      <section class="card">
+        <h2 data-i18n="help.tg.title">Telegram commands</h2>
+        <div class="stat-note" data-i18n="help.tg.hint">Send any of these to the bot. The same list is published as the bot's command menu (Settings → Telegram menu).</div>
+        <div class="help-list" id="helpTgList"></div>
+      </section>
+      <section class="card">
+        <h2 data-i18n="help.cli.title">Console &amp; CLI</h2>
+        <div class="help-list">
+          <div class="help-row"><code>aidog setup</code><span class="help-txt" data-i18n="help.cli.setup">guided setup wizard — fills and validates the credential slots, then boots the services</span></div>
+          <div class="help-row"><code>aidog doctor</code><span class="help-txt" data-i18n="help.cli.doctor">health gate — the same checks every release runs green on</span></div>
+          <div class="help-row"><code>aidog update apply</code><span class="help-txt" data-i18n="help.cli.update">upgrade — dirty-tree guard, fetch, fast-forward merge, service restart</span></div>
+          <div class="help-row"><code>bash deploy/install.sh</code><span class="help-txt" data-i18n="help.cli.install">one command: provision + boot + verify (idempotent)</span></div>
+        </div>
+      </section>
+      <section class="card">
+        <h2 data-i18n="help.docs.title">Documentation</h2>
+        <div class="help-list">
+          <div class="help-row"><a href="https://aidog.im/docs.html" target="_blank" rel="noopener">aidog.im/docs.html</a><span class="help-txt" data-i18n="help.docs.site">the full user documentation</span></div>
+          <div class="help-row"><a href="https://github.com/AiDog-im/AiDog/tree/main/docs" target="_blank" rel="noopener">github.com/…/docs</a><span class="help-txt" data-i18n="help.docs.repo">one capability document per feature, in the product repository</span></div>
+          <div class="help-row"><a href="https://aidog.im/llms.txt" target="_blank" rel="noopener">aidog.im/llms.txt</a><span class="help-txt" data-i18n="help.docs.llms">plain-text documentation index for machines and LLMs</span></div>
+        </div>
+      </section>
+    </section>
+
     <!-- SETTINGS: grouped form (console / usage / model / access) -->
     <section class="view" id="view-settings" data-view="settings">
       <div class="view-head">
@@ -1439,6 +1486,13 @@
               <input type="text" id="mycUrl" maxlength="256" placeholder="http://127.0.0.1:3460/v1"
                      data-i18n-ph="ctl.mycUrlPh" autocomplete="off">
             </div>
+            <!-- model UX car: the MODEL_API_KEY slot INLINE, one card up from
+                 the discovery probe. Same presence-only credRow mechanism as
+                 the Credentials card (value never round-trips, SET clears the
+                 box); credWrite's cross-row sync keeps the Credentials copy
+                 in step. This is the key the probe field falls back to when
+                 it is left empty — see runDiscover. -->
+            <div id="modelKeyList" hidden></div>
             <!-- car B: three one-click presets (mass-market onboarding 4.1).
                  They only FILL the two fields above and raise dirty through the
                  normal input event — saveSettings() stays the single writer.
@@ -1489,7 +1543,7 @@
                  promise a save they cannot do. -->
             <div id="discPanel" class="disc-panel">
               <div class="ctl-row">
-                <label data-i18n="myc.discoverKey">API key (optional — used for this probe only, never stored)</label>
+                <label data-i18n="myc.discoverKey">API key (leave empty = use the saved key above; fill it = this probe only, never stored)</label>
                 <input type="password" id="discKey" maxlength="512"
                        autocomplete="new-password" spellcheck="false">
               </div>
@@ -1500,7 +1554,7 @@
                 <span class="save-state" id="discMsg" role="status"></span>
               </div>
               <div id="discOut" class="test-out" hidden></div>
-              <div class="stat-note" data-i18n="myc.discoverHint">Reads the endpoint's model directory (GET /models) — a directory read, so it never spends a token. Empty key: the saved key is used when the endpoint above is the one stored in settings; any other endpoint is called with no key at all, and a 401 then simply says a key is needed. Picked models are appended to the whitelist above — nothing is written until you press SAVE.</div>
+              <div class="stat-note" data-i18n="myc.discoverHint">Reads the endpoint's model directory (GET /models) — a directory read, so it never spends a token. Empty key: the saved Model API key above is used, for any endpoint you type. Filled key: only this probe uses it, never stored. Picked models are appended to the whitelist above — nothing is written until you press SAVE.</div>
             </div>
             <div class="ctl-row">
               <label data-i18n="ctl.mycBudget">Compaction budget (chars)</label>
@@ -2193,6 +2247,39 @@
                  data-i18n="region.cnNote">mainland tier: the Exchange/Web3 panel is hidden, the Telegram/Discord/Slack/WhatsApp/Signal channel rows are marked as possibly needing a network route you provide yourself, and activation no longer requires a Telegram token.</div>
             <div class="ctl-actions">
               <span class="save-state" id="regionMsg" role="status"></span>
+            </div>
+          </div>
+
+          <!-- Discoverability car: the Telegram command menu partition — ON
+               by default (the menu IS the discoverability surface). The 11
+               boxes are a SUBSET picker and the note says out loud that none
+               checked = every command; enabled=false clears the menu on the
+               Telegram side at the next chat-service start. -->
+          <div class="card" data-setgroup="general" id="botmenuCard">
+            <h2 data-i18n="sec.botmenu">Telegram menu</h2>
+            <div class="stat-note" data-i18n="set.botmenu.hint">publishes the bot's command menu in Telegram so every command is one tap away. The chat service applies it once at start-up.</div>
+            <div class="ctl-row">
+              <label class="bk-box"><input type="checkbox" id="bmEnabled"><span data-i18n="set.botmenu.enable">show the command menu in Telegram</span></label>
+            </div>
+            <div class="ctl-row">
+              <label data-i18n="set.botmenu.cmds">Commands in the menu</label>
+            </div>
+            <div id="bmCmdList">
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="help"><span><code>/help</code> <span data-i18n="menu.help">Show this help</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="reset"><span><code>/reset</code> <span data-i18n="menu.reset">Archive this chat and start a fresh session</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="model"><span><code>/model</code> <span data-i18n="menu.model">Show or set the model for this chat</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="status"><span><code>/status</code> <span data-i18n="menu.status">Turns, model and service uptime</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="lang"><span><code>/lang</code> <span data-i18n="menu.lang">Show or set the reply language</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="learn"><span><code>/learn</code> <span data-i18n="menu.learn">Record a memory or a skill</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="reflect"><span><code>/reflect</code> <span data-i18n="menu.reflect">Draft the reflect skeleton</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="evolution"><span><code>/evolution</code> <span data-i18n="menu.evolution">Self-evolution loop status</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="cron"><span><code>/cron</code> <span data-i18n="menu.cron">Natural-language cron jobs</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="checkpoint"><span><code>/checkpoint</code> <span data-i18n="menu.checkpoint">File checkpoints and rollback</span></span></label>
+              <label class="bk-box"><input type="checkbox" class="bm-cmd" value="version"><span><code>/version</code> <span data-i18n="menu.version">Installed vs latest release</span></span></label>
+            </div>
+            <div class="stat-note" data-i18n="set.botmenu.allHint">no box checked = every command is published (the shipped default). Turning the switch off removes the menu from Telegram.</div>
+            <div class="ctl-actions">
+              <span class="save-state" id="bmMsg" role="status"></span>
             </div>
           </div>
 

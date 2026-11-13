@@ -567,6 +567,44 @@ def main() -> int:
           s == 200 and len(tg_rows) == 2
           and all(r.get("required") is True for r in tg_rows),
           str(tg_rows))
+    # --- discoverability car: the botmenu partition (the TG command menu).
+    #     Accept + refuse pairs, then restore EXACTLY the block found — the
+    #     settings merge cannot delete a key, so an absent `commands` comes
+    #     back as [] (the same "publish every command" behavior). ---
+    s, _pre = get("/api/settings")
+    _pre_bm = (_pre.get("botmenu") or {}) if isinstance(_pre, dict) else {}
+    s, body = post("/api/settings", {"botmenu": {"enabled": False,
+                                                 "commands": ["help"]}}, token)
+    check("POST botmenu subset -> 200", s == 200, f"got {s} {body}")
+    s, stg = get("/api/settings")
+    _bm = (stg.get("botmenu") or {}) if isinstance(stg, dict) else {}
+    check("GET settings botmenu read-back (off + one command)",
+          s == 200 and _bm.get("enabled") is False
+          and _bm.get("commands") == ["help"], str(_bm))
+    for _doc, _want in (
+            ({"botmenu": "yes"}, "botmenu must be an object"),
+            ({"botmenu": {"nope": 1}}, "unknown botmenu key"),
+            ({"botmenu": {"enabled": "yes"}},
+             "botmenu.enabled must be a boolean"),
+            ({"botmenu": {"commands": "help"}},
+             "botmenu.commands must be a list"),
+            ({"botmenu": {"commands": ["nope"]}}, "botmenu.commands"),
+            ({"botmenu": {"commands": ["help", "help"]}}, "duplicate"),
+    ):
+        s, body = post("/api/settings", _doc, token)
+        check(f"POST {_want[:40]} -> 400",
+              s == 400 and _want in str(body), f"got {s} {body}")
+    _restore = {"enabled": _pre_bm.get("enabled", True),
+                "commands": list(_pre_bm.get("commands") or [])}
+    s, body = post("/api/settings", {"botmenu": _restore}, token)
+    check("POST botmenu restored to the found state -> 200",
+          s == 200, f"got {s} {body}")
+    s, stg = get("/api/settings")
+    _bm = (stg.get("botmenu") or {}) if isinstance(stg, dict) else {}
+    check("GET settings botmenu matches the found state",
+          s == 200 and _bm.get("enabled") == _restore["enabled"]
+          and list(_bm.get("commands") or []) == _restore["commands"],
+          f"{_bm} vs {_restore}")
     s, body = post("/api/settings", {"mycore": {"model": "bad model!"}}, token)
     check("POST mycore bad model -> 400", s == 400, f"got {s}")
     s, body = post("/api/settings", {"mycore": {"base_url": "ftp://x"}}, token)

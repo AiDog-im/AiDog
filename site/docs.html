@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Documentation — I'm AiDog</title>
+<meta name="description" content="I'm AiDog documentation center: the Telegram command reference, every capability document, and the installation guides — one page for everything you can look up.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#2892ff">
+<meta name="robots" content="index,follow">
+<link rel="stylesheet" href="assets/style.css?v=20261031-2">
+<style>
+/* docs page — local styles only (this page ships no assets/main.js) */
+.docs-table { width: 100%; border-collapse: collapse; margin-top: 24px; }
+.docs-table th, .docs-table td {
+  text-align: left; vertical-align: top; padding: 10px 12px;
+  border-bottom: 1px solid var(--line); font-size: 14px;
+}
+.docs-table th {
+  font-family: var(--mono); font-size: 11.5px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--muted); font-weight: 600;
+  border-bottom: 1px solid var(--ink);
+}
+.docs-table td { color: var(--muted); }
+.docs-table td:first-child { white-space: nowrap; color: var(--ink); }
+.docs-table tr:hover td { background: rgba(40, 146, 255, .05); }
+.docs-cli { margin-top: 20px; padding-left: 20px; }
+.docs-cli li { margin: 9px 0; font-size: 14.5px; color: var(--muted); }
+.docs-cli code { color: var(--ink); }
+.docs-group { margin-top: 30px; }
+.docs-group h3 {
+  font-size: 15px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--blue-deep); margin-bottom: 6px;
+}
+.docs-grid {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px 24px; margin-top: 10px; padding: 0; list-style: none;
+}
+.docs-grid li { margin: 0; }
+.docs-grid a {
+  display: block; padding: 9px 12px; border: 1px solid var(--line);
+  background: var(--panel); font-size: 14px; color: var(--ink);
+  transition: border-color .2s, transform .2s;
+}
+.docs-grid a:hover { border-color: rgba(40, 146, 255, .45); transform: translateY(-2px); }
+.docs-grid code { color: var(--blue-deep); font-size: 12.5px; margin-right: 6px; }
+.docs-links { margin-top: 20px; padding-left: 20px; }
+.docs-links li { margin: 10px 0; font-size: 14.5px; }
+.docs-links a { color: var(--blue-deep); text-decoration: underline; }
+.docs-links a:hover { color: var(--ink); }
+@media (max-width: 640px) {
+  .docs-grid { grid-template-columns: 1fr; }
+  .docs-table td:first-child { white-space: normal; }
+}
+</style>
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <a class="brand" href="index.html">
+    <img src="assets/logo.jpg" alt="I'm AiDog logo" width="30" height="30" data-i18n-alt="brand.logoAlt">
+    <span class="brand-name">AIDOG<span class="brand-dot">.IM</span></span>
+  </a>
+  <button class="burger" id="burger" aria-label="menu" aria-expanded="false"><span></span><span></span><span></span></button>
+  <nav class="nav-links" id="navLinks">
+    <a href="index.html#home" class="nav-link" data-i18n="nav.home">Home</a>
+    <a href="index.html#start" class="nav-link" data-i18n="nav.start">Start</a>
+    <a href="index.html#skills" class="nav-link" data-i18n="nav.skills">Skills</a>
+    <a href="index.html#capabilities" class="nav-link" data-i18n="nav.capabilities">Capabilities</a>
+    <a href="index.html#sniff" class="nav-link" data-i18n="nav.sniff">Sniff</a>
+    <a href="index.html#console" class="nav-link" data-i18n="nav.console">Console</a>
+    <a href="index.html#models" class="nav-link" data-i18n="nav.models">Models</a>
+    <a href="index.html#security" class="nav-link" data-i18n="nav.security">Security</a>
+    <a href="index.html#architecture" class="nav-link" data-i18n="nav.architecture">Architecture</a>
+    <a href="docs.html" class="nav-link active" data-i18n="nav.docs">Docs</a>
+  </nav>
+  <div class="nav-right">
+    <button class="lang-btn" id="langBtn" aria-label="switch language"><span id="langLabel" data-i18n="i18n.toggle">ZH</span></button>
+    <a class="btn btn-ghost nav-gh" href="https://github.com/AiDog-im/AiDog" target="_blank" rel="noopener" data-i18n="nav.github">GitHub</a>
+  </div>
+</header>
+
+<main>
+
+<!-- ============================================ DOCS HERO -->
+<section class="section" id="top">
+  <div class="section-head">
+    <span class="section-index">DOCS</span>
+    <h1 data-i18n="docs.pageTitle">Documentation</h1>
+    <p class="section-sub" data-i18n="docs.pageSub">The command reference, every capability document and the guides — one page for everything you can look up.</p>
+  </div>
+  <p class="reveal in"><a class="btn btn-ghost" href="index.html" data-i18n="docs.backHome">Back to the home page</a></p>
+</section>
+
+<div class="engrave-rule" aria-hidden="true"><svg class="guilloche" id="docsBand" viewBox="0 0 1440 34" preserveAspectRatio="none"></svg></div>
+
+<!-- ============================================ COMMAND REFERENCE -->
+<section class="section" id="commands">
+  <div class="section-head reveal in">
+    <span class="section-index">COMMANDS</span>
+    <h2 data-i18n="docs.cmdTitle">Telegram command reference</h2>
+    <p class="section-sub" data-i18n="docs.cmdSub">Commands run only in chats from your allowlist; anything else is ignored. Send /help in the bot to get the same list.</p>
+  </div>
+
+  <table class="docs-table">
+    <thead>
+      <tr>
+        <th data-i18n="docs.colCmd">Command</th>
+        <th data-i18n="docs.colWhat">What it does</th>
+      </tr>
+    </thead>
+    <tbody>
+      <tr><td><code>/help</code></td><td data-i18n="docs.cmd.help">list every command with one-line descriptions</td></tr>
+      <tr><td><code>/reset</code></td><td data-i18n="docs.cmd.reset">archive this chat's session file and start fresh</td></tr>
+      <tr><td><code>/model [id]</code></td><td data-i18n="docs.cmd.model">show this chat's model + endpoint host (never the key); set a per-chat override</td></tr>
+      <tr><td><code>/status</code></td><td data-i18n="docs.cmd.status">session turn count, current model, service uptime</td></tr>
+      <tr><td><code>/lang [code]</code></td><td data-i18n="docs.cmd.lang">show or switch the reply language (persisted service-wide)</td></tr>
+      <tr><td><code>/learn memory &lt;text&gt;</code> · <code>/learn skill &lt;slug&gt; :: &lt;desc&gt; :: &lt;body&gt;</code></td><td data-i18n="docs.cmd.learn">record one experience as an institutional artifact — the lint gate runs before any write</td></tr>
+      <tr><td><code>/reflect [daily|weekly|monthly]</code></td><td data-i18n="docs.cmd.reflect">draft the period reflect skeleton (facts only — the conclusion is yours)</td></tr>
+      <tr><td><code>/evolution</code></td><td data-i18n="docs.cmd.evolution">self-evolution loop status: schedule, last runs, artifact counts</td></tr>
+      <tr><td><code>/cron [add [message|prompt] &lt;spec&gt; :: &lt;text&gt; | del &lt;id&gt;]</code></td><td data-i18n="docs.cmd.cron">natural-language cron jobs — add, list and delete; specs: every 30m · daily 08:00 · weekly mon 08:00 · once YYYY-MM-DD HH:MM (Beijing time)</td></tr>
+      <tr><td><code>/checkpoint [restore &lt;id&gt;]</code></td><td data-i18n="docs.cmd.checkpoint">list file checkpoints and restore one (write_file/edit_file snapshot the previous file before every write)</td></tr>
+      <tr><td><code>/version</code></td><td data-i18n="docs.cmd.version">installed vs latest release — honest when the check fails</td></tr>
+    </tbody>
+  </table>
+
+  <h2 data-i18n="docs.cliHead" style="margin-top:34px">Local CLI</h2>
+  <ul class="docs-cli">
+    <li><code>bash deploy/install.sh</code> — <span data-i18n="docs.cli.install">one command: provision + boot + verify</span></li>
+    <li><code>aidog setup</code> — <span data-i18n="docs.cli.setup">guided wizard: fills the slots it lists, never echoes a value</span></li>
+    <li><code>aidog doctor</code> — <span data-i18n="docs.cli.doctor">health gate the releases run green on</span></li>
+    <li><code>aidog update apply</code> — <span data-i18n="docs.cli.update">upgrade: dirty-tree guard, fetch, fast-forward, service restart</span></li>
+  </ul>
+</section>
+
+<div class="engrave-rule" aria-hidden="true"><svg class="guilloche" id="docsBand2" viewBox="0 0 1440 34" preserveAspectRatio="none"></svg></div>
+
+<!-- ============================================ CAPABILITY DOCS -->
+<section class="section" id="capability-docs">
+  <div class="section-head reveal in">
+    <span class="section-index">CAPABILITY DOCS</span>
+    <h2 data-i18n="docs.capTitle">Capability documents</h2>
+    <p class="section-sub" data-i18n="docs.capSub">Every feature ships with its own document in the repository — what it does and where its honest boundaries are. Titles link to the files on GitHub.</p>
+  </div>
+
+  <div class="docs-group">
+    <h3 data-i18n="docs.grp.loop">Agent loop &amp; tools</h3>
+    <ul class="docs-grid">
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/acp.md" target="_blank" rel="noopener"><code>acp</code>ACP v1 server (stdio)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/openai_api_server.md" target="_blank" rel="noopener"><code>openai_api_server</code>OpenAI-compatible API server (/v1)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/terminal_backends.md" target="_blank" rel="noopener"><code>terminal_backends</code>Terminal backends (7-backend run_bash matrix)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/execute_code.md" target="_blank" rel="noopener"><code>execute_code</code>Folded multi-step execution</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/subagents.md" target="_blank" rel="noopener"><code>subagents</code>Sub-agent delegation (delegate)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/mcp.md" target="_blank" rel="noopener"><code>mcp</code>MCP client</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/tool_toggles.md" target="_blank" rel="noopener"><code>tool_toggles</code>Per-tool kill switch</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/browser_automation.md" target="_blank" rel="noopener"><code>browser_automation</code>Browser automation</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/model_failover.md" target="_blank" rel="noopener"><code>model_failover</code>Multi-upstream model failover</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/model_gateway.md" target="_blank" rel="noopener"><code>model_gateway</code>Model gateway (endpoints, rotation, rate caps)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/missions.md" target="_blank" rel="noopener"><code>missions</code>Night-watch missions</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/community_posting.md" target="_blank" rel="noopener"><code>community_posting</code>Community posting (in-app)</a></li>
+    </ul>
+  </div>
+
+  <div class="docs-group">
+    <h3 data-i18n="docs.grp.memory">Knowledge &amp; memory</h3>
+    <ul class="docs-grid">
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/memory_and_routing.md" target="_blank" rel="noopener"><code>memory_and_routing</code>Memory (dual layer) &amp; skill routing</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/checkpoints.md" target="_blank" rel="noopener"><code>checkpoints</code>File checkpoints &amp; rollback</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/context_files.md" target="_blank" rel="noopener"><code>context_files</code>Project context files (auto-discovery)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/evolution_loop.md" target="_blank" rel="noopener"><code>evolution_loop</code>Institutional self-evolution loop</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/connectors.md" target="_blank" rel="noopener"><code>connectors</code>Connectors (read-only Linear + Notion search)</a></li>
+    </ul>
+  </div>
+
+  <div class="docs-group">
+    <h3 data-i18n="docs.grp.sense">Sense &amp; proactivity</h3>
+    <ul class="docs-grid">
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/sniff.md" target="_blank" rel="noopener"><code>sniff</code>SNIFF — the sense &amp; proactive-discovery engine</a></li>
+    </ul>
+  </div>
+
+  <div class="docs-group">
+    <h3 data-i18n="docs.grp.channels">Channels &amp; media</h3>
+    <ul class="docs-grid">
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/channels.md" target="_blank" rel="noopener"><code>channels</code>Multi-route channels</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/channels_domestic.md" target="_blank" rel="noopener"><code>channels_domestic</code>Domestic channels</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/console_chat.md" target="_blank" rel="noopener"><code>console_chat</code>Streaming / typing UX + console chat</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/voice_session.md" target="_blank" rel="noopener"><code>voice_session</code>Voice session (wake word + Telegram voice notes)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/voice_announcements.md" target="_blank" rel="noopener"><code>voice_announcements</code>Voice announcements</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/tts_engines.md" target="_blank" rel="noopener"><code>tts_engines</code>TTS engines</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/image_generation.md" target="_blank" rel="noopener"><code>image_generation</code>Image generation (tool + console panel + Telegram photo)</a></li>
+    </ul>
+  </div>
+
+  <div class="docs-group">
+    <h3 data-i18n="docs.grp.ops">Ops &amp; console</h3>
+    <ul class="docs-grid">
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/setup_wizard.md" target="_blank" rel="noopener"><code>setup_wizard</code>Setup wizard</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/regional_visibility.md" target="_blank" rel="noopener"><code>regional_visibility</code>Regional visibility (the region tier)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/frontend_coverage.md" target="_blank" rel="noopener"><code>frontend_coverage</code>Frontend coverage matrix</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/capabilities.md" target="_blank" rel="noopener"><code>capabilities</code>Capabilities catalog</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/desktop_client.md" target="_blank" rel="noopener"><code>desktop_client</code>Desktop client (Electron shell)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/profiles.md" target="_blank" rel="noopener"><code>profiles</code>Profiles (one machine, many dogs)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/site_visibility.md" target="_blank" rel="noopener"><code>site_visibility</code>Site visibility (aidog.im)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/zero_key_onboarding.md" target="_blank" rel="noopener"><code>zero_key_onboarding</code>Zero-key onboarding (local model detection)</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/natural_language_cron.md" target="_blank" rel="noopener"><code>natural_language_cron</code>Natural-language cron</a></li>
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/event_hooks.md" target="_blank" rel="noopener"><code>event_hooks</code>Event hooks</a></li>
+    </ul>
+  </div>
+
+  <div class="docs-group">
+    <h3 data-i18n="docs.grp.web3">Web3</h3>
+    <ul class="docs-grid">
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/exchanges.md" target="_blank" rel="noopener"><code>exchanges</code>Exchanges (CEX orders behind a human approval gate)</a></li>
+    </ul>
+  </div>
+
+  <div class="docs-group">
+    <h3 data-i18n="docs.grp.skills">Skills ecosystem</h3>
+    <ul class="docs-grid">
+      <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/skills_ecosystem.md" target="_blank" rel="noopener"><code>skills_ecosystem</code>Skills ecosystem (catalog + dual gates)</a></li>
+    </ul>
+  </div>
+</section>
+
+<div class="engrave-rule" aria-hidden="true"><svg class="guilloche" id="docsBand3" viewBox="0 0 1440 34" preserveAspectRatio="none"></svg></div>
+
+<!-- ============================================ GUIDES -->
+<section class="section" id="guides">
+  <div class="section-head reveal in">
+    <span class="section-index">GUIDES</span>
+    <h2 data-i18n="docs.guideTitle">Guides</h2>
+    <p class="section-sub" data-i18n="docs.guideSub">Long-form documentation lives in the repository — the same text the product ships with.</p>
+  </div>
+  <ul class="docs-links">
+    <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/installation.md" target="_blank" rel="noopener" data-i18n="docs.guide.install">Installation guide — prerequisites, every slot, troubleshooting</a></li>
+    <li><a href="https://github.com/AiDog-im/AiDog/blob/main/docs/commands.md" target="_blank" rel="noopener" data-i18n="docs.guide.commands">Command reference — this page, in Markdown</a></li>
+    <li><a href="llms.txt" data-i18n="docs.guide.llms">llms.txt — AI-readable product summary</a></li>
+    <li><a href="https://github.com/AiDog-im/AiDog/tree/main/docs/features" target="_blank" rel="noopener" data-i18n="docs.guide.features">Capability documents — one honest doc per feature</a></li>
+  </ul>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-top">
+      <p class="footer-big"><span data-i18n="footer.taglineA">Not a platform.</span><br><span data-i18n="footer.taglineB">A dog that knows you.</span></p>
+      <div class="footer-brand">
+        <img src="assets/logo.jpg" alt="" width="28" height="28">
+        <span>© <span id="year">2026</span> I'm AiDog</span>
+      </div>
+    </div>
+    <div class="footer-links">
+      <span class="footer-free" data-i18n="footer.free">permanently free</span>
+      <a href="index.html#capabilities" data-i18n="footer.caps">Capabilities</a>
+      <a href="docs.html" data-i18n="footer.docs">Docs</a>
+      <a href="llms.txt">llms.txt</a>
+      <a href="https://github.com/AiDog-im/AiDog" target="_blank" rel="noopener">GitHub</a>
+      <span class="footer-dim" data-i18n="footer.aidogim">aidog.im</span>
+    </div>
+    <div class="footer-fine">
+      <span data-i18n="footer.fine">Grown for one · built for anyone</span>
+      <span>aidog.im</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* Documentation center — self-contained on purpose (no assets/main.js:
+   nav links point at index.html#… anchors, which main.js's scroll spy
+   would query as selectors). Re-implements only what the page needs:
+   language pack loading, burger nav, the engraved band. */
+(function () {
+  "use strict";
+
+  var LANG_KEY = "aidog.site.lang";
+  var qsLang = null;
+  try {
+    var m = location.search.match(/[?&]lang=(en|zh)\b/);
+    if (m) qsLang = m[1];
+  } catch (e) { /* ignore */ }
+  var lang = qsLang;
+  if (!lang) {
+    try { lang = localStorage.getItem(LANG_KEY); } catch (e) { /* private mode */ }
+  }
+  if (lang !== "en" && lang !== "zh") lang = "en";
+
+  var dicts = {};
+
+  function loadDict(l) {
+    if (dicts[l]) return Promise.resolve(dicts[l]);
+    return fetch("i18n/" + l + ".json")
+      .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+      .then(function (d) { dicts[l] = d; return d; })
+      .catch(function () { return null; });
+  }
+
+  function applyDict(d) {
+    if (!d) return;
+    document.querySelectorAll("[data-i18n]").forEach(function (node) {
+      var k = node.getAttribute("data-i18n");
+      if (Object.prototype.hasOwnProperty.call(d, k)) node.textContent = d[k];
+    });
+    document.querySelectorAll("[data-i18n-alt]").forEach(function (node) {
+      var k = node.getAttribute("data-i18n-alt");
+      if (Object.prototype.hasOwnProperty.call(d, k)) node.setAttribute("alt", d[k]);
+    });
+  }
+
+  function setLang(l) {
+    lang = l;
+    try { localStorage.setItem(LANG_KEY, l); } catch (e) { /* ignore */ }
+    document.documentElement.lang = (l === "zh") ? "zh-Hans" : "en";
+    var label = document.getElementById("langLabel");
+    if (label) label.textContent = (l === "en") ? "ZH" : "EN";
+    loadDict(l).then(applyDict);
+  }
+
+  var langBtn = document.getElementById("langBtn");
+  if (langBtn) langBtn.addEventListener("click", function () {
+    setLang(lang === "en" ? "zh" : "en");
+    try {
+      var url = new URL(location.href);
+      url.searchParams.set("lang", lang);
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+    } catch (e) { /* file:// */ }
+  });
+
+  var burger = document.getElementById("burger");
+  var navLinks = document.getElementById("navLinks");
+  if (burger && navLinks) {
+    burger.addEventListener("click", function () {
+      var open = navLinks.classList.toggle("open");
+      burger.setAttribute("aria-expanded", String(open));
+    });
+    navLinks.addEventListener("click", function (e) {
+      if (e.target.classList.contains("nav-link")) navLinks.classList.remove("open");
+    });
+  }
+
+  /* --------------------------------------------------- engraving --- */
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  ["docsBand", "docsBand2", "docsBand3"].forEach(function (id) {
+    var band = document.getElementById(id);
+    if (!band) return;
+    var out = "", k, x, pts, y;
+    for (k = 0; k < 7; k++) {
+      pts = [];
+      for (x = 0; x <= 1440; x += 8) {
+        y = 17 + Math.sin(x / 58 + k * Math.PI / 7) * (7.4 - k * 0.55) *
+          Math.sin(x / 1440 * Math.PI);
+        pts.push(x.toFixed(0) + "," + y.toFixed(2));
+      }
+      out += '<path d="M' + pts.join("L") + '" fill="none" stroke="currentColor"' +
+        ' stroke-width=".6" opacity="' + (0.85 - k * 0.08).toFixed(2) + '"/>';
+    }
+    band.innerHTML = out;
+  });
+
+  var year = document.getElementById("year");
+  if (year) year.textContent = String(new Date().getFullYear());
+
+  /* first paint: language pack */
+  loadDict(lang).then(applyDict);
+  setLang(lang);
+})();
+</script>
+</body>
+</html>

@@ -5,6 +5,8 @@ Surface (stdlib urllib, injectable transport for offline tests):
     TgClient(...).get_me()              # read-only identity probe
     TgClient(...).send_message(chat, text)
     TgClient(...).send_chat_action(chat)  # typing heartbeat (stateless)
+    TgClient(...).set_my_commands([...])   # publish the command menu (once/start)
+    TgClient(...).delete_my_commands()     # clear the menu (botmenu.enabled=false)
     TgClient(...).get_file(file_id)      # getFile -> {file_path, file_size, ...}
     TgClient(...).download_file(path)    # binary file download (bytes seam)
     TgClient(...).send_photo(chat, ...)  # multipart/form-data photo upload
@@ -27,6 +29,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.error
 import urllib.request
@@ -262,6 +265,38 @@ class TgClient:
             raise TgError("action is required")
         return self._call("sendChatAction", {"chat_id": chat_id,
                                               "action": action.strip()})
+
+    # ------------------------------------------- command menu (discover) ---
+    def set_my_commands(self, commands: list) -> dict:
+        """Publish the bot's command menu (setMyCommands) — the discoverability
+        car's one-shot sync before the poll loop starts.
+
+        `commands` is a list of {"command": <name>, "description": <text>}
+        dicts; every entry is re-validated here so a bad shape dies at the
+        client seam with a TgError, never as a Telegram API error. Stateless
+        like every other call on this seam — safe alongside a live poller.
+        """
+        if not isinstance(commands, list) or not commands:
+            raise TgError("commands must be a non-empty list")
+        clean: list[dict] = []
+        for item in commands:
+            if not isinstance(item, dict):
+                raise TgError("command entries must be objects")
+            name = item.get("command")
+            desc = item.get("description")
+            if not isinstance(name, str) or not name or len(name) > 32 \
+                    or not re.match(r"^[a-z][a-z0-9_]*$", name):
+                raise TgError("bad command name")
+            if not isinstance(desc, str) or not desc.strip():
+                raise TgError("command description is required")
+            clean.append({"command": name, "description": desc.strip()[:256]})
+        return self._call("setMyCommands",
+                          {"commands": json.dumps(clean, ensure_ascii=False)})
+
+    def delete_my_commands(self) -> dict:
+        """Clear the published command menu (botmenu.enabled=false → the
+        Telegram side must never keep advertising a menu we turned off)."""
+        return self._call("deleteMyCommands")
 
     # -------------------------------------------------- media (car 4c) ---
     def get_file(self, file_id: str) -> dict:

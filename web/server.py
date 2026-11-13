@@ -404,7 +404,8 @@ from mycore.assembly import (build_system_stack,  # noqa: E402
 from mycore.compact import measure  # noqa: E402  (X14 context usage: the loop's own payload metric)
 from mycore.loop import run_turn  # noqa: E402
 from mycore.model import ChatClient  # noqa: E402
-from mycore.service import state_dir as mycore_state_dir  # noqa: E402
+from mycore.service import (state_dir as mycore_state_dir,  # noqa: E402
+                            BOT_COMMANDS)
 from mycore.session import (Session, export_session, list_sessions,  # noqa: E402
                              prune_old, session_file)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
@@ -486,6 +487,13 @@ DISCOVER_TIMEOUT_MIN = 0.2            # floor (a seam may speed tests up)
 DISCOVER_BODY_MAX = 1_048_576         # response body cap: 1 MiB + 1 byte read
 DISCOVER_MODELS_MAX = 200             # honest cap on the returned model list
 DISCOVER_KEY_MAX = 512                # chars in an inline api_key
+# Owner 2026-11-10 (model-config UX fix): the directory GET is sent with a
+# BROWSER-shaped agent — some relays/CDNs refuse a non-browser UA outright.
+# It carries no credential, and ONLY the discovery path uses it (the other
+# console fetches keep their own UA).
+DISCOVER_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+               "AppleWebKit/537.36 (KHTML, like Gecko) "
+               "Chrome/126.0.0.0 Safari/537.36")
 CRON_PROMPT_MAX = 4096                # chars in a console-created job body
                                       # (the registry's own MAX_TEXT=4000
                                       # still applies inside create_job)
@@ -667,12 +675,17 @@ DEFAULT_SETTINGS: dict = {
     # and the setup wizard write it, and the value never leaves the machine
     # (zero detection, zero upload — owner ruling 2026-11-03).
     "region": {"code": "global"},
+    # Discoverability car: the TG command-menu partition — enabled ON by
+    # default (the shipped menu IS the product's discoverability surface),
+    # `commands` absent = publish all 11 BOT_COMMANDS. The service reads the
+    # LIVE file once at poll-loop start; enabled=false clears the menu there.
+    "botmenu": {"enabled": True},
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media", "web3", "mission",
                "bridge", "guardrails", "obedience", "ledger", "extensions",
-               "skills", "outbound_proxy", "region")
+               "skills", "outbound_proxy", "region", "botmenu")
 # Car I: the only legal region.code values (explicit owner choice, never a
 # detected value — see the DEFAULT_SETTINGS note).
 REGION_CODES = ("global", "cn")
@@ -1542,6 +1555,44 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                           + "|".join(REGION_CODES))
         else:
             clean["region"] = {"code": reg["code"]}
+    if "botmenu" in patch:
+        # Discoverability car: the Telegram command-menu partition — an
+        # object with the two known keys only; refusals name the field and
+        # the allowed set (the word-only contract every other leg follows).
+        bm = patch["botmenu"]
+        if not isinstance(bm, dict):
+            errors.append("botmenu must be an object")
+        else:
+            bm_unknown = set(bm) - {"enabled", "commands"}
+            if bm_unknown:
+                errors.append("unknown botmenu key: "
+                              + ", ".join(sorted(bm_unknown)))
+            clean_bm: dict = {}
+            if "enabled" in bm:
+                if isinstance(bm["enabled"], bool):
+                    clean_bm["enabled"] = bm["enabled"]
+                else:
+                    errors.append("botmenu.enabled must be a boolean")
+            if "commands" in bm:
+                cmds = bm["commands"]
+                if not isinstance(cmds, list):
+                    errors.append("botmenu.commands must be a list")
+                elif len(cmds) > len(BOT_COMMANDS):
+                    errors.append(
+                        f"botmenu.commands: at most {len(BOT_COMMANDS)} entries")
+                else:
+                    bad = [c for c in cmds
+                           if not isinstance(c, str) or c not in BOT_COMMANDS]
+                    if bad:
+                        errors.append("botmenu.commands: unknown command: "
+                                      + ", ".join(str(c)[:32] for c in bad[:4]))
+                    elif len(set(cmds)) != len(cmds):
+                        errors.append("botmenu.commands: duplicate command")
+                    else:
+                        # empty list is legal: publish every command
+                        clean_bm["commands"] = list(cmds)
+            if clean_bm:
+                clean["botmenu"] = clean_bm
     if "mycore" in patch:
         mc = patch["mycore"]
         if not isinstance(mc, dict):
@@ -5878,13 +5929,26 @@ def _discover_echo(base: str) -> str:
         return ""
 
 
+def _strip_ctl(value: str) -> str:
+    """Paste hygiene at the discover entry: a URL or key copied out of a
+    chat/CSV line often carries a stray CR/LF/TAB in the MIDDLE (str.strip()
+    only trims the ends), and urlsplit/http.client then fails on the control
+    char with an opaque class instead of a directory read. Every control char
+    (ord < 32 plus DEL) is dropped and the ends are trimmed; the value is
+    only ever used — never echoed, never logged, never serialized."""
+    return "".join(c for c in value
+                   if not (ord(c) < 32 or ord(c) == 127)).strip()
+
+
 def _discover_candidates(base: str) -> list[str]:
-    """GET targets in order. {base}/models first — this product stores
-    mycore.base_url WITH the /v1 suffix (the same convention
-    _probe_model_key already uses) — then {base}/v1/models when the path does
-    not already end in /v1, so a bare vendor host typed into the field still
-    resolves the standard directory. Both candidates are read-only directory
-    reads; only 404/405 moves on to the next one."""
+    """GET targets in order (three, never more than four). {base}/models
+    first — this product stores mycore.base_url WITH the /v1 suffix (the
+    same convention _probe_model_key already uses) — then {base}/v1/models
+    when the path does not already end in /v1, so a bare vendor host typed
+    into the field still resolves the standard directory, then the root
+    /api/models some relays expose instead (deduped: a base under /api
+    already produced it). All are read-only directory reads; only 404/405
+    moves on to the next one."""
     try:
         parts = urllib.parse.urlsplit(base)
     except ValueError:
@@ -5904,7 +5968,14 @@ def _discover_candidates(base: str) -> list[str]:
         # carries the real one) — offer the root as the fallback candidate.
         out.append(urllib.parse.urlunsplit(
             (parts.scheme, parts.netloc, "/models", parts.query, "")))
-    return out
+    # some relays expose the directory at root /api/models instead of the
+    # OpenAI paths; a base under /api already produced it above (dedupe) and
+    # the list stays at three candidates (<= the promised four).
+    api = urllib.parse.urlunsplit(
+        (parts.scheme, parts.netloc, "/api/models", parts.query, ""))
+    if api not in out:
+        out.append(api)
+    return out[:4]
 
 
 def _discover_auth(base: str, api_key: str, slot: str = "") -> tuple[str, str]:
@@ -5951,8 +6022,10 @@ def _discover_auth(base: str, api_key: str, slot: str = "") -> tuple[str, str]:
 
 
 def discover_models(base: str, api_key: str = "", slot: str = "") -> dict:
-    """D1: one read-only GET of {base}/models — a directory read, so zero
-    tokens are spent and no completion is ever touched.
+    """D1: read-only GETs of the endpoint's model directory — at most three
+    path candidates, each tried with at most three credential shapes (a key
+    degrades Bearer -> x-api-key -> x-goog-api-key on a 401/403). Directory
+    reads only: zero tokens are spent and no completion is ever touched.
 
     Success -> {ok, base_url (sanitized echo), count, total, truncated, auth,
     models:[{id}]}; failure -> {ok:false, reason} where reason is ONLY an HTTP
@@ -5974,9 +6047,17 @@ def discover_models(base: str, api_key: str = "", slot: str = "") -> dict:
         # handler's 400, and a non-http scheme would otherwise be fetched by
         # urllib's other openers (ftp, file) — refuse here as well.
         return {"ok": False, "reason": "bad-url", "auth": auth}
-    headers = {"User-Agent": "aidog-console"}
-    if key:
-        headers["Authorization"] = "Bearer " + key
+    # Browser-shaped UA (owner 2026-11-10): a read-only directory GET with
+    # no credential in it, but some relays/CDNs refuse a non-browser agent
+    # outright — the fetch must look like the console page that drives it.
+    # Credential shapes, in order, when a key travels: a relay that rejects
+    # the Bearer form often names x-api-key / x-goog-api-key in its 401 —
+    # try those on the SAME url before calling the endpoint unauthorized.
+    # No key -> exactly ONE headerless request: an honest 401 is the answer.
+    shapes: list[dict[str, str]] = (
+        [{"Authorization": "Bearer " + key},
+         {"x-api-key": key},
+         {"x-goog-api-key": key}] if key else [{}])
     timeout = _discover_timeout()
     candidates = _discover_candidates(base)
     raw = b""
@@ -5984,49 +6065,58 @@ def discover_models(base: str, api_key: str = "", slot: str = "") -> dict:
     reason = "HTTP 404"
     remembered: tuple[int, bytes] | None = None   # an empty-directory 200
     for i, url in enumerate(candidates):
-        try:
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                status = int(getattr(resp, "status", 200) or 200)
-                raw = resp.read(DISCOVER_BODY_MAX + 1)
-        except urllib.error.HTTPError as e:
-            status = int(getattr(e, "code", 0) or 0)
-            reason = f"HTTP {status}"
-            if status in (404, 405) and i + 1 < len(candidates):
-                if remembered:                  # prefer the empty directory
-                    status, raw = remembered
-                    break
-                continue                       # try the standard /v1 path
-            if remembered:
-                status, raw = remembered
-                break
-            return {"ok": False, "reason": reason, "auth": auth}
-        except urllib.error.URLError as e:
-            if remembered:
-                status, raw = remembered
-                break
-            inner = getattr(e, "reason", None)
-            return {"ok": False, "auth": auth, "reason":
-                    type(inner).__name__ if inner is not None else "URLError"}
-        except Exception as e:  # noqa: BLE001 — class name only, never text
-            if remembered:
-                status, raw = remembered
-                break
-            return {"ok": False, "reason": type(e).__name__, "auth": auth}
-        # a real response: stop asking — unless it is an empty directory
-        # with a fallback candidate left (the /v1-stub gateway case: the
-        # empty stub must not mask a real root /models list)
-        if i + 1 < len(candidates):
+        verdict = "fail"
+        for j, shape in enumerate(shapes):
+            headers = {"User-Agent": DISCOVER_UA}
+            headers.update(shape)
             try:
-                probe = json.loads(raw.decode("utf-8"))
-                ent = probe.get("data") if isinstance(probe, dict) else None
-                if isinstance(ent, list) and not ent:
-                    remembered = (status, raw)
-                    reason = "HTTP 404"
+                req = urllib.request.Request(url, headers=headers)
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    status = int(getattr(resp, "status", 200) or 200)
+                    raw = resp.read(DISCOVER_BODY_MAX + 1)
+                verdict = "ok"
+            except urllib.error.HTTPError as e:
+                status = int(getattr(e, "code", 0) or 0)
+                reason = f"HTTP {status}"
+                if status in (401, 403) and j + 1 < len(shapes):
+                    verdict = "auth"   # next credential shape, SAME url
                     continue
-            except Exception:  # noqa: BLE001 — not JSON: treat as real
-                pass
-        break
+                verdict = ("path" if status in (404, 405)
+                           and i + 1 < len(candidates) else "fail")
+            except urllib.error.URLError as e:
+                inner = getattr(e, "reason", None)
+                reason = (type(inner).__name__ if inner is not None
+                          else "URLError")
+                verdict = "fail"
+            except Exception as e:  # noqa: BLE001 — class name only, never text
+                reason = type(e).__name__
+                verdict = "fail"
+            break              # one verdict per url (auth retries `continue`)
+        if verdict == "ok":
+            # a real response: stop asking — unless it is an empty directory
+            # with a fallback candidate left (the /v1-stub gateway case: the
+            # empty stub must not mask a real root /models list)
+            if i + 1 < len(candidates):
+                try:
+                    probe = json.loads(raw.decode("utf-8"))
+                    ent = probe.get("data") if isinstance(probe, dict) else None
+                    if isinstance(ent, list) and not ent:
+                        remembered = (status, raw)
+                        reason = "HTTP 404"
+                        continue
+                except Exception:  # noqa: BLE001 — not JSON: treat as real
+                    pass
+            break
+        if verdict == "path":
+            if remembered:                  # prefer the empty directory
+                status, raw = remembered
+                break
+            continue                       # try the next path candidate
+        # fail: honest refusal / transport error / every shape refused
+        if remembered:
+            status, raw = remembered
+            break
+        return {"ok": False, "reason": reason, "auth": auth}
     else:
         if remembered:
             status, raw = remembered
@@ -7845,9 +7935,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_models_discover(self) -> None:
         """POST /api/models/discover {base_url, api_key? | slot?} — Bearer
-        gate, then ONE read-only GET of the endpoint's model directory (D1):
-        the OpenAI-compatible /models list, so a discovery spends **zero tokens**
-        and never reaches a completion.
+        gate, then read-only GETs of the endpoint's model directory (D1):
+        up to three path candidates x three credential shapes, every one a
+        directory read, so a discovery spends **zero tokens** and never
+        reaches a completion.
 
         Console fix car (owner 2026-11-05): the optional `slot` lets ANY
         endpoint row discover WITH its saved key — the same model-slot
@@ -7860,8 +7951,9 @@ class Handler(BaseHTTPRequestHandler):
         IS the owner, and the existing hook editor can already write argv, so
         an owner-gated outbound fetch sits inside the established boundary.
         The guards below are still enforced (comment kept with the promise):
-        http(s) only · <=10s · body <=1MB · at most 200 models · counts only
-        in the log line.
+        http(s) only · <=10s per fetch · body <=1MB · at most 200 models ·
+        counts only in the log line. base_url and api_key are control-char
+        cleaned on entry (paste hygiene): a value is only ever used.
 
         api_key never echoes, never logs, never enters an exception: it
         leaves this frame as one Authorization header for that host and
@@ -7876,7 +7968,16 @@ class Handler(BaseHTTPRequestHandler):
         if doc is None:
             return
         base = doc.get("base_url")
-        if not isinstance(base, str) or not base.strip():
+        if not isinstance(base, str):
+            return self._json({"error": "validation failed",
+                               "details": ["base_url must be a non-empty "
+                                           "string"]}, 400)
+        # paste hygiene (owner 2026-11-10): drop control chars — a copied
+        # URL often carries a mid-string CR/LF that urlsplit keeps and
+        # http.client then refuses with an opaque class — before any length
+        # or grammar check; the value is only ever used.
+        base = _strip_ctl(base)
+        if not base:
             return self._json({"error": "validation failed",
                                "details": ["base_url must be a non-empty "
                                            "string"]}, 400)
@@ -7901,7 +8002,8 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(key, str):
             return self._json({"error": "validation failed",
                                "details": ["api_key must be a string"]}, 400)
-        if len(key) > DISCOVER_KEY_MAX:
+        key = _strip_ctl(key)            # same paste hygiene; the value
+        if len(key) > DISCOVER_KEY_MAX:  # still never echoes anywhere
             return self._json({"error": "validation failed",
                                "details": [f"api_key too long (max "
                                            f"{DISCOVER_KEY_MAX} chars)"]}, 400)
@@ -7933,7 +8035,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "validation failed",
                                    "details": [f"slot {slot} is not set"]}, 400)
             key = ""                  # only the NAME travels below
-        result = discover_models(base, key.strip(), slot=slot or "")
+        result = discover_models(base, key, slot=slot or "")
         # counts + a boolean only — endpoint, key and body stay out of the log
         sys.stderr.write("models discover ok=%s n=%s total=%s auth=%s\n" %
                          ("yes" if result.get("ok") else "no",
