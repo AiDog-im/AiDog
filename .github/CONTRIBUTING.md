@@ -48,7 +48,7 @@ node --check web/static/app.js
 # 2. Source-language lint + locale pack key parity (en/zh)
 python3 tests/source_lang_check.py
 
-# 3. Console endpoint/auth/validation smoke (needs a running console on 8790)
+# 3. Console endpoint/auth/validation smoke (needs a running console on 19167)
 python3 tests/web_console_p3.py
 
 # 4. Core test suite

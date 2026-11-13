@@ -8692,6 +8692,61 @@ const voiceVolEl = document.getElementById("voiceVol");
 if (voiceVolEl) voiceVolEl.addEventListener("input", e => {
   settings.voice_volume = parseInt(e.target.value, 10) || 0;
 });
+/* Car A2 (port standard): the console-port editor. The read face paints the
+   RUNNING port + its source from GET /api/console (no token needed — a loopback
+   status surface); the write is Bearer-gated and pins web/port.local, answering
+   restart_required so the note can tell the operator the truth (the console
+   never re-binds mid-response). An env override (source=env) disables the
+   editor because the server refuses that write with 409. */
+async function loadPortStatus() {
+  const input = document.getElementById("portInput");
+  const state = document.getElementById("portState");
+  if (!input || !state) return;
+  try {
+    const doc = await fetch("/api/console").then(r => r.json());
+    input.value = String(doc.port || "");
+    const src = { env: t("port.srcEnv", "env override"),
+                  file: t("port.srcFile", "pinned"),
+                  default: t("port.srcDefault", "default") }[doc.source] || doc.source;
+    state.className = "save-state";
+    state.textContent = src;
+    input.disabled = doc.source === "env";
+    const btn = document.getElementById("portSaveBtn");
+    if (btn) btn.disabled = doc.source === "env";
+  } catch (e) { /* fail-soft: keep the last paint */ }
+}
+async function savePort() {
+  const input = document.getElementById("portInput");
+  const state = document.getElementById("portState");
+  const btn = document.getElementById("portSaveBtn");
+  if (!input || !state) return;
+  const port = parseInt(input.value, 10);
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { state.className = "save-state err";
+    state.textContent = t("save.needToken", "token required"); return; }
+  if (btn) btn.disabled = true;
+  state.className = "save-state";
+  state.textContent = t("port.saving", "saving…");
+  try {
+    const res = await fetch("/api/console/port", { method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer " + token },
+      body: JSON.stringify({ port }) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) { state.className = "save-state err";
+      state.textContent = t("save.badToken", "401 · unauthorized"); return; }
+    if (!res.ok) { state.className = "save-state err";
+      state.textContent = (body.details || [body.error || "error"]).join("; ").slice(0, 120); return; }
+    state.className = "save-state";
+    state.textContent = body.restart_required
+      ? t("port.restarted", "saved — restart the console (boot_services.sh) to bind the new port")
+      : t("port.same", "already the running port");
+  } catch (e) { state.className = "save-state err";
+    state.textContent = t("save.netErr", "network error"); }
+  finally { if (btn) btn.disabled = false; }
+}
+loadPortStatus();
+const portSaveBtnEl = document.getElementById("portSaveBtn");
+if (portSaveBtnEl) portSaveBtnEl.addEventListener("click", savePort);
 const voiceOrbEl = document.getElementById("voiceOrb");
 if (voiceOrbEl) voiceOrbEl.addEventListener("click", () => armVoice());
 document.getElementById("saveBtn").addEventListener("click", saveSettings);

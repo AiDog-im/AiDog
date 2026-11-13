@@ -340,7 +340,32 @@ from mycore.session import (Session, export_session, list_sessions,  # noqa: E40
                              prune_old, session_file)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
                           resolve_disabled_tools)
-HOST, PORT = "127.0.0.1", int(os.environ.get("AIDOG_WEB_PORT", "8790"))
+def _resolve_web_port() -> tuple[int, str]:
+    """Car A2 (port standard, owner decree 2026-11-01): the console port is a
+    machine-local setting with one product default (19167). Resolution order:
+      1. AIDOG_WEB_PORT env        — operator/automation override (highest)
+      2. web/port.local            — one integer line, written by the
+                                     settings card behind the Bearer gate
+      3. 19167                     — the product default
+    Returns (port, source) so /api/console can tell the UI the truth about
+    where the running port came from."""
+    env = os.environ.get("AIDOG_WEB_PORT", "").strip()
+    if env:
+        try:
+            return int(env), "env"
+        except ValueError:
+            pass  # a corrupt override must not brick the console; fall through
+    try:
+        pinned = int((WEB_DIR / "port.local").read_text(encoding="utf-8").strip())
+        if 1024 <= pinned <= 65535:
+            return pinned, "file"
+    except (OSError, ValueError):
+        pass
+    return 19167, "default"
+
+
+HOST, PORT = "127.0.0.1", _resolve_web_port()[0]
+PORT_SOURCE = _resolve_web_port()[1]
 try:
     VERSION = (REPO / "VERSION").read_text(encoding="utf-8").strip()  # single source of truth
 except OSError:
@@ -5012,7 +5037,7 @@ def collect_profiles() -> dict:
 
     rows = [build("default", REPO / "data" / "mycore_service",
                   REPO / "secrets.env", REPO / "web" / "settings.json",
-                  8790, True)]
+                  PORT, True)]
     root = profile_paths.profiles_root(REPO)
     if root.is_dir():
         for p in sorted(root.iterdir()):
@@ -5606,6 +5631,30 @@ def collect_endpoints() -> dict:
     return out
 
 
+def collect_console() -> dict:
+    """GET /api/console — the console's own address facts (loopback READ,
+    no auth — same trust class as /api/status: a status surface a browser
+    on this machine may paint without a token; it carries no secret).
+
+    Car A2 (port standard): the UI must show WHERE the console listens and
+    TELL THE TRUTH about the source, so an env override is never silently
+    overwritten by the settings card."""
+    pinned = None
+    try:
+        pinned = int((WEB_DIR / "port.local").read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        pass
+    return {
+        "host": HOST,
+        "port": PORT,
+        "source": PORT_SOURCE,          # env | file | default
+        "pinned_port": pinned if 1024 <= (pinned or 0) <= 65535 else None,
+        "restart_required": pinned is not None and pinned != PORT,
+        "default_port": 19167,
+        "url": f"http://{HOST}:{PORT}",
+    }
+
+
 def collect_setup() -> dict:
     """GET /api/setup — the activation checklist (loopback READ, no auth).
 
@@ -5817,6 +5866,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(read_config_bits())
         if path == "/api/settings":
             return self._json(load_settings())
+        if path == "/api/console":
+            return self._json(collect_console())
         if path == "/api/backup/export":
             return self._handle_backup_export()
         if path == "/api/backup/agent":
@@ -5931,6 +5982,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/settings":
             return self._handle_settings_write()
+        if path == "/api/console/port":
+            return self._handle_console_port_write()
         if path == "/api/control":
             return self._handle_control()
         if path == "/api/secrets":
@@ -8324,6 +8377,64 @@ class Handler(BaseHTTPRequestHandler):
                     _usage_cache["ts"], _usage_cache["data"] = 0.0, None
         return self._json({"ok": True, "changed": changed,
                            "settings": load_settings()})
+
+    def _handle_console_port_write(self) -> None:
+        """POST /api/console/port {port: 1024..65535} — the settings card's
+        port editor (car A2, owner decree 2026-11-01).
+
+        Bearer-gated (it changes machine-local state). Writes web/port.local
+        (one integer line, atomic) and answers restart_required=true — the
+        console NEVER re-binds mid-response; applying the new port is an
+        operator restart (boot_services.sh / watchdog), which is what the UI
+        tells the user. Honesty rules: an active AIDOG_WEB_PORT env override
+        refuses the write (the file would be silently ignored), and a port
+        already owned by another local process is refused before it is
+        pinned."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        raw = doc.get("port")
+        try:
+            port = int(raw)
+        except (TypeError, ValueError):
+            port = -1
+        errors = []
+        if not 1024 <= port <= 65535:
+            errors.append("port must be an integer between 1024 and 65535")
+        if PORT_SOURCE == "env":
+            # The env var outranks the file — writing it would be a lie the
+            # operator discovers only after a restart.
+            return self._json({
+                "error": "port is pinned by the AIDOG_WEB_PORT environment "
+                         "variable on this console; unset it to manage the "
+                         "port from the UI"}, 409)
+        if not errors and port != PORT:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind((HOST, port))
+                errors = []
+            except OSError:
+                errors = [f"port {port} is already in use by another local "
+                          "service; pick a free port"]
+            finally:
+                probe.close()
+        if errors:
+            return self._json({"error": "validation failed", "details": errors}, 400)
+        try:
+            tmp = WEB_DIR / "port.local.tmp"
+            tmp.write_text(f"{port}\n", encoding="utf-8")
+            tmp.replace(WEB_DIR / "port.local")
+        except OSError as e:  # noqa: BLE001
+            return self._json({"error": f"persist failed: {type(e).__name__}"}, 500)
+        sys.stderr.write(f"console port pinned={port} (restart required)\n")
+        return self._json({"ok": True, "port": port,
+                           "restart_required": port != PORT,
+                           "note": "restart the console (boot_services.sh) to "
+                                   "bind the new port" if port != PORT
+                                   else "already the running port"})
 
     def log_message(self, fmt: str, *args) -> None:  # quiet default
         sys.stderr.write("%s %s\n" % (datetime.now().strftime("%H:%M:%S"), fmt % args))

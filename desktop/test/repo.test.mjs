@@ -105,13 +105,35 @@ test('no candidate: returns null (error.html path)', () => {
     fsLike,
   });
   assert.equal(got, null);
-  assert.equal(base, 'http://127.0.0.1:8790');
+  assert.equal(base, 'http://127.0.0.1:19167');
 });
 
 test('base honors AIDOG_WEB_PORT for probe/spawn port', () => {
   assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '18790' }), 'http://127.0.0.1:18790');
-  assert.equal(repo.baseUrl({}), 'http://127.0.0.1:8790');
-  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '' }), 'http://127.0.0.1:8790');
+  assert.equal(repo.baseUrl({}), 'http://127.0.0.1:19167');
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '' }), 'http://127.0.0.1:19167');
+});
+
+test('car A2 port chain: pinned port.local beats the default, env beats the file', () => {
+  // env > pinned > default — the SAME order as web/server.py.
+  assert.equal(repo.baseUrl({}, '19200'), 'http://127.0.0.1:19200');
+  assert.equal(repo.baseUrl({ AIDOG_WEB_PORT: '18790' }, '19200'),
+    'http://127.0.0.1:18790');
+  assert.equal(repo.baseUrl({}, null), 'http://127.0.0.1:19167');
+  // readPinnedPort validates the integer range and never throws.
+  const fsLike = {
+    readFileSync(p) {
+      if (String(p).endsWith('port.local')) return ' 19201 \n';
+      throw new Error('enoent');
+    },
+  };
+  assert.equal(repo.readPinnedPort('/dev/repo', fsLike), '19201');
+  assert.equal(repo.readPinnedPort('/dev/repo', {
+    readFileSync() { return '99999'; },
+  }), null);
+  assert.equal(repo.readPinnedPort('/dev/repo', {
+    readFileSync() { throw new Error('enoent'); },
+  }), null);
 });
 
 test('successful resolve refreshes the cache file (best-effort)', () => {
