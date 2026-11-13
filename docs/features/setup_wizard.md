@@ -36,8 +36,8 @@ Slot order (matches the installer's report order):
 | Slot | Required | Validation |
 |---|---|---|
 | `WEB_TOKEN` | yes | `\S{16,}` (any long random string) |
-| `MYCORE_TG_TOKEN` | yes | `\d{4,}:[A-Za-z0-9_-]{20,}` (BotFather format) |
-| `AIDOG_TG_ALLOWED_USERS` | yes | `\d+(,\d+)*` (comma-separated ids, no spaces) |
+| `MYCORE_TG_TOKEN` | yes (global) · no (cn) | `\d{4,}:[A-Za-z0-9_-]{20,}` (BotFather format) |
+| `AIDOG_TG_ALLOWED_USERS` | yes (global) · no (cn) | `\d+(,\d+)*` (comma-separated ids, no spaces) |
 | `MODEL_API_KEY` | no | `\S{8,}`; empty input = leave empty (open endpoints need none) |
 | `AIDOG_GH_PAT` | no | `\S{20,}`; empty = skip |
 | `MYCORE_WD_CHAT` | no | `-?\d{5,20}`; empty = skip (log-only alerting) |
@@ -67,15 +67,25 @@ Rules the tests lock (regression wall in `tests/setup_wizard_b3.py`):
    [y/N]`; `y` delegates to `deploy/install.sh` with its exit code
    propagated, anything else skips (hint printed). `--no-boot` omits the
    question entirely.
+7. **One explicit region question (car I, 0.5.72)** — after the slot block
+   the interactive wizard asks `region [global/cn] (ENTER keeps current)`
+   and writes `web/settings.json region.code` with the same read-back
+   discipline; the value is **never detected** (no locale sniffing, no geo
+   lookup — owner ruling 2026-11-03). `--check`/`--yes` never prompt, so
+   scripted installs stay byte-identical. Under region `cn` the two
+   Telegram slots leave the pending set (owner ruling Q5): a
+   Feishu/DingTalk-only install reaches exit `0`; `global` keeps the
+   original three required slots unchanged.
 
 ## 3. `--check` semantics (the report cards)
 
 - reports every slot: `set (len N)` / `EMPTY (required)` /
-  `set (len N) — INVALID format`, plus `secrets.env format` verdict and the
-  configured `base_url`/`model`;
+  `set (len N) — INVALID format`, plus `secrets.env format` verdict, the
+  configured `base_url`/`model` and the `settings region: <code>` line;
 - broken own-line syntax → exit `1` with the violating line numbers (never
   contents); invalid `settings.json` JSON → exit `1`;
-- required slot empty → exit `2` with the pending names;
+- required slot empty → exit `2` with the pending names (under region `cn`
+  the two Telegram slots are not required — rule 7 above);
 - all required filled + format clean → exit `0`;
 - **creates nothing** — a fresh checkout stays a fresh checkout (asserted).
 
@@ -90,6 +100,10 @@ verdicts and points at the fix:
   reachability and the chat-service state; `ready` mirrors the wizard's
   pending/exit-0 semantics (empty required slot = `fmt:true, ok:false`, a
   non-empty bad value = `fmt:false, state:invalid`, service never in `ready`).
+  Car I: the row `required` flags follow the region tier — under
+  `region.code == "cn"` the two Telegram rows report `required: false`
+  (rule 7) while everything else stays required; `global` is byte-identical
+  to the pre-car-I behavior.
 - The server's `SLOT_PATTERNS` are **parity-tested against this wizard's
   `SLOTS`** — the pattern strings are asserted byte-equal, so the two
   definitions cannot drift.
@@ -104,7 +118,7 @@ deep-links, RE-CHECK re-probes) — see
 
 ## 5. Tests
 
-`python3 tests/setup_wizard_b3.py` → **99/99** (offline, stdlib, every write
+`python3 tests/setup_wizard_b3.py` → **106/106** (offline, stdlib, every write
 confined to a throwaway fake repo under `/tmp`; the real `secrets.env` /
 `web/settings.json` are never touched — `REPO` self-derives from the copied
 script's location, and the stub `install.sh` records invocation + propagates

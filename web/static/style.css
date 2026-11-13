@@ -333,6 +333,9 @@ body {
 #chanList .chan-inbound.in-bad { color: var(--red); }
 #chanList .chan-inbound.in-warn { color: var(--amber); }
 #chanList .chan-inbound.in-unknown { color: var(--muted); }
+/* car I (owner #16): region-tier dim (ruling Q2) — the entry stays visible,
+   honestly de-emphasized, with the note below it carrying the reason */
+#chanList .is-region-dim, #chanTgRow.is-region-dim { opacity: 0.62; }
 .live-dot { width: 8px; height: 8px; background: var(--ok);
   border-radius: 0 50% 50% 50%; transform: rotate(45deg); margin-left: 12px;
   box-shadow: 0 0 8px rgba(10, 143, 97, .5); }
