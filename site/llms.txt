@@ -21,7 +21,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 - Skills ecosystem: an official skills directory at https://aidog.im/skills.html backed by a public,
   lint-and-review gated skills repository; `GET /api/skills/remote` serves the same catalog fail-soft
   (remote -> bundled copy -> honest `unavailable`, never a 5xx).
-- Evidence (the same numbers shown in the site's fact strip): core tests 2244/2244 · console smoke 547/547 · skill router 37/37 · memory 58/58 · setup wizard 113/113 · profile isolation 63/63 · desktop shell 23/23 · doctor 0 FAIL · 0 WARN · 27 real-machine E2E suites · 1457 locale keys per pack · 28 registered tools · 37 capability documents · 39 self-developed modules ≈ 23.7k LOC.
+- Evidence (the same numbers shown in the site's fact strip): core tests 2268/2268 · console smoke 547/547 · skill router 37/37 · memory 58/58 · setup wizard 113/113 · profile isolation 63/63 · desktop shell 23/23 · doctor 0 FAIL · 0 WARN · 27 real-machine E2E suites · 1457 locale keys per pack · 29 registered tools · 37 capability documents · 39 self-developed modules ≈ 24.0k LOC.
 - Current release: 0.5.76.
 
 ## Interfaces
