@@ -94,7 +94,7 @@ HTTP_TIMEOUT_S = 10.0
 RATE_WINDOW_S = 60.0
 
 SEVERITIES = ("info", "warn", "high")
-SOURCE_KINDS = ("home", "web", "mcp")
+SOURCE_KINDS = ("home", "web", "mcp", "discussions")
 SEVERITY_RANK = {"info": 0, "warn": 1, "high": 2}
 
 CONFIG_KEYS = frozenset({"enabled", "pause", "interval_s", "quiet_hours",
@@ -107,6 +107,12 @@ SOURCE_KEYS = {
     # The mcp lane reads the bridge registry: no url (the name resolves it),
     # no rate cap (it issues no HTTP call of its own).
     "mcp": frozenset({"id", "kind", "enabled", "server"}),
+    # Car F (task hall): an anonymous read of the product repository's own
+    # GitHub Discussions — no url (the repository comes from
+    # AIDOG_COMMUNITY_REPO), no token (the list is public), and an optional
+    # category slug that filters locally after the fetch.
+    "discussions": frozenset({"id", "kind", "enabled", "rate_cap_per_min",
+                              "category"}),
 }
 RULE_KEYS = frozenset({"id", "source", "when", "severity", "speak"})
 
@@ -140,6 +146,9 @@ ST_DETACHED = "detached"                # mcp: declared, no live session
 _ID_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 _SLOT_RE = re.compile(r"[A-Z][A-Z0-9_]{1,63}")
 _FIELD_RE = re.compile(r"[a-z][a-z0-9_]{0,31}")
+# Discussion-category slug grammar (GitHub derives these lowercase from the
+# display name): a-z, 0-9 and interior hyphens, 1..40 chars.
+_CAT_RE = re.compile(r"[a-z0-9][a-z0-9-]{0,39}")
 # Bridge-name grammar: byte-for-byte the mycore.mcp `name` pattern (the
 # core suite asserts the two agree), used with fullmatch().
 _SERVER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,31}")
@@ -253,6 +262,22 @@ def parse_source(entry: object, *, index: int) -> dict:
         raise SniffError(f"{prefix}rate_cap_per_min must be an integer "
                          f"1..{MAX_RATE_CAP}")
     out["rate_cap_per_min"] = cap
+    if kind == "discussions":
+        # no url, no token — the read is the product repo's public list;
+        # `category` is an optional slug filtered locally after the fetch
+        # (the upstream REST ?category= param is ignored by GitHub, so the
+        # honest filter is the one we apply ourselves).
+        cat = entry.get("category", "")
+        if cat is None:
+            cat = ""
+        if not isinstance(cat, str) or len(cat) > 40:
+            raise SniffError(f"{prefix}category must be a slug like "
+                             "task-hall")
+        if cat and not _CAT_RE.fullmatch(cat):
+            raise SniffError(f"{prefix}category must be a slug like "
+                             "task-hall")
+        out["category"] = cat
+        return out
     out["url"] = _require_url(entry.get("url"), prefix)
     if kind == "home":
         token = entry.get("token", "")
@@ -1136,6 +1161,43 @@ def _sweep_web(src: dict, *, transport: Transport) -> tuple[dict, str, str]:
     return readings, ST_REACHABLE, ""
 
 
+def _sweep_discussions(src: dict, *, transport: Transport) -> tuple[dict, str, str]:
+    """Anonymous GET of the product repository's public GitHub Discussions
+    -> readings {tasks, latest}, optionally filtered to one category slug.
+    -> (readings, status, error).
+
+    Car F (task hall): no token ever rides this call — the list is public,
+    and GitHub's upstream `category` query param is ignored, so the filter
+    is applied locally on each item's `category.slug`. A failed or
+    non-list read yields NO readings (stale data never fires a rule)."""
+    from . import community  # local import: optional dependency path
+    url = (f"{community.api_base()}/repos/{community.repo_slug()}"
+           "/discussions?per_page=30")
+    headers = {"Accept": "application/vnd.github+json",
+               "User-Agent": "aidog-sniff/1"}       # never an Authorization
+    try:
+        body = transport(url, headers, b"", HTTP_TIMEOUT_S)
+        doc = json.loads(body) if isinstance(body, str) else None
+        if not isinstance(doc, list):
+            raise SniffError("discussions source: unexpected response shape")
+    except Exception as e:  # noqa: BLE001 — one failed source never breaks a sweep
+        return {}, ST_ERROR, _scrub(str(e), "")
+    cat = src.get("category") or ""
+    matched = []
+    for item in doc:
+        if not isinstance(item, dict):
+            continue
+        if cat:
+            cat_obj = item.get("category")
+            if not isinstance(cat_obj, dict) or cat_obj.get("slug") != cat:
+                continue
+        matched.append(item)
+    numbers = [n for n in (it.get("number") for it in matched)
+               if isinstance(n, int) and not isinstance(n, bool)]
+    readings = {"tasks": len(matched), "latest": max(numbers) if numbers else 0}
+    return readings, ST_REACHABLE, ""
+
+
 def _sweep_mcp(src: dict, *, raw: str,
                sessions: Callable[[str], list]) -> tuple[dict, str, str]:
     """Read one borrowed bridge through the read-side lane: parse the
@@ -1286,6 +1348,7 @@ def tick(now: float | None = None, *, block: dict | None = None,
     sustain = state.setdefault("sustain", {})
     now_min = _now_min(t)
     readings_by_source: dict[str, dict] = {}
+    prev_pending: dict[str, dict] = {}   # new baseline, applied AFTER rules
     matched = 0
     new = dup = 0
 
@@ -1312,6 +1375,9 @@ def tick(now: float | None = None, *, block: dict | None = None,
         elif is_mcp:
             readings, status, error = _sweep_mcp(
                 src, raw=mcp_raw or "", sessions=mcp.live_sessions)
+        elif src["kind"] == "discussions":
+            readings, status, error = _sweep_discussions(
+                src, transport=transport)
         else:
             readings, status, error = _sweep_web(src, transport=transport)
         if status != ST_NEVER and not is_mcp:
@@ -1326,7 +1392,7 @@ def tick(now: float | None = None, *, block: dict | None = None,
         if status in (ST_REACHABLE, ST_DETACHED):
             entry["last_ok"] = t
             entry["reads"] = int(_num(entry.get("reads")) or 0) + len(readings)
-            prev[sid] = dict(readings)
+            prev_pending[sid] = dict(readings)
             readings_by_source[sid] = readings
         else:
             # Never evaluate a rule against data we did not just read.
@@ -1367,6 +1433,13 @@ def tick(now: float | None = None, *, block: dict | None = None,
             new += 1
         else:
             dup += 1
+
+    # `changed` compares against the PREVIOUS sweep: the new baseline is
+    # written only after every rule has seen this sweep. (Writing it inside
+    # the sweep loop made `changed` compare a value with itself and never
+    # fire — caught by car F's tick legs; the evaluate-level unit tests pass
+    # a prev by hand, so they never saw this.)
+    prev.update(prev_pending)
 
     state["last_swept"] = t
     report.update({
