@@ -11,6 +11,9 @@
 #   run_service.sh --check    # readiness only: 0 ready / 3 no allowlist /
 #                             # 4 no token / 2 wiring error (no output)
 #                             # (car F: invalid AIDOG_PROFILE = 5, fail-closed)
+#                             # (0.5.85: a channel-only install — no TG token
+#                             #  + >=1 enabled non-TG channel — is ready too,
+#                             #  judged by mycore.service --channel-only-check)
 #
 # Car F (§13.1) profile seam — AIDOG_PROFILE unset = byte-identical legacy
 # behavior; set = this profile's own secrets.env + own state root:
@@ -55,9 +58,20 @@ fi
 export AIDOG_TG_ALLOWED_USERS MYCORE_TG_TOKEN
 
 if [ "${1:-}" = "--check" ]; then
+  # Readiness: TG slots complete -> ready (historical behaviour). Incomplete
+  # TG slots -> only a channel-only install may be ready (0.5.85, user report
+  # #4): mycore.service --channel-only-check is the SAME judgment Gate 1
+  # uses (no TG token + >=1 enabled non-TG channel), so the launcher and
+  # the service can never disagree. No enabled channel -> the historical
+  # exit 3/4 fail-closed refusal stands.
+  if [ -n "${AIDOG_TG_ALLOWED_USERS:-}" ] && [ -n "${MYCORE_TG_TOKEN:-}" ]; then
+    exit 0
+  fi
+  if (cd "$REPO" && python3 -m mycore.service --channel-only-check >/dev/null 2>&1); then
+    exit 0
+  fi
   [ -z "${AIDOG_TG_ALLOWED_USERS:-}" ] && exit 3
   [ -z "${MYCORE_TG_TOKEN:-}" ] && exit 4
-  exit 0
 fi
 cd "$REPO" || exit 2
 # Profile state root must exist before the service opens its pidfile/log

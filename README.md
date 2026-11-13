@@ -45,7 +45,9 @@
 ## About
 
 I'm AiDog is a **personal embodied AI companion** that runs on your own
-machine. It is built around three ideas that most assistants skip:
+machine. (**aidog.im is this documentation site** — there is no hosted web
+app to sign into; the product is the open-source repository you clone and
+run locally, and its console listens on `127.0.0.1` only.) It is built around three ideas that most assistants skip:
 
 - **A constitution for a personality.** `SOUL.md` sits at the top of every
   reply's context. Red lines, tone, and operating principles are not
@@ -84,7 +86,8 @@ code at all.
 
 Everything is **free forever**: no subscription, no paid feature gate,
 and **no telemetry in the product runtime** — the only counting anywhere is
-the marketing site's public visit counter, documented as such. You bring a
+an optional anonymous usage ledger (**off by default**, opt-in from Settings)
+plus the marketing site's public visit counter, documented as such. You bring a
 model key (or use the zero-key trial path) and the whole product activates.
 
 ## Highlights
@@ -192,7 +195,7 @@ Full guide: [`docs/installation.md`](docs/installation.md).
 | `/learn memory <text>` / `/learn skill <slug> :: <desc> :: <body>` | record an experience (lint-gated) |
 | `/reflect [daily\|weekly\|monthly]` | draft the period reflect skeleton (facts only) |
 | `/evolution` | self-evolution loop status |
-| `/cron [add [message\|prompt] <spec> :: <text> \| del <id>]` | natural-language cron jobs |
+| `/cron [add [message\|prompt] <spec> :: <text> \| del <id> \| pause <id> \| resume <id> \| run <id> \| catchup <id> on|off]` | natural-language cron jobs + per-job pause/resume/run/catch-up (0.5.84) |
 | `/checkpoint [restore <id>]` | file checkpoints + rollback |
 | `/version` | installed vs latest release |
 

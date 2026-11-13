@@ -8,6 +8,12 @@ The console exposes an OpenAI-shaped HTTP gateway so stock OpenAI clients
 (base URL `http://127.0.0.1:19167/v1`) can drive the same agent loop the
 console chat uses — one gateway, one loop, one tool registry.
 
+**Optional and off to the side**: AiDog's own chat never goes through this
+gateway (the console and Telegram pipelines call the model directly); it
+exists for stock OpenAI tooling that expects an OpenAI-shaped endpoint and
+requires its own `OPENAI_API_TOKEN` slot (see Authentication). Not
+configuring it changes nothing about the product's own conversation.
+
 ## Endpoints
 
 | Method | Path | Auth | Answer |

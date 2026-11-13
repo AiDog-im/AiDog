@@ -891,10 +891,14 @@ def proc_alive(pattern: str) -> bool:
         return False
 
 
-def port_open(port: int) -> bool:
+def port_open(port: int, host: str = "127.0.0.1") -> bool:
+    """TCP connect probe. `host` defaults to loopback (the historical
+    behaviour) — endpoint_reachable passes the REAL endpoint host, because
+    a remote gateway's open port is never visible on 127.0.0.1 (user report
+    #20: the port fallback always said False for a remote base)."""
     with socket.socket() as s:
         s.settimeout(1.5)
-        return s.connect_ex(("127.0.0.1", port)) == 0
+        return s.connect_ex((host, port)) == 0
 
 
 def http_status(url: str, timeout: float = 2.5) -> int | None:
@@ -5895,13 +5899,58 @@ def collect_sniff() -> dict:
 
 # ------------------------------------- activation & operations (0.5.40) ----
 
+def _http_answered(url: str, timeout: float = 1.0) -> bool:
+    """True when the endpoint answers with a 2xx/3xx/4xx status line —
+    an auth-gated 401/403 or a wrong-path 404 still means the TARGET
+    server is alive (user reports #14/#20: zhipu's OpenAI-compatible
+    /models answers 401 without a key; neither may read as 'unreachable').
+    5xx is NOT answered: a 502/504 from a proxy means the upstream never
+    replied, and a 5xx from the origin means it is down — both must keep
+    ready=false rather than flip green (the proxy-error-page trap observed
+    when a shell exports HTTP(S)_PROXY and NO_PROXY is empty). Loopback
+    targets are probed DIRECT (a proxy in front of 127.0.0.1 is never the
+    endpoint's own answer — RFC: loopback is not a proxied destination);
+    remote targets keep the environment proxy, which real installs need to
+    egress. Connection/DNS/TLS failures return False — one attempt per
+candidate: the candidate list itself is the retry."""
+    try:
+        parts = urllib.parse.urlparse(url)
+    except ValueError:
+        return False
+    if parts.hostname in ("127.0.0.1", "localhost", "::1"):
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}))          # loopback = DIRECT
+    else:
+        opener = urllib.request.build_opener()        # env proxies as-is
+    try:
+        with opener.open(url, timeout=timeout):
+            return True
+    except urllib.error.HTTPError as e:
+        return e.code < 500                          # 4xx = target answered
+    except Exception:                                # noqa: BLE001
+        return False                                 # refused/DNS/TLS/timeout
+
+
 def endpoint_reachable(base: str, timeout: float = 1.0) -> bool:
-    """Is the configured model endpoint answering? Reuses the console's own
-    probes (`port_open` / `http_status`, the retry pair inside http_status
-    keeps the whole probe at ≈2s): a 2xx on <base>/models or <base>/v1/models
-    proves reachability; a refused port is down; an auth-gated gateway that
-    refuses the probe still counts as reachable because its PORT is open.
-    Never raises — an unparsable URL is simply unreachable."""
+    """Is the configured model endpoint answering? Path candidates, in
+    order (each one attempt — the list is the retry):
+
+      1. `<base>/models`      — a base that already carries a version
+                                segment (`.../v1`, `.../api/paas/v4`) —
+                                user report #20: zhipu is `/api/paas/v4`,
+                                and the old code only ever tried
+                                `/v1/models` → 404;
+      2. `<base>/v1/models`   — a bare base without a version segment;
+      3. `<origin>/api/models` — the gateway-style root candidate (the
+                                same candidate the 0.5.83 discover car
+                                added for /api/models).
+
+ ANY 2xx/3xx/4xx status line counts as answered (see _http_answered —
+ an auth-gated endpoint is reachable, not authorized; 5xx and connection
+ failures are not); a refused/DNS-dead probe falls
+ through to a TCP connect on the REAL host (port_open used to probe
+ 127.0.0.1 only, so a remote base always read False — user report #20).
+ Never raises — an unparsable URL is simply unreachable."""
     if not isinstance(base, str) or not base:
         return False
     try:
@@ -5915,10 +5964,12 @@ def endpoint_reachable(base: str, timeout: float = 1.0) -> bool:
     except ValueError:
         return False
     probe = base.rstrip("/")
-    probe = f"{probe}/models" if probe.endswith("/v1") else f"{probe}/v1/models"
-    if http_status(probe, timeout=timeout) is not None:
-        return True
-    return port_open(port)
+    origin = f"{parts.scheme}://{parts.netloc}"
+    for url in (f"{probe}/models", f"{probe}/v1/models",
+                f"{origin}/api/models"):
+        if _http_answered(url, timeout=timeout):
+            return True
+    return port_open(port, parts.hostname)
 
 
 # ----------------------------------- upstream connectivity test (Wave 3 X5) -

@@ -264,3 +264,43 @@ credential echo.
   `tmp/e2e_activation_ui.js` `U7` (409 detail) and
   `tmp/e2e_frontend_coverage.py` `L4` (both 409 shapes) — see
   [frontend_coverage.md](frontend_coverage.md) §4.
+
+## 10. Channel-only startup (no Telegram) — car 0.5.85
+
+A Feishu/DingTalk-only install is a first-class shape (user report
+#4: region=cn made the TG slots optional in the activation checklist while
+the service still hard-required them, so `aidog_svc` never started and the
+Feishu poll never ran). The startup judgment is now ONE function —
+`mycore.service.channel_only_mode()` — shared by the service's Gate 1, the
+`ChatService` constructor and `run_service.sh --check` (via
+`python3 -m mycore.service --channel-only-check`, exit 0/1), so the three
+can never disagree:
+
+- **Qualified** = `MYCORE_TG_TOKEN` absent AND `settings.channels` has at
+  least one `enabled: true` route → the service starts with an empty
+  allowlist (the TG leg never polls, so an empty list can never answer an
+  unauthenticated chat), skips `getUpdates` and the bot-menu sync
+  (`has_token=False`), and runs every other leg normally (channels, cron,
+  reflect, sniff, missions, ledger). Two log lines name the mode —
+  `START mode=channel-only` and `LOOP_START … channel-only` — never a
+  silent fall-through.
+- **Not qualified** (token present, zero enabled channels, unreadable
+  settings) → the historical refusal is unchanged: exit 3 (no allowlist) /
+  exit 4 (no token). Fail-closed is preserved: there is nothing to run, so
+  the service does not start just to idle.
+- `run_service.sh --check` readiness codes are unchanged for a normal
+  install (0/3/4/5); a channel-only install now answers 0 instead of 3/4.
+
+### 10.1 Feishu inbound hard requirements (verified live 2026-11-11)
+
+- a **self-built enterprise app** with the bot capability **and** the
+  *read chat history* permission, **published as a version** — the
+  @-mention permission alone is not enough, because inbound is REST
+  history polling (not an event subscription) and the bot must be a member
+  of the target chat;
+- `channels.feishu.allow` takes only **real human** `ou_…` ids: a `cli_…`
+  sender is the bot itself, and allowlisting it creates an infinite
+  self-reply loop (the `CHANNEL_DENY` line for `cli_…` is the whitelist
+  working as intended);
+- the adapter polls one page of chat history per channel-poll tick —
+  cadence follows the service's `CHANNEL_POLL_SEC`, not a push channel.

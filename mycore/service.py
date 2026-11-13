@@ -13,11 +13,19 @@ consumed or claimed):
 
     1. AIDOG_TG_ALLOWED_USERS unset/empty  -> exit 3  (fail-closed: an
        unauthenticated chat must never be answered)
+       **channel-only exception (0.5.85, user report #4)**: when the TG
+       token is absent AND settings.channels has at least one enabled
+       non-TG channel, an empty allowlist is safe (the TG leg never polls)
+       -> the service starts in CHANNEL-ONLY mode: getUpdates is skipped,
+       every other leg (channels/cron/reflect/sniff/mission/ledger) runs
+       normally, and one warn line names the mode. With NO enabled channel
+       the refusal is unchanged (there would be nothing to run).
     2. pidfile held by a LIVE process      -> exit 2  (single instance only —
        two getUpdates consumers on one token steal each other's updates,
        the same hazard class as the tg.py token guard)
     3. MYCORE_TG_TOKEN hard guard (tg.polling_token()) -> exit 4 (dedicated
-       second bot required; the gateway's token is refused)
+       second bot required; the gateway's token is refused) — skipped in
+       channel-only mode (no token exists by definition)
 
 State directory (default <repo>/data/mycore_service, env AIDOG_MC_STATE):
 
@@ -254,6 +262,33 @@ def parse_allowlist(raw: str | None) -> frozenset[int]:
         if tok and tok.isascii() and tok.isdigit():
             out.add(int(tok))
     return frozenset(out)
+
+
+def channel_only_mode() -> bool:
+    """True when THIS install runs without Telegram on purpose (user report
+    #4, car 0.5.85): no dedicated TG token in the environment AND at least
+    one enabled non-TG channel in settings.channels (feishu/discord/…).
+
+    The single judgment shared by main()'s Gate 1, the ChatService
+    constructor and `run_service.sh --check` (via --channel-only-check), so
+    the three can never disagree. Fail-closed: an unreadable settings file,
+    a token that exists anywhere, or zero enabled channels -> False (the
+    historical refusal stands). The allowlist is deliberately NOT part of
+    the judgment — an empty list is the normal state of a channel-only
+    install, and the TG leg that would use it never polls."""
+    if os.environ.get(POLL_BOT_ENV, "").strip():
+        return False                       # a TG token exists -> normal mode
+    try:
+        doc = json.loads(pp.settings_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False                       # no/garbage settings -> fail closed
+    cfg = doc.get("channels") if isinstance(doc, dict) else None
+    if not isinstance(cfg, dict):
+        return False
+    for value in cfg.values():
+        if isinstance(value, dict) and value.get("enabled") is True:
+            return True                    # one enabled non-TG channel is enough
+    return False
 
 
 def redact_chat(value: object) -> str:
@@ -558,12 +593,18 @@ class ChatService:
                  transport=None, chat=None, repo: str | Path | None = None,
                  channels=None,
                  now=lambda: time.time(), sleep=time.sleep,
-                 max_poll_errors: int = MAX_POLL_ERRORS) -> None:
+                 max_poll_errors: int = MAX_POLL_ERRORS,
+                 channel_only: bool = False) -> None:
         allow = frozenset(allowlist)
-        if not allow:
+        if not allow and not channel_only:
             # Defense in depth: main() refuses earlier with exit 3; this guard
             # keeps direct construction from ever answering an open chat.
+            # channel_only (0.5.85, user report #4) is the one legal empty:
+            # main() Gate 1 proved no TG token exists AND >=1 non-TG channel
+            # is enabled, so the TG leg below never polls and the empty
+            # allowlist can never match anything (fail-closed preserved).
             raise ValueError("empty allowlist — fail-closed, refusing to run")
+        self.channel_only = bool(channel_only)
         self.state = Path(state_dir)
         try:
             self.state.mkdir(parents=True, exist_ok=True)
@@ -593,9 +634,17 @@ class ChatService:
         # or clears it, so a stale preview can never leak into a later send)
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
-        # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
-        self.tg = TgClient(token=TgClient.polling_token(),
-                           token_env=POLL_BOT_ENV, transport=transport)
+        # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too
+        # — EXCEPT in channel-only mode (0.5.85): no token exists by
+        # definition, so the client is built token-less (has_token=False ->
+        # no menu sync, no getUpdates; every send path fails honestly via
+        # tg._require if one is ever reached).
+        if self.channel_only:
+            self.tg = TgClient(token=None, token_env=POLL_BOT_ENV,
+                               transport=transport)
+        else:
+            self.tg = TgClient(token=TgClient.polling_token(),
+                               token_env=POLL_BOT_ENV, transport=transport)
         self.registry = build_registry(
             state_dir=self.state,
             disabled=resolve_disabled_tools(self._settings_doc()))
@@ -683,31 +732,41 @@ class ChatService:
         offset: int | None = None
         processed = 0
         errors = 0
-        self.log.write("LOOP_START", f"mode={'once' if once else 'poll'}")
+        # channel-only (0.5.85, user report #4): no token -> no getUpdates,
+        # no menu sync — every OTHER leg (channels/cron/reflect/sniff/
+        # mission/ledger/release-check) still runs; the loop is paced by a
+        # 1s tick because there is no long-poll to block on.
+        tg_poll = self.tg.has_token and not self.channel_only
+        self.log.write("LOOP_START", f"mode={'once' if once else 'poll'}"
+                       f"{' channel-only' if not tg_poll else ''}")
         # Discoverability car: publish (or clear) the TG command menu ONCE,
         # before the first getUpdates — a settings edit applies on the next
         # service start. Guard + try/except both live here so no menu failure
         # can ever reach the poll loop (fail-soft, one log line).
-        if self.tg.has_token:
+        if tg_poll:
             self._sync_bot_menu()
         try:
             while not self._stop:
-                timeout = 0 if once else DEFAULT_POLL_TIMEOUT
-                try:
-                    updates = self.tg.get_updates(offset=offset, timeout=timeout)
-                except TgError as e:
-                    if once:
-                        self.log.write("POLL_ERR", "mode=once", f"err={str(e)[:120]}")
-                        raise
-                    errors += 1
-                    self.log.write("POLL_ERR", f"n={errors}", f"err={str(e)[:120]}")
-                    if errors >= self.max_poll_errors:
-                        raise
-                    if self._stop:
-                        break
-                    self._sleep(min(30.0, 1.5 ** min(errors, 10)))
-                    continue
-                errors = 0
+                if tg_poll:
+                    timeout = 0 if once else DEFAULT_POLL_TIMEOUT
+                    try:
+                        updates = self.tg.get_updates(offset=offset,
+                                                      timeout=timeout)
+                    except TgError as e:
+                        if once:
+                            self.log.write("POLL_ERR", "mode=once", f"err={str(e)[:120]}")
+                            raise
+                        errors += 1
+                        self.log.write("POLL_ERR", f"n={errors}", f"err={str(e)[:120]}")
+                        if errors >= self.max_poll_errors:
+                            raise
+                        if self._stop:
+                            break
+                        self._sleep(min(30.0, 1.5 ** min(errors, 10)))
+                        continue
+                    errors = 0
+                else:
+                    updates: list[dict] = []   # channel-only: legs only
                 self._maybe_reflect()          # evolution cron leg (no-op when off)
                 self._maybe_fire_cron()        # scheduler leg (no-op with no due jobs)
                 self._maybe_tick_missions()    # mission leg (0.5.44; no-op without an active mission)
@@ -729,6 +788,8 @@ class ChatService:
                         break
                 if once:
                     break
+                if not tg_poll:
+                    self._sleep(1.0)      # channel-only: pace the legs
         finally:
             self.log.write("LOOP_END", f"processed={processed}")
         return processed
@@ -2611,15 +2672,30 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--dry-run", action="store_true",
                     help="run the full loop but skip outbound sends "
                          "(offsets still advance — see module docstring)")
+    ap.add_argument("--channel-only-check", action="store_true",
+                    help="exit 0 when this install qualifies for "
+                         "channel-only startup (no TG token + >=1 enabled "
+                         "non-TG channel), else 1 — the readiness seam "
+                         "deploy/run_service.sh --check shares with Gate 1")
     args = ap.parse_args(argv)
+
+    if args.channel_only_check:
+        return 0 if channel_only_mode() else 1
 
     # Gate 1: fail-closed allowlist — checked before pidfile, token, anything.
     allow = parse_allowlist(os.environ.get(ALLOW_ENV))
+    channel_only = False
     if not allow:
-        print(f"mycore.service: {ALLOW_ENV} is unset or empty — refusing to "
-              "start (fail-closed: an unauthenticated chat must never be "
-              "answered)", file=sys.stderr)
-        return 3
+        if channel_only_mode():
+            # channel-only install (user report #4): the TG leg never polls,
+            # so an empty allowlist can never answer an unauthenticated chat.
+            # One warn line names the mode — never a silent fall-through.
+            channel_only = True
+        else:
+            print(f"mycore.service: {ALLOW_ENV} is unset or empty — refusing to "
+                  "start (fail-closed: an unauthenticated chat must never be "
+                  "answered)", file=sys.stderr)
+            return 3
 
     state = state_dir()
     try:
@@ -2656,12 +2732,14 @@ def main(argv: list[str] | None = None) -> int:
     svc: ChatService | None = None
     try:
         # Gate 3: dedicated second-bot token (TgError message is secret-free).
-        svc = ChatService(state, allow, dry_run=args.dry_run)
+        svc = ChatService(state, allow, dry_run=args.dry_run,
+                          channel_only=channel_only)
         svc.install_signal_handlers()
         svc.log.write("START", f"pid={os.getpid()}",
                       f"dry_run={int(bool(args.dry_run))}",
                       f"once={int(bool(args.once))}",
-                      f"allow={len(allow)}")
+                      f"allow={len(allow)}",
+                      f"mode={'channel-only' if channel_only else 'tg'}")
         svc.run(once=args.once)
         svc.log.write("EXIT", "rc=0")
         return 0

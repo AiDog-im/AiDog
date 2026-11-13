@@ -8,12 +8,12 @@ you — by **name**, never by value — exactly what still needs a human.
 
 | Need | Why | Notes |
 |---|---|---|
-| Linux (or WSL) + bash | runtime (tmux sessions, watchdog) | native filesystem path recommended — network shares (9p/CIFS) reject `chmod` |
+| Linux (or WSL) + bash | runtime (tmux sessions, watchdog) | **clone inside WSL's native filesystem** (e.g. `~/aidog`) — a Windows-drive mount (9p/CIFS) rejects `chmod` and breaks tmux; do NOT copy a Windows-side clone in (CRLF breaks the `.sh` scripts — re-clone inside WSL instead) |
 | Python **3.10+** | console, services, quality gates | `python3 --version` |
 | `tmux` | process supervision | `sudo apt-get install tmux` |
 | `git` | clone + version updates | optional; archives can run without it |
-| A model endpoint | chat/brain | any OpenAI-compatible endpoint — see [Model backend](#model-backend) |
-| A Telegram bot token | chat channel | from @BotFather — see [Credential slots](#credential-slots) |
+| A model endpoint | chat/brain | any OpenAI-compatible endpoint — see [Model backend](#model-backend); Zhipu's base ends in `/api/paas/v4` (not `/v1`, no trailing slash) |
+| A Telegram bot token | chat channel | from @BotFather — see [Credential slots](#credential-slots); **optional for a channel-only install** (no TG token + ≥1 enabled non-TG channel, e.g. Feishu — see [channels.md §10](features/channels.md)) |
 
 ## Quick start
 
