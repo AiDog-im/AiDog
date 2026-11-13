@@ -425,7 +425,8 @@ class AcpServer:
         stop = "internal_error"
         try:
             stack = build_system_stack(context_dirs=resolve_context_dirs(),
-                                    capability_path=resolve_capability_path())
+                                       capability_path=resolve_capability_path(),
+                                       runtime_facts=cli.resolve_runtime_facts())
             history = [m for m in session.messages if m.get("role") != "system"]
             messages = stack + history
             messages.append({"role": "user", "content": text})

@@ -278,7 +278,8 @@ def build_system_stack(constitution_path: Path | None = None,
                        learned_path: Path | None | object = _AUTO,
                        context_dirs: tuple[Path, ...] = (),
                        user_rules: dict | None = None,
-                       capability_path: Path | None = None) -> list[dict]:
+                       capability_path: Path | None = None,
+                       runtime_facts: str | None = None) -> list[dict]:
     """-> system messages ready for the loop. Absent files become notices
     (the optional learned slot and the configured context dirs are the silent
     exceptions — see module doc). context_dirs defaults to OFF so every
@@ -302,7 +303,18 @@ def build_system_stack(constitution_path: Path | None = None,
     test); production turn paths pass resolve_capability_path(). When the
     file is present it is injected as the LAST reference slot (after the
     learned slot, before project context) — orientation material, never
-    rules; the constitution and the operator's rules always outrank it."""
+    rules; the constitution and the operator's rules always outrank it.
+
+    `runtime_facts` (hotfix 0.5.76) also defaults to None so every existing
+    caller and test keeps today's stack shape byte-for-byte; production turn
+    paths pass cli.resolve_runtime_facts(). When given, it is injected as
+    the reference slot IMMEDIATELY BEFORE the skill hint (the hint stays the
+    last entry) — deliberately late in the stack so a /model switch only
+    changes the tail of the stable prefix. The block carries the product
+    version and the effective model id, with the standing instruction that
+    identity/version/model questions are answered ONLY from it: before this
+    slot existed the model had no runtime version fact at all and went
+    filesystem-diving for an answer (owner report 2026-11-04)."""
     constitution_path = constitution_path or pp.constitution_path(REPO)
     if memory_paths is None:
         memory_paths = pp.memory_slots(REPO)
@@ -360,6 +372,12 @@ def build_system_stack(constitution_path: Path | None = None,
             stack.append({"role": "system",
                           "content": f"[project context] {d / name}:\n"
                                      f"{_expand_context_refs(text, d)}"})
+
+    # Hotfix 0.5.76: runtime facts (product version + effective model id)
+    # sit right before the skill hint — last reference slot, so the stable
+    # prefix above stays byte-identical when a per-chat /model flips.
+    if runtime_facts is not None:
+        stack.append({"role": "system", "content": runtime_facts})
 
     stack.append({"role": "system",
                   "content": "[body layer] Skills: call the skill_route tool BEFORE reading "
