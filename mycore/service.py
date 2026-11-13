@@ -38,6 +38,8 @@ State directory (default <repo>/data/mycore_service, env AIDOG_MC_STATE):
     missions.json             mission registry (0.5.44 mission leg: one active
                               mission, mark-first slices, budget seals)
     mission_events.jsonl      append-only mission event stream (slices/reports)
+    release_notice.json       staged one-shot release notice (car G #7: day-capped
+                              check result, pending/notified versions)
     sessions/archive/         sessions rotated by /reset
 
 Commands (parsed only when message text starts with "/", and only after the
@@ -48,6 +50,9 @@ allowlist gate — unauthenticated /commands are ignored like any message):
             per-chat override (allowed ids: web/settings.json mycore.models
             when present, else only the currently configured id)
     /status session turn count, current model, service uptime
+    /version installed vs latest release (honest "unknown" when the release
+            repository cannot be reached); once per UTC day the loop also
+            stages a one-shot "new release" notice for the next message
     /lang   show the reply language; /lang <code> switches it service-wide and
             persists to <state>/lang.json (packs discovered in
             overlay/locales/, default en)
@@ -199,6 +204,34 @@ def state_dir() -> Path:
     """State root: env AIDOG_MC_STATE > <profile>/state > <repo>/data/mycore_service
     (the profile seam already embeds the env precedence — car F)."""
     return pp.state_dir(REPO)
+
+
+# ------------------------------------------------- release awareness (car G) --
+# Owner ask #7 (2026-10-31): the bot terminal must remind the user when a
+# newer release exists. Two faces, both fail-soft:
+#   * `/version` — user-initiated, does the real check (no cache: a command
+#     deserves a fresh answer; the PAT-backed manifest read is cheap);
+#   * a once-per-UTC-day idle check stages ONE notice into
+#     <state>/release_notice.json, consumed by the next non-command reply
+#     exactly once (mark-first: the state write lands before the text leaves
+#     this frame — a crash loses one notice, never duplicates it).
+# Nothing here ever raises into the loop; a failure is a TYPE WORD only.
+_update_mod = None
+
+
+def _load_update_mod(repo: Path):
+    """deploy/aidog_update.py loaded once — the same importlib pattern the
+    console's collect_version uses; its installed/newer/fetch_manifest are
+    the only version primitives in the product."""
+    global _update_mod
+    if _update_mod is None:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(
+            "aidog_update", Path(repo) / "deploy" / "aidog_update.py")
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        _update_mod = mod
+    return _update_mod
 
 
 def parse_allowlist(raw: str | None) -> frozenset[int]:
@@ -522,6 +555,7 @@ class ChatService:
                 self._maybe_tick_missions()    # mission leg (0.5.44; no-op without an active mission)
                 self._maybe_sniff()            # SENSE leg (SNIFF car; no-op when off/paused)
                 self._maybe_ledger()           # D2 ledger leg (no-op when off/already sent)
+                self._maybe_release_check(once=once)  # car G: daily release notice (skipped in --once tooling)
                 self._maybe_poll_channels()    # channel leg (throttled, fail-soft)
                 if once and not updates:
                     break                          # nothing pending: exit 0
@@ -602,6 +636,14 @@ class ChatService:
                            f"err={type(e).__name__}")
             reply = self._t("err.internal")
         if reply:
+            # car G (owner ask #7): the staged one-shot release notice rides
+            # the next NON-command reply — a command already answers itself
+            # (/version shows the update), so gluing a note onto /help would
+            # be noise. Mark-first inside _take_release_note.
+            if not text.startswith("/"):
+                note = self._take_release_note()
+                if note:
+                    reply = f"{reply}\n\n{note}"
             self._send(cid, reply, thread_id=tid)
         self._drain_photos(cid, tid)      # text first, photos after (car 4c)
 
@@ -870,7 +912,39 @@ class ChatService:
             return self._cron_command(chat_id, arg)
         if name == "checkpoint":
             return self._checkpoint_command(chat_id, arg)
+        if name == "version":
+            return self._version_command()
         return self._t("cmd.unknown")
+
+    def _version_command(self) -> str:
+        """`/version` — installed vs latest, honest when the check fails.
+        User-initiated → a fresh PAT-backed manifest read (no cache); a
+        successful "update available" answer also consumes any staged
+        notice so the next message does not repeat what was just shown."""
+        try:
+            mod = _load_update_mod(self.repo)
+            installed = mod.installed_version()
+        except Exception as e:  # noqa: BLE001
+            return self._t("cmd.version.unknown", installed="?",
+                           err=type(e).__name__)
+        try:
+            latest = str(mod.fetch_manifest().get("version") or "0.0.0")
+        except Exception as e:  # noqa: BLE001
+            return self._t("cmd.version.unknown", installed=installed,
+                           err=type(e).__name__)
+        if mod.newer(latest, installed):
+            try:
+                path = self.state / "release_notice.json"
+                st = json.loads(path.read_text(encoding="utf-8")) or {}
+                if st.get("pending") == latest:
+                    st["notified"] = latest
+                    st.pop("pending", None)
+                    path.write_text(json.dumps(st), encoding="utf-8")
+            except (OSError, ValueError):
+                pass
+            return self._t("cmd.version.update", installed=installed,
+                           latest=latest)
+        return self._t("cmd.version.ok", installed=installed)
 
     def _lang_command(self, chat_id: int | str, arg: str) -> str:
         """`/lang` (show) and `/lang <code>` (switch, persisted service-wide).
@@ -1068,6 +1142,69 @@ class ChatService:
                 self.log.write("LEDGER", "sent=1")
         except Exception as e:  # noqa: BLE001 — a report failure never kills the loop
             self.log.write("LEDGER_ERR", f"err={type(e).__name__}")
+
+    def _maybe_release_check(self, *, once: bool = False) -> None:
+        """Car G (owner ask #7): at most ONE network version check per UTC
+        day, run from the idle loop — it stages a pending notice for the
+        user's next message instead of messaging out of the blue. `--once`
+        tooling runs skip it (a one-shot E2E process must never wait on
+        egress). Every failure is one log word; the day is marked either
+        way, so a dead network retries tomorrow, not every message."""
+        if once:
+            return
+        path = self.state / "release_notice.json"
+        try:
+            st = json.loads(path.read_text(encoding="utf-8")) or {}
+        except (OSError, ValueError):
+            st = {}
+        day = time.strftime("%Y-%m-%d", time.gmtime(self._now()))
+        if st.get("day") == day:
+            return
+        st["day"] = day
+        try:
+            mod = _load_update_mod(self.repo)
+            installed = mod.installed_version()
+            latest = str(mod.fetch_manifest().get("version") or "0.0.0")
+            if mod.newer(latest, installed):
+                if st.get("notified") != latest:
+                    st["pending"] = latest
+                    st["installed"] = installed
+            else:
+                st.pop("pending", None)      # already on it (or rolled back)
+        except Exception as e:  # noqa: BLE001 — a failed check never kills the loop
+            self.log.write("RELEASE_ERR", f"err={type(e).__name__}")
+        try:
+            path.write_text(json.dumps(st), encoding="utf-8")
+        except OSError:
+            pass                            # read-only state dir: no notice, no crash
+
+    def _take_release_note(self) -> str:
+        """Consume the staged release notice — file reads only, zero network,
+        never raises. Mark-first (ledger/mission philosophy): the state write
+        lands BEFORE the text leaves this frame, so a crash between them
+        loses one notice, never duplicates it. An already-upgraded install
+        (pending == VERSION on disk) just clears the stale pending."""
+        path = self.state / "release_notice.json"
+        try:
+            st = json.loads(path.read_text(encoding="utf-8")) or {}
+            pending = str(st.get("pending") or "")
+            if not pending:
+                return ""
+            try:
+                installed_now = (self.repo / "VERSION").read_text().strip()
+            except OSError:
+                installed_now = str(st.get("installed") or "")
+            if pending == installed_now:
+                st.pop("pending", None)
+                path.write_text(json.dumps(st), encoding="utf-8")
+                return ""
+            st["notified"] = pending
+            st["pending"] = ""
+            path.write_text(json.dumps(st), encoding="utf-8")
+            return self._t("cmd.update.note", latest=pending,
+                           installed=installed_now)
+        except Exception:  # noqa: BLE001 — a notice must never break a reply
+            return ""
 
     def _cron_command(self, chat_id: int | str, arg: str) -> str:
         """`/cron` (list) · `/cron add [kind] <spec> :: <text>` · `/cron del <id>`.

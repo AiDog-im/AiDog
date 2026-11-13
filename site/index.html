@@ -63,7 +63,7 @@
     <p class="hero-sub reveal" data-i18n="hero.sub">Not a platform. Not an assistant farm. One companion grown for one person — a constitution for a personality, curated memory for a life, a self-developed core that answers to you alone.</p>
     <div class="hero-badges reveal">
       <span class="badge badge-free"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="hero.badgeFree">PERMANENTLY FREE — forever, no exceptions</span></span>
-      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 39 modules · 2137/2137 tests</span>
+      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 39 modules · 2150/2150 tests</span>
       <span class="badge badge-local" data-i18n="hero.badgeLocal">Runs on your machine · loopback by default</span>
     </div>
     <div class="hero-cta reveal">
@@ -89,7 +89,7 @@
   </div>
   <div class="fact-strip" aria-label="verified facts">
     <div class="fact-strip-track" id="factTrack">
-      <span class="fact"><b>2137/2137</b> <span data-i18n="facts.core">core tests</span></span>
+      <span class="fact"><b>2150/2150</b> <span data-i18n="facts.core">core tests</span></span>
       <span class="fact"><b>39</b> <span data-i18n="facts.modules">self-developed modules</span></span>
       <span class="fact"><b>509/509</b> <span data-i18n="facts.smoke">console smoke</span></span>
       <span class="fact"><b>30/30</b> <span data-i18n="facts.router">skill router</span></span>
@@ -101,8 +101,8 @@
       <span class="fact"><b>16/16</b> <span data-i18n="facts.desktop">desktop shell</span></span>
       <span class="fact"><b>28</b> <span data-i18n="facts.tools">registered tools</span></span>
       <span class="fact"><b>36</b> <span data-i18n="facts.docs">capability docs</span></span>
-      <span class="fact"><b>≈23.0k</b> <span data-i18n="facts.loc">lines of core code</span></span>
-      <span class="fact"><b>1392</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
+      <span class="fact"><b>≈23.2k</b> <span data-i18n="facts.loc">lines of core code</span></span>
+      <span class="fact"><b>1397</b> <span data-i18n="facts.i18n">locale keys · en + zh each</span></span>
     </div>
   </div>
 </section>
@@ -201,10 +201,38 @@
   <p class="start-note reveal" data-i18n="start.roadmap">Everything here is public today — clone the repository and run the installer. No waitlist, no sign-up key: releases are on GitHub.</p>
 </section>
 
+<!-- ============================================ PLATFORMS (car G, #5) -->
+<section class="section" id="platforms">
+  <div class="section-head reveal">
+    <span class="section-index">02</span>
+    <h2 data-i18n="plat.title">Run it on the system you already own</h2>
+    <p class="section-sub" data-i18n="plat.sub">The console runs on a machine you control — here is the honest platform matrix: what is tested, what is expected, and what each system actually gets.</p>
+  </div>
+  <div class="feature-grid reveal">
+    <div class="feature">
+      <h4>Linux</h4>
+      <p data-i18n="plat.linux">One command with install.sh — the reference path, fully tested, including inside WSL2 on Windows.</p>
+    </div>
+    <div class="feature">
+      <h4>Windows</h4>
+      <p data-i18n="plat.windows">Run the console inside WSL2 with the same command. The desktop shell is verified on Linux/WSLg; a native Windows build is not published yet.</p>
+    </div>
+    <div class="feature">
+      <h4>macOS</h4>
+      <p data-i18n="plat.macos">Python 3.10+, tmux and git — expected to work, not yet officially tested. Report what you find.</p>
+    </div>
+    <div class="feature">
+      <h4>iOS / Android</h4>
+      <p data-i18n="plat.mobile">Use the Telegram bot plus this website (installable to your home screen). The console binds to localhost on your own machine; reach it from a phone through an SSH tunnel — there is no cloud console, by design.</p>
+    </div>
+  </div>
+  <p class="section-sub reveal"><a class="btn btn-ghost" href="https://github.com/AiDog-im/AiDog/blob/main/docs/installation.md" target="_blank" rel="noopener" data-i18n="plat.docs">Read the installation guide on GitHub</a></p>
+</section>
+
 <!-- ============================================ SKILLS -->
 <section class="section" id="skills">
   <div class="section-head reveal">
-    <span class="section-index">02</span>
+    <span class="section-index">03</span>
     <h2 data-i18n="skills.title">Skills</h2>
     <p class="section-sub" data-i18n="skills.sub">A small, curated capability layer. Skills are screened deterministically before they ever reach the model, and only trusted, reviewed entries are recommended — no open marketplace, no supply-chain surprises.</p>
   </div>
@@ -256,7 +284,7 @@
 <!-- ============================================ CAPABILITIES -->
 <section class="section" id="capabilities">
   <div class="section-head reveal in">
-    <span class="section-index">03</span>
+    <span class="section-index">04</span>
     <h2 data-i18n="caps.title">Capabilities</h2>
     <p class="section-sub" data-i18n="caps.sub">What the product actually does, card by card — every line comes from the release gates and the capability docs, thirty-six of them in the repository today, nothing invented.</p>
   </div>
@@ -316,7 +344,7 @@
 <!-- ============================================ SNIFF -->
 <section class="section" id="sniff">
   <div class="section-head reveal">
-    <span class="section-index">04</span>
+    <span class="section-index">05</span>
     <h2 data-i18n="sniff.title">Sniff — the nose that speaks first</h2>
     <p class="section-sub" data-i18n="sniff.sub">A read-only sweep smells health, home, vehicle and web signals, turns them into findings with provenance, and speaks first only when one earns it.</p>
     <p class="smell-line" data-i18n="sniff.smellLine">Sniffing the room — the part of a dog that notices before you do.</p>
@@ -360,7 +388,7 @@
 <!-- ============================================ CONSOLE -->
 <section class="section" id="console">
   <div class="section-head reveal">
-    <span class="section-index">05</span>
+    <span class="section-index">06</span>
     <h2 data-i18n="console.title">Console</h2>
     <p class="section-sub" data-i18n="console.sub">Local Web Console Preview — see the panel you get after installing, before you download anything.</p>
   </div>
@@ -515,7 +543,7 @@
 <!-- ============================================ MODELS -->
 <section class="section" id="models">
   <div class="section-head reveal">
-    <span class="section-index">06</span>
+    <span class="section-index">07</span>
     <h2 data-i18n="models.title">Models &amp; Transparency</h2>
     <p class="section-sub" data-i18n="models.sub">We will publish how this product actually runs — which models serve it and how much compute it consumes. No estimates, no marketing charts: only what the software itself reports.</p>
   </div>
@@ -571,12 +599,13 @@
       <p data-i18n="models.p3B">The chart above reads a public JSON endpoint from that database and renders aggregate model usage — published totals only, never per-user records.</p>
     </div>
   </div>
+  <p class="section-sub reveal"><a class="btn btn-ghost" href="models.html" data-i18n="models.fullLink">Open the full usage statistics page</a></p>
 </section>
 
 <!-- ============================================ SECURITY -->
 <section class="section" id="security">
   <div class="section-head reveal">
-    <span class="section-index">07</span>
+    <span class="section-index">08</span>
     <h2 data-i18n="security.title">Security &amp; Trust</h2>
     <p class="section-sub" data-i18n="security.sub">Local-first by construction — the quiet guarantees, stated plainly.</p>
   </div>
@@ -674,6 +703,24 @@
 </div>
 </section>
 
+<!-- ============================================ GITHUB PULSE (car G, #7) -->
+<section class="section" id="pulse">
+  <div class="section-head reveal">
+    <span class="section-index">09</span>
+    <h2 data-i18n="gh.title">GitHub pulse</h2>
+    <p class="section-sub" data-i18n="gh.sub">The repository behind the product — release, stars, forks, watchers and discussions, from a dated snapshot taken when this site was deployed. A missing snapshot hides this card; it never shows a made-up number.</p>
+  </div>
+  <div class="feature-grid reveal" id="pulseGrid" hidden>
+    <div class="feature"><h4 id="ghVersion">—</h4><p data-i18n="gh.release">latest release</p></div>
+    <div class="feature"><h4 id="ghStars">—</h4><p data-i18n="gh.stars">stars</p></div>
+    <div class="feature"><h4 id="ghForks">—</h4><p data-i18n="gh.forks">forks</p></div>
+    <div class="feature"><h4 id="ghWatchers">—</h4><p data-i18n="gh.watchers">watchers</p></div>
+    <div class="feature"><h4 id="ghDiscussions">—</h4><p data-i18n="gh.discussions">discussions</p></div>
+  </div>
+  <p class="section-sub reveal" id="ghTeaser" hidden></p>
+  <p class="section-sub reveal" id="ghFoot" hidden><span id="ghAsOf"></span> · <a id="ghLink" href="https://github.com/AiDog-im/AiDog/releases" target="_blank" rel="noopener" data-i18n="gh.whatsNew">What's new on GitHub</a></p>
+</section>
+
 </main>
 
 <footer class="footer">
@@ -707,6 +754,6 @@
   </div>
 </footer>
 
-<script src="assets/main.js?v=20261031"></script>
+<script src="assets/main.js?v=20261102"></script>
 </body>
 </html>

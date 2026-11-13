@@ -675,4 +675,45 @@
       })
       .catch(function () { markStatsUnreachable(); });
   }
+
+  /* ------------------------------------------ GitHub pulse (car G #7) ---
+     A dated snapshot (site/data/gh.json) written by deploy_site.sh when
+     this site was deployed. No file = this card stays hidden — the absence
+     of a record is not a number, and a stale record always carries its own
+     fetch date (never presented as live). Values render only from the
+     snapshot; nothing here talks to GitHub from the browser. */
+  (function () {
+    var grid = document.getElementById("pulseGrid");
+    if (!grid) return;
+    fetch("data/gh.json", { cache: "no-cache" })
+      .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+      .then(function (d) {
+        if (!d || typeof d.fetched_at !== "string" ||
+            typeof d.stars !== "number") throw new Error("bad snapshot shape");
+        var set = function (id, v) {
+          var el = document.getElementById(id);
+          if (el) el.textContent = v;
+        };
+        set("ghVersion", d.version ? "v" + d.version : "–");
+        set("ghStars", fmtNum(d.stars));
+        set("ghForks", fmtNum(d.forks));
+        set("ghWatchers", fmtNum(d.watchers));
+        set("ghDiscussions", (typeof d.discussions === "number")
+          ? fmtNum(d.discussions) : "–");   // GraphQL miss = honest dash
+        var teaser = document.getElementById("ghTeaser");
+        if (teaser && d.notes_teaser) {
+          teaser.textContent = (d.version ? "v" + d.version + " — " : "") +
+            d.notes_teaser;
+          teaser.hidden = false;
+        }
+        var asOf = document.getElementById("ghAsOf");
+        if (asOf) {
+          asOf.textContent = tt("gh.asOf", "snapshot {d}")
+            .replace("{d}", String(d.fetched_at).slice(0, 10));
+        }
+        document.getElementById("ghFoot").hidden = false;
+        grid.hidden = false;
+      })
+      .catch(function () { /* no snapshot -> card stays hidden, no fake numbers */ });
+  })();
 })();

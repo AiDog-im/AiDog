@@ -6240,6 +6240,7 @@ MIME = {
     ".jpg": "image/jpeg",
     ".jpeg": "image/jpeg",
     ".ico": "image/x-icon",
+    ".webmanifest": "application/manifest+json",   # car G: console PWA manifest
 }
 
 
