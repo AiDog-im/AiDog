@@ -90,7 +90,7 @@ material can enter a row** (the source data never reaches the module).
 
 | Route | Gate | Contract |
 |---|---|---|
-| `GET /api/usage/self` | none (loopback) | `{available, window_days, requests, ok, fail, in/out/cached_tokens, no_usage, by_endpoint[], by_model[], by_day{}, pricing{configured,total_cny,per_model,unpriced}, display}`; inactive meter → `{available:false, reason}` |
+| `GET /api/usage/self[?from=YYYY-MM-DD&to=YYYY-MM-DD]` | none (loopback) | `{available, window_days, requests, ok, fail, in/out/cached_tokens, no_usage, by_endpoint[], by_model[], by_day{}, range:{from,to,clamped}|null, pricing{configured,total_cny,per_model,unpriced}, display}`; both params travel together or neither — a malformed / impossible / inverted range → HTTP 400 `{ok:false, error}`; a span past the 90-day retention clamps the ask and reports `clamped:true`; no params → the historical 7-day face with `range:null`; inactive meter → `{available:false, reason}` |
 
 The legacy `/api/usage` (external metrics + external pricing JSON) is
 untouched — two sources, each honest about its own availability.
@@ -124,6 +124,16 @@ untouched — two sources, each honest about its own availability.
 * **Overview** gains a `SELF-METERED (7 DAYS)` block: requests / ok / fail /
   in / out / cost chips + honest notes (unpriced models, no-usage count,
   truncation). Inactive meter = the whole block hidden, never fake zeros.
+* **C2 B-1 (0.5.86) window controls** on that block: two UTC day inputs
+  (apply on change) + `7 DAYS` / `30 DAYS` / `MONTH TO DATE` quick windows
+  + `EXPORT JSON` (a local Blob of exactly the window on screen — no
+  endpoint, no upload, no server-side file). The title, the `REQUESTS` /
+  `COST` chip labels and the notes follow the window, so nothing ever
+  claims "7 days" over a range; an over-wide ask reports `clamped:true`
+  with the retained day count. Daily **budget rings** (guardrail USD/token
+  caps from `GET /api/control`) sit under the block and are hidden entirely
+  when both caps are 0 — an absent cap shows nothing, never a decorative
+  0/0 ring; an unknown state draws the track only, with no invented arc.
 * **DISCOVER MODELS (D1)** sits under the whitelist editor: an optional key
   (probe-only, never stored) + `DISCOVER` → checkboxes + select-all → `ADD`,
   which appends into the hidden `#mycModels` source field and rides the normal

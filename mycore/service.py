@@ -872,11 +872,15 @@ class ChatService:
             tid = None
         if not isinstance(text, str) or not text.strip():
             # Car 4c: a voice/audio note (no usable text) -> STT -> the very
-            # same command/pipeline path below. Anything else without text
-            # is still ignored, exactly as before.
+            # same command/pipeline path below. C2 B-2: a round VIDEO note
+            # rides the identical path (its mp4 carries an audio track, and
+            # stt._decode picks the audio stream, so nothing else changes).
+            # Anything else without text is still ignored, exactly as before.
             med = msg.get("voice")
             if not isinstance(med, dict):
                 med = msg.get("audio")
+            if not isinstance(med, dict):
+                med = msg.get("video_note")
             if isinstance(med, dict):
                 self._handle_voice(cid, med, tid)
             return
@@ -916,8 +920,8 @@ class ChatService:
 
     def _handle_voice(self, chat_id: int, med: dict,
                       tid: int | None) -> None:
-        """Voice/audio note -> getFile -> download -> STT -> the SAME text
-        path as a typed message (car 4c).
+        """Voice/audio/VIDEO note -> getFile -> download -> STT -> the SAME
+        text path as a typed message (car 4c; C2 B-2 added video notes).
 
         Fail-soft by contract: every failure replies with an honest locale
         line (voice.stt.*) and NEVER raises into the poll loop. Logs carry
@@ -935,7 +939,22 @@ class ChatService:
             if not isinstance(file_id, str) or not file_id:
                 raise TgError("missing file_id")
             meta = self.tg.get_file(file_id)
-            size = meta.get("file_size") if isinstance(meta, dict) else None
+            # Size for the pre-download cap: getFile reports `file_size`,
+            # but a video note's update blob carries `byte_size` instead
+            # (Bot API field name differs by media type) — walk both sources
+            # so the cap cannot be bypassed by the field rename, and skip the
+            # check when NEITHER reports a size (never a false reject).
+            size = None
+            for src in (meta, med):
+                if not isinstance(src, dict):
+                    continue
+                for key in ("file_size", "byte_size"):
+                    val = src.get(key)
+                    if isinstance(val, int) and not isinstance(val, bool):
+                        size = val
+                        break
+                if size is not None:
+                    break
             if (isinstance(size, int) and not isinstance(size, bool)
                     and size > VOICE_MAX_BYTES):
                 # Oversize BEFORE downloading: honest failure, no wasted pull.
