@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2338%2F2338-brightgreen?style=flat-square" alt="core tests 2338/2338">
+  <img src="https://img.shields.io/badge/core_tests-2449%2F2449-brightgreen?style=flat-square" alt="core tests 2449/2449">
   <img src="https://img.shields.io/badge/console_smoke-557%2F557-brightgreen?style=flat-square" alt="console smoke 557/557">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
@@ -56,7 +56,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **40 modules ≈ 24.5k LOC, 2,297 tests**, and zero upstream
+  stop reasons, **40 modules ≈ 24.5k LOC, 2,449 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -91,7 +91,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 40 modules, 2,297 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 40 modules, 2,449 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 37/37 |
@@ -185,6 +185,7 @@ Full guide: [`docs/installation.md`](docs/installation.md).
 |---|---|
 | `/help` | list every command |
 | `/reset` | archive this chat's session, start fresh |
+| `/rewind [n]` · `/rewind` (as a reply) | drop the last n messages, or from the replied message onward |
 | `/model [id]` | show or set this chat's model |
 | `/status` | turns · model · uptime |
 | `/lang [code]` | show or switch the reply language |
@@ -225,7 +226,7 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2338/2338** |
+| `mycore` core suite | **2449/2449** |
 | Console smoke (live HTTP) | **557/557** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |
@@ -236,11 +237,11 @@ Every release is cut only after these run green on a clean tree:
 | Publish gate (deny-by-default manifest) | **READY** |
 | Real-machine E2E | profiles **18/18** · channels **12/12** · domestic channels **46/46** · pipeline **39/39** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **45/45** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** · mission-orch **63/63** · mission-pause **73/73** · skills catalog **187/187** · skills remote **58/58** · skills install API **65/65** · skills UI **23/23** · skills parity **68/68** · gateway UI **26/26** · ckx round-trip **28/28** · console UI probes **21/21** + **22/22** · region API **28/28** · region UI **20/20** |
 
-Catalog scope: **28 registered tools** · **9 exchange venues** · **27
+Catalog scope: **28 registered tools** · **9 exchange venues** · **28
 real-machine E2E suites** — all green.
 
-Locale packs: `en` (default) + `zh`, **1501 keys** each, parity lint in CI;
-the marketing site ships its own **381-key** bilingual pack.
+Locale packs: `en` (default) + `zh`, **1544 keys** each, parity lint in CI;
+the marketing site ships its own **382-key** bilingual pack.
 
 ## Documentation
 

@@ -47,7 +47,8 @@ from .assembly import (build_system_stack, resolve_capability_path,
                          resolve_context_dirs)
 from .loop import run_turn
 from .model import ChatClient
-from .tools import ToolError, build_registry, resolve_disabled_tools, resolve_inside
+from .tools import (ToolError, build_registry, resolve_disabled_tools,
+                    resolve_inside, protected_write_reason)
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
@@ -654,6 +655,9 @@ class AcpServer:
     def _proxy_write(self, session: AcpSession, path: object,
                      content: object) -> str:
         p = self._resolve_path(session, path)
+        why = protected_write_reason(p)      # car C1 (A-1): same body/config
+        if why:                              # gate as the local path tools
+            raise ToolError(why)
         if not isinstance(content, str):
             raise ToolError("content must be a string")
         note = self._snapshot_note(p)
@@ -666,6 +670,9 @@ class AcpServer:
     def _proxy_edit(self, session: AcpSession, path: object,
                     old_text: object, new_text: object) -> str:
         p = self._resolve_path(session, path)
+        why = protected_write_reason(p)      # car C1 (A-1): same gate as above
+        if why:
+            raise ToolError(why)
         if not isinstance(old_text, str) or not old_text:
             raise ToolError("old_text must be a non-empty string")
         if not isinstance(new_text, str):

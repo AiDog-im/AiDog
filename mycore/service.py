@@ -179,8 +179,8 @@ VOICE_MAX_BYTES = 5_000_000             # download cap before STT (5MB, car 4c)
 #     the locale packs), and
 #   * web/server.py's botmenu.commands allow-list (imported from here, so
 #     the console can never offer a command the service does not answer).
-BOT_COMMANDS: tuple = ("help", "reset", "model", "status", "lang", "learn",
-                       "reflect", "evolution", "cron", "checkpoint",
+BOT_COMMANDS: tuple = ("help", "reset", "rewind", "model", "status", "lang",
+                       "learn", "reflect", "evolution", "cron", "checkpoint",
                        "version")
 
 # Honest one-line replies. The English constants stay importable (tests and
@@ -820,9 +820,17 @@ class ChatService:
                 self._handle_voice(cid, med, tid)
             return
         text = text.strip()
+        # car C1 (A-2): a REPLY carries the target message's text — /rewind
+        # uses it to locate the message (other commands ignore it).
+        reply_text = None
+        rtm = msg.get("reply_to_message")
+        if isinstance(rtm, dict):
+            cand = rtm.get("text") or rtm.get("caption")
+            if isinstance(cand, str) and cand.strip():
+                reply_text = cand.strip()
         try:
             if text.startswith("/"):
-                reply = self._command(cid, text)
+                reply = self._command(cid, text, reply_text=reply_text)
             else:
                 skey = f"{cid}:{tid}" if tid is not None else cid
                 reply = self._pipeline(cid, text, session_key=skey,
@@ -1065,11 +1073,14 @@ class ChatService:
             cfg.model = override
         return cfg
 
-    def _archive_session(self, chat_id: int | str) -> bool:
-        """Rotate the chat's session file into sessions/archive/ (/reset)."""
+    def _archive_session(self, chat_id: int | str):
+        """Rotate the chat's session file into sessions/archive/ (/reset and
+        car C1 /rewind). Returns the archive Path (truthy) or None — the
+        /reset caller only needs the boolean, rewind needs the path to put
+        the file back when a later rename fails."""
         src = self._session_path(chat_id)
         if not src.is_file():
-            return False
+            return None
         arch = self.sessions / ARCHIVE_DIR
         arch.mkdir(parents=True, exist_ok=True)
         stamp = int(self._now())
@@ -1080,9 +1091,124 @@ class ChatService:
             dst = arch / f"{chat_id}.{stamp}.{n}.jsonl"
         shutil.move(str(src), str(dst))
         self.log.write("ARCHIVE", f"chat={redact_chat(chat_id)}")
-        return True
+        return dst
 
-    def _command(self, chat_id: int | str, text: str) -> str:
+    def _rewind_session(self, chat_id: int | str, keep: int) -> tuple[str, int]:
+        """Car C1 (A-2): truncate this chat's session to its first `keep`
+        messages (message-level /rewind). Returns (result, dropped) where
+        result is 'ok' | 'not_found' | 'bad_range'. Crash-safe in the X20
+        order: prefix -> entropy tmp in the sessions dir, rotate the current
+        file into archive/ (the dropped tail survives byte-identical),
+        atomic rename; a rename failure moves the archive back first, so
+        the live path always ends whole. `keep` comes from a resolved index
+        (message match or a count the caller already validated)."""
+        from .session import write_session_file   # local: no import cycle
+        path = self._session_path(chat_id)
+        try:
+            sess = Session(path)
+            msgs = sess.load()
+            meta = sess.meta()
+        except OSError:
+            return "not_found", 0
+        if not msgs:
+            return "not_found", 0
+        if not isinstance(keep, int) or isinstance(keep, bool) \
+                or not 0 <= keep < len(msgs):
+            return "bad_range", 0
+        tmp = path.with_name(path.name +
+                             f".rewind-{int(self._now())}."
+                             f"{os.urandom(4).hex()}.jsonl.tmp")
+        try:
+            write_session_file(tmp, meta, msgs[:keep])
+        except OSError:
+            return "bad_range", 0               # nothing committed; caller 4xxs
+        archived = self._archive_session(chat_id)
+        if archived is None and path.is_file():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            return "not_found", 0
+        try:
+            os.replace(str(tmp), str(path))
+        except OSError:
+            restored = True
+            if archived is not None:
+                try:
+                    shutil.move(str(archived), str(path))
+                except OSError:
+                    restored = False
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            self.log.write("REWIND_ERR", f"chat={redact_chat(chat_id)}",
+                           f"restored={int(restored)}")
+            return "not_found", 0
+        dropped = len(msgs) - keep
+        self.log.write("REWIND", f"chat={redact_chat(chat_id)}",
+                       f"kept={keep}", f"dropped={dropped}")
+        return "ok", dropped
+
+    def _rewind_command(self, chat_id: int | str, arg: str,
+                        reply_text: str | None = None) -> str:
+        """`/rewind` — the car C1 (A-2) TG minimal face, two forms:
+          * as a REPLY to a message: truncate to BEFORE the replied message
+            (matched from the end by content — exact, or prefix when the
+            reply is a shortened rendering), so the target and everything
+            after it are dropped; then re-ask in a new message.
+          * `/rewind <n>`: drop the last n VISIBLE messages — the same rows
+            GET /api/chat/history renders (user/assistant WITH text), so
+            tool rows and textless intermediate rows never count.
+        Same crash-safe truncation as the console rewind (_rewind_session,
+        archive-first), and the same "drop the target + tail" rule — the
+        kept prefix always ends at a natural turn boundary (a real session's
+        turn rows land together, so no trim is needed). Refusals are honest:
+        empty session, no match, or n covering the whole conversation
+        (-> /reset is the right tool).
+        The reply reports the VISIBLE rows dropped — the count the user can
+        actually see, never an inflated row total."""
+        from .session import Session as _Session
+        try:
+            msgs = _Session(self._session_path(chat_id)).load()
+        except OSError:
+            msgs = []
+        if not msgs:
+            return self._t("cmd.rewind.empty")
+
+        def visible(m: dict) -> bool:
+            return m.get("role") in ("user", "assistant") \
+                and isinstance(m.get("content"), str)
+
+        keep: int | None = None
+        if reply_text:
+            rt = reply_text.strip()
+            for i in range(len(msgs) - 1, -1, -1):     # nearest first
+                m = msgs[i]
+                c = m.get("content")
+                if visible(m) and isinstance(c, str) and c and (
+                        c == rt or (len(rt) >= 20 and c.startswith(rt))):
+                    keep = i                            # drop target + tail
+                    break
+            if keep is None:
+                return self._t("cmd.rewind.no_match")
+        else:
+            toks = arg.split()
+            if len(toks) != 1 or not toks[0].isdigit() or int(toks[0]) < 1:
+                return self._t("cmd.rewind.usage")
+            n = int(toks[0])
+            vis = [i for i, m in enumerate(msgs) if visible(m)]
+            if n >= len(vis):                       # would empty the chat
+                return self._t("cmd.rewind.too_many", n=len(vis))
+            keep = vis[-n]                          # drop from there onward
+        result, _dropped = self._rewind_session(chat_id, keep)
+        if result != "ok":
+            return self._t("cmd.rewind.fail")
+        vis_dropped = sum(1 for m in msgs[keep:] if visible(m))
+        return self._t("cmd.rewind.ok", n=vis_dropped)
+
+    def _command(self, chat_id: int | str, text: str,
+                 reply_text: str | None = None) -> str:
         parts = text.split()
         name = parts[0][1:].split("@", 1)[0].lower()   # strip "/" and "@botname"
         arg = " ".join(parts[1:]).strip()
@@ -1095,6 +1221,8 @@ class ChatService:
             rotated = self._archive_session(chat_id)
             return (self._t("cmd.reset.archived") if rotated
                     else self._t("cmd.reset.empty"))
+        if name == "rewind":
+            return self._rewind_command(chat_id, arg, reply_text)
         if name == "model":
             cfg = self._model_for_chat(chat_id)
             if not arg:
@@ -1425,11 +1553,16 @@ class ChatService:
             return ""
 
     def _cron_command(self, chat_id: int | str, arg: str) -> str:
-        """`/cron` (list) · `/cron add [kind] <spec> :: <text>` · `/cron del <id>`.
+        """`/cron` (list) · `/cron add [kind] <spec> :: <text>` ·
+        `/cron del <id>` · car C1 (A-3): `/cron pause|resume <id>` ·
+        `/cron run <id>` · `/cron catchup <id> on|off`.
 
         The structured leg of the dual-driven scheduler (the model `cron`
         tool shares this grammar and registry). Creation stamps the origin
-        chat so a fired job knows where to answer."""
+        chat so a fired job knows where to answer. `run` sets the queued
+        flag and NUDGES the fire leg in-process (same process — the run
+        goes through one execution path with the tick, no drift); the reply
+        is honest about the outcome: ran, queued (other process), or held."""
         words = arg.strip().split(None, 1)
         sub = (words[0].lower() if words else "list")
         rest = words[1].strip() if len(words) > 1 else ""
@@ -1444,7 +1577,14 @@ class ChatService:
             now = self._now()
             lines = [self._t("cmd.cron.list_head", n=len(jobs))]
             for j in jobs:
-                state = self._t("cmd.cron.done") if j.get("done") else ""
+                if j.get("missed"):
+                    state = self._t("cmd.cron.missed")
+                elif j.get("done"):
+                    state = self._t("cmd.cron.done")
+                else:
+                    state = ""
+                if j.get("paused"):
+                    state += self._t("cmd.cron.markPaused")
                 nf = scheduler.next_fire(j, now)
                 delta = scheduler.fmt_delta(nf, now)
                 lines.append(
@@ -1501,6 +1641,77 @@ class ChatService:
             self.log.write("CRON_DEL", f"chat={redact_chat(chat_id)}",
                            f"id={job_id}")
             return self._t("cmd.cron.deleted", id=job_id)
+        # --- car C1 (A-3): pause / resume / run / catchup ---------------
+        if sub in ("pause", "resume"):
+            job_id = rest.split()[0] if rest.split() else ""
+            if not job_id:
+                return self._t("cmd.cron.usage")
+            try:
+                jobs = scheduler.load_jobs(path)
+                ok = scheduler.set_paused(jobs, job_id,
+                                          sub == "pause")
+                if ok:
+                    scheduler.save_jobs(path, jobs)
+            except OSError:
+                self.log.write("CRON_ERR", f"op={sub}", "err=write_failed")
+                return self._t("cmd.cron.fail")
+            if not ok:
+                return self._t("cmd.cron.del_miss", id=job_id)
+            self.log.write("CRON_PAUSE" if sub == "pause" else "CRON_RESUME",
+                           f"chat={redact_chat(chat_id)}", f"id={job_id}")
+            return self._t("cmd.cron.paused" if sub == "pause"
+                           else "cmd.cron.resumed", id=job_id)
+        if sub in ("run", "now"):
+            job_id = rest.split()[0] if rest.split() else ""
+            if not job_id:
+                return self._t("cmd.cron.usage")
+            try:
+                jobs = scheduler.load_jobs(path)
+                if not scheduler.request_run(jobs, job_id):
+                    return self._t("cmd.cron.del_miss", id=job_id)
+                scheduler.save_jobs(path, jobs)
+            except OSError:
+                self.log.write("CRON_ERR", "op=run", "err=write_failed")
+                return self._t("cmd.cron.fail")
+            self.log.write("CRON_RUN_REQ", f"chat={redact_chat(chat_id)}",
+                           f"id={job_id}")
+            # Nudge the fire leg in-process (same process as the poll loop):
+            # bypass the 60 s throttle ONCE — one execution path with the
+            # tick, so the run can never double-fire against the scheduler.
+            self._cron_check = 0.0
+            self._maybe_fire_cron()
+            try:
+                jobs = scheduler.load_jobs(path)
+                job = scheduler.get_job(jobs, job_id)
+            except OSError:
+                job = None
+            if job is not None and job.get("run_requested_at") is not None:
+                # still queued: either the prompt gate held it or the fire
+                # leg failed BEFORE consuming the flag — say which, never
+                # guess (both are honest; the log has the exact reason).
+                ok, _code, _ctx = self._gate()
+                if not ok:
+                    return self._t("cmd.cron.runHeld", id=job_id)
+                return self._t("cmd.cron.runFail", id=job_id)
+            return self._t("cmd.cron.runOk", id=job_id)
+        if sub == "catchup":
+            parts = rest.split()
+            if len(parts) != 2 or parts[1].lower() not in ("on", "off"):
+                return self._t("cmd.cron.usage")
+            job_id, value = parts[0], parts[1].lower()
+            try:
+                jobs = scheduler.load_jobs(path)
+                ok = scheduler.set_catchup(jobs, job_id, value)
+                if ok:
+                    scheduler.save_jobs(path, jobs)
+            except OSError:
+                self.log.write("CRON_ERR", "op=catchup", "err=write_failed")
+                return self._t("cmd.cron.fail")
+            if not ok:
+                return self._t("cmd.cron.del_miss", id=job_id)
+            self.log.write("CRON_CATCHUP", f"chat={redact_chat(chat_id)}",
+                           f"id={job_id}", f"value={value}")
+            return self._t("cmd.cron.catchupSet", id=job_id, value=value)
         return self._t("cmd.cron.usage")
 
     def _checkpoint_command(self, chat_id: int | str, arg: str) -> str:
@@ -1623,10 +1834,20 @@ class ChatService:
         return self._t("err.model")
 
     def _maybe_fire_cron(self) -> None:
-        """Scheduler leg (Phase B2): throttled to CRON cadence like the
-        evolution leg; mark-first-then-execute (a crash loses one delivery,
-        never duplicates one); delivery target = origin > MYCORE_WD_CHAT >
-        log-only. A fire failure never kills the poll loop."""
+        """Scheduler leg (Phase B2 + car C1 A-3): throttled to CRON cadence
+        like the evolution leg; mark-first-then-execute (a crash loses one
+        delivery, never duplicates one); delivery target = origin >
+        MYCORE_WD_CHAT > log-only. A fire failure never kills the poll loop.
+
+        Car C1 order: (1) catch-up OFF sweep — skip windows stale beyond
+        CATCHUP_GRACE_SEC (mutates anchors / marks a missed one-shot),
+        (2) queued MANUAL runs (`run_requested_at`) — executed through the
+        same delivery path BEFORE due math so a run of a due job consumes
+        that window instead of double-firing, (3) the scheduled due leg.
+        kind=message manual runs bypass the gate (a delivery, no tokens —
+        pause never blocks an explicit human send); kind=prompt manual runs
+        pass the SAME gate as any new turn (pause + budget) and keep their
+        flag while held, so they fire once the hold clears."""
         nowt = self._now()
         if nowt - self._cron_check < REFLECT_CHECK_SEC:
             return
@@ -1634,6 +1855,13 @@ class ChatService:
         path = self.state / scheduler.STATE_FILE_NAME
         try:
             jobs = scheduler.load_jobs(path)
+            # (1) catch-up OFF sweep — stale windows are dropped, never late
+            if scheduler.catchup_sweep(jobs, nowt):
+                scheduler.save_jobs(path, jobs)
+            # (2) manual run requests (one execution path with the tick)
+            for job in scheduler.take_run_requests(jobs):
+                self._run_cron_now(job, jobs, path, nowt)
+            # (3) scheduled fires
             due = scheduler.due_jobs(jobs, nowt)
             if not due:
                 return
@@ -1659,6 +1887,37 @@ class ChatService:
                                f"delivered={label}", f"preview={preview}")
         except Exception as e:  # noqa: BLE001 — a fire failure never kills the loop
             self.log.write("CRON_ERR", f"err={type(e).__name__}")
+
+    def _run_cron_now(self, job: dict, jobs: list[dict], path, nowt: float) -> None:
+        """One queued manual run (car C1 A-3). Persist-first like the
+        scheduled leg: consume the window ONLY when it had already arrived
+        (window_due — an early run never eats a future one-shot), clear the
+        flag, save, then execute. kind=prompt re-checks the full gate here;
+        a hold keeps the flag (honest CRON_RUN_HELD log) and the run fires
+        on a later tick — same "held job fires after the hold clears"
+        contract the scheduled leg has."""
+        jid = str(job.get("id", "?"))
+        if job.get("kind") == "prompt":
+            ok, code, ctx = self._gate()
+            if not ok:
+                self._leash_hold("cron_run", code, ctx)
+                self.log.write("CRON_RUN_HELD", f"id={jid}", f"reason={code}")
+                return                      # flag stays -> retried next tick
+        consume = scheduler.window_due(job, nowt)
+        if consume:
+            scheduler.mark_fired(job, nowt)   # replaces the scheduled fire
+        job.pop("run_requested_at", None)
+        scheduler.save_jobs(path, jobs)       # persist BEFORE execution
+        if job.get("kind") == "prompt":
+            text = self._cron_prompt_text(job)
+        else:
+            text = str(job.get("text", ""))
+        label = self._cron_deliver(job, text)
+        preview = _scrub_paths(text)[:80]
+        self.log.write("CRON_RUN", f"id={jid}",
+                       f"kind={job.get('kind', '?')}",
+                       f"consumed={int(consume)}",
+                       f"delivered={label}", f"preview={preview}")
 
     # ------------------------------------------------------------- SENSE ---
     def _maybe_sniff(self) -> None:

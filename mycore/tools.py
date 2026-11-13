@@ -287,6 +287,94 @@ def resolve_inside(path_str: str, roots: tuple[str, ...] | list[str]) -> Path:
 SECRET_STORE_NAME = "secrets.env"
 SECRET_STORE_REASON = "secrets.env is not accessible to tools (credential discipline)"
 
+# Car C1 (A-1, curator-lock equivalent — gap plan §2 A-1): the STRUCTURED
+# path tools also refuse the body/config paths whose whole job is being
+# curated by a human or a lint-gated command, never by a raw write. This is
+# a refusal, not a sandbox: `run_bash` is a different, declared trust
+# boundary (docs/features/tool_toggles.md) and is deliberately NOT covered
+# here — the message never pretends otherwise. Reads stay open (the
+# constitution rides the system stack by design; settings has `settings get`).
+PROTECTED_SETTINGS_REASON = (
+    "settings.json is propose-only — file a plan with the `settings` tool "
+    "(the owner approves it in the console)")
+PROTECTED_CONSTITUTION_REASON = (
+    "the constitution (SOUL.md) is owner-owned — the tools will not write "
+    "it; ask the owner to change it")
+PROTECTED_SKILLS_REASON = (
+    "skills are curated through /learn (lint gate), not write_file — "
+    "use /learn skill <slug> :: <desc> :: <body>")
+PROTECTED_MEMORY_REASON = (
+    "memory is curated through /learn (lint gate), not write_file — "
+    "use /learn memory <text>")
+
+
+def _protected_writes() -> list[tuple[Path, str]]:
+    """(resolved root, refusal reason) pairs for the protected write set —
+    computed fresh on EVERY call (profile env seams read live, the same rule
+    as _shell_spec), so a test may flip AIDOG_PROFILE between calls.
+
+    Coverage (gap plan §2 A-1): body constitution/skills/memory under the
+    ACTIVE body root AND the shared <repo>/overlay copy (shipped skills stay
+    shared even under a profile), the active settings file, <repo>/web/
+    settings.json (never clobber the default profile's store from a profile
+    — §13.1), and any profiles/<name>/settings.json (same class)."""
+    repo = Path(REPO)
+    out: list[tuple[Path, str]] = []
+    seen: set[Path] = set()
+
+    def add(root: Path, reason: str) -> None:
+        try:
+            r = root.resolve()
+        except OSError:
+            return
+        if r not in seen:
+            seen.add(r)
+            out.append((r, reason))
+
+    body = pp.body_root(repo)
+    for sub, reason in (("constitution", PROTECTED_CONSTITUTION_REASON),
+                        ("skills", PROTECTED_SKILLS_REASON),
+                        ("memory", PROTECTED_MEMORY_REASON)):
+        add(body / sub, reason)
+        add(repo / "overlay" / sub, reason)
+    add(pp.settings_path(repo), PROTECTED_SETTINGS_REASON)
+    add(repo / "web" / "settings.json", PROTECTED_SETTINGS_REASON)
+    return out
+
+
+def protected_write_reason(p: Path) -> str | None:
+    """Refusal text when the resolved path `p` may not be written by the
+    structured path tools, else None. Called by write_file/edit_file and the
+    ACP fs proxy (defense in depth on top of resolve_inside)."""
+    for root, reason in _protected_writes():
+        try:
+            if p == root or root in p.parents:
+                return reason
+        except (OSError, ValueError):
+            continue
+    # Cross-profile shape rule (§13.1 forbids cross-profile clobber): any
+    # <profiles_root>/<name>/settings.json and any
+    # <profiles_root>/<name>/body/{constitution,skills,memory}/** — matched
+    # by shape without globbing, so OTHER profiles are covered too, while
+    # their state/sessions trees stay writable (normal runtime files).
+    try:
+        pr = pp.profiles_root(Path(REPO)).resolve()
+        if pr in p.parents:
+            parts = p.relative_to(pr).parts
+            if len(parts) == 2 and parts[1] == "settings.json":
+                return PROTECTED_SETTINGS_REASON
+            if len(parts) >= 3 and parts[1] == "body":
+                sub = parts[2]
+                if sub == "constitution":
+                    return PROTECTED_CONSTITUTION_REASON
+                if sub == "skills":
+                    return PROTECTED_SKILLS_REASON
+                if sub == "memory":
+                    return PROTECTED_MEMORY_REASON
+    except (OSError, ValueError):
+        pass
+    return None
+
 
 def _is_secret_store(p: Path) -> bool:
     return p.name == SECRET_STORE_NAME
@@ -331,6 +419,9 @@ def _write_file(path: str, content: str,
     p = resolve_inside(path, roots)
     if _is_secret_store(p):
         raise ToolError(SECRET_STORE_REASON)
+    why = protected_write_reason(p)
+    if why:
+        raise ToolError(why)
     if p.is_dir():
         raise ToolError(f"is a directory: {p}")
     if not isinstance(content, str):
@@ -351,6 +442,9 @@ def _edit_file(path: str, old_text: str, new_text: str,
     p = resolve_inside(path, roots)
     if _is_secret_store(p):
         raise ToolError(SECRET_STORE_REASON)
+    why = protected_write_reason(p)
+    if why:
+        raise ToolError(why)
     if not p.is_file():
         raise ToolError(f"not a file: {p}")
     if not isinstance(old_text, str) or not old_text:
@@ -903,13 +997,21 @@ _INT = {"type": "integer"}
 
 def _cron(action: str, spec: str | None, text: str | None, kind: str | None,
           job_id: str | None, state_dir: str | Path | None) -> str:
-    """The `cron` tool handler (Phase B2). Same spec grammar and registry as
-    /cron — only the entry differs. Returns honest strings; refusals become
-    ToolError -> `ERROR: <reason>` (the model can then correct itself)."""
+    """The `cron` tool handler (Phase B2 + car C1 A-3). Same spec grammar
+    and registry as /cron — only the entry differs. Car C1 adds
+    pause | resume | run | catchup (catchup takes its on/off value in the
+    `spec` field) — the SAME scheduler helpers the /cron command and the
+    ops CLI call, so the four entries can never drift. Returns honest
+    strings; refusals become ToolError -> `ERROR: <reason>` (the model can
+    then correct itself). `run` only QUEUES the flag here: the service fire
+    leg executes it (within 60 s) through one shared execution path — this
+    tool never delivers directly, so a console/model run and a /cron run
+    behave identically."""
     from . import scheduler  # local import: keeps the module graph acyclic
 
     if not isinstance(action, str):
-        raise ToolError("action must be create | list | delete")
+        raise ToolError("action must be create | list | delete | pause | "
+                        "resume | run | catchup")
     path = (Path(state_dir) / scheduler.STATE_FILE_NAME
             if state_dir is not None else scheduler.default_jobs_path())
     jobs = scheduler.load_jobs(path)
@@ -919,7 +1021,16 @@ def _cron(action: str, spec: str | None, text: str | None, kind: str | None,
         now = time.time()
         lines = []
         for j in jobs:
-            state = " (done)" if j.get("done") else ""
+            if j.get("missed"):
+                state = " (missed)"
+            elif j.get("done"):
+                state = " (done)"
+            else:
+                state = ""
+            if j.get("paused"):
+                state += " (paused)"
+            if j.get("catchup") == "off":
+                state += " (catchup off)"
             lines.append(f"{j['id']} · {scheduler.describe(j)} · "
                          f"{j.get('kind')} · next "
                          f"{scheduler.fmt_beijing(scheduler.next_fire(j, now))}"
@@ -935,6 +1046,44 @@ def _cron(action: str, spec: str | None, text: str | None, kind: str | None,
         except OSError:
             raise ToolError("job registry is not writable") from None
         return f"deleted {job_id}"
+    # --- car C1 (A-3): the three control actions ------------------------
+    if action in ("pause", "resume"):
+        if not job_id:
+            raise ToolError(f"{action} needs the job id (see list)")
+        if not scheduler.set_paused(jobs, job_id, action == "pause"):
+            raise ToolError(f"no job with id {job_id}")
+        try:
+            scheduler.save_jobs(path, jobs)
+        except OSError:
+            raise ToolError("job registry is not writable") from None
+        return (f"paused {job_id} — no automatic fires; a manual run still "
+                "works" if action == "pause" else f"resumed {job_id}")
+    if action == "run":
+        if not job_id:
+            raise ToolError("run needs the job id (see list)")
+        if not scheduler.request_run(jobs, job_id):
+            raise ToolError(f"no job with id {job_id}")
+        try:
+            scheduler.save_jobs(path, jobs)
+        except OSError:
+            raise ToolError("job registry is not writable") from None
+        return (f"queued {job_id} — the scheduler runs it at its next tick "
+                "(within a minute); the schedule is unchanged")
+    if action == "catchup":
+        value = str(spec or "").strip().lower()
+        if not job_id:
+            raise ToolError("catchup needs the job id (see list)")
+        if value not in ("on", "off"):
+            raise ToolError("catchup takes spec='on' or spec='off'")
+        if not scheduler.set_catchup(jobs, job_id, value):
+            raise ToolError(f"no job with id {job_id}")
+        try:
+            scheduler.save_jobs(path, jobs)
+        except OSError:
+            raise ToolError("job registry is not writable") from None
+        return (f"catch-up {value} for {job_id} — " +
+                ("a missed window fires late (once)" if value == "on" else
+                 "a missed window is skipped, never fired late"))
     if action == "create":
         if not spec or not text:
             raise ToolError("create needs spec and text")
@@ -950,7 +1099,8 @@ def _cron(action: str, spec: str | None, text: str | None, kind: str | None,
         return (f"scheduled {job['id']}: {scheduler.describe(job)} · "
                 f"{job['kind']} · next "
                 f"{scheduler.fmt_beijing(scheduler.next_fire(job, time.time()))}")
-    raise ToolError(f"action must be create | list | delete (got {action!r}")
+    raise ToolError(f"action must be create | list | delete | pause | "
+                    f"resume | run | catchup (got {action!r})")
 
 
 _CRON_LOCK = Lock()   # delegate threads may hit the cron tool concurrently
@@ -1372,10 +1522,15 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                "-> a 'once' date or 'weekly mon 09:00'. Spec forms: every <N>m|h | "
                "daily HH:MM | weekly <mon..sun> HH:MM | once YYYY-MM-DD HH:MM "
                "(Beijing time). kind='message' delivers text verbatim; kind='prompt' "
-               "runs one model turn and delivers its result.",
+               "runs one model turn and delivers its result. Controls (need id): "
+               "pause/resume = stop/restore automatic fires; run = queue a manual "
+               "run now (fires within a minute, schedule unchanged); catchup = "
+               "missed-window policy, pass spec='on' (fire late once, default) or "
+               "spec='off' (skip a missed window, never fire it late).",
                {"type": "object", "properties": {
                    "action": {"type": "string",
-                              "enum": ["create", "list", "delete"]},
+                              "enum": ["create", "list", "delete", "pause",
+                                       "resume", "run", "catchup"]},
                    "spec": _STR, "text": _STR,
                    "kind": {"type": "string",
                               "enum": ["message", "prompt"]},

@@ -3235,14 +3235,38 @@ function chatBadge(live) {
   el.className = "chat-badge" + (live ? " live" : "");
 }
 
-function chatBubble(role, text) {
+function chatBubble(role, text, mid) {
   document.getElementById("chatEmpty")?.remove();
   const row = document.createElement("div");
   row.className = "chat-row " + role;
+  // car C1 (A-2): absolute session index — history rows carry it from
+  // GET /api/chat/history, live rows get it from the done event's ids;
+  // the action buttons stay inert until it exists (never guess an index).
+  if (typeof mid === "number" && Number.isFinite(mid)) {
+    row.dataset.mid = String(mid);
+  }
   const b = document.createElement("div");
   b.className = "chat-bubble";
   b.textContent = text;
   row.appendChild(b);
+  const acts = document.createElement("div");
+  acts.className = "chat-acts";
+  const mk = (act, label, hint) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn chat-act";
+    btn.dataset.msgAct = act;
+    btn.textContent = label;
+    btn.title = hint;
+    return btn;
+  };
+  if (role === "user") {
+    acts.appendChild(mk("edit", t("chat.actEdit", "✎ edit"),
+      t("chat.actEditHint", "edit this message and resend from here")));
+  }
+  acts.appendChild(mk("fork", t("chat.actFork", "⑂ fork"),
+    t("chat.actForkHint", "branch a new session from this point")));
+  row.appendChild(acts);
   const log = document.getElementById("chatLog");
   log.appendChild(row);
   log.scrollTop = log.scrollHeight;
@@ -3374,7 +3398,7 @@ async function loadChatHistory() {
     const msgs = (h.messages || []).slice(-40);
     if (!msgs.length) return;
     document.getElementById("chatEmpty")?.remove();
-    for (const m of msgs) chatBubble(m.role, m.content);
+    for (const m of msgs) chatBubble(m.role, m.content, m.id);
   } catch (e) { /* empty state stays */ }
 }
 
@@ -3500,7 +3524,7 @@ async function chatTurn(text) {
   if (imgPick) imgPick.value = "";
   const imgNoteEl = document.getElementById("chatImgNote");
   if (imgNoteEl) imgNoteEl.hidden = true;
-  chatBubble("user", text + (img ? ` [image: ${img.name}]` : ""));
+  const userBub = chatBubble("user", text + (img ? ` [image: ${img.name}]` : ""));
   const bubble = chatBubble("assistant", "");
   bubble.classList.add("pending");
   let acc = "";
@@ -3565,6 +3589,17 @@ async function chatTurn(text) {
         t("chat.meta", "{i} iterations · {t} tool calls")
           .replace("{i}", meta.iterations).replace("{t}", meta.tool_calls);
       if (!meta.text.trim()) bubble.textContent = t("chat.noOutput", "(no output)");
+      // car C1 (A-2): stamp THIS turn's rows with their absolute ids so
+      // edit/fork work on the live bubbles without a refetch; a missing
+      // ids key (old server / failed append) leaves them inert, never guessed
+      if (meta.ids && typeof meta.ids === "object") {
+        if (typeof meta.ids.user === "number" && userBub.parentElement) {
+          userBub.parentElement.dataset.mid = String(meta.ids.user);
+        }
+        if (typeof meta.ids.assistant === "number" && bubble.parentElement) {
+          bubble.parentElement.dataset.mid = String(meta.ids.assistant);
+        }
+      }
     } else if (!acc) {
       bubble.textContent = t("chat.noOutput", "(no output)");
     }
@@ -3580,6 +3615,145 @@ async function chatTurn(text) {
     chatBadge(false);
     chatQueueRender();
     if (chatQueue.length) chatQueueNext(true);   // drain FIFO with a pending flash
+  }
+}
+
+/* ------------------------------------- car C1 (A-2): message-level rewind --
+   Edit = POST /api/chat {action:"rewind", id} (drops the selected user row
+   + everything after it, non-destructive: the old tail lands in archive/),
+   then the edited text goes out through the NORMAL send path — one turn,
+   no special pipeline. Fork = {action:"fork", id} snapshots messages[:id+1]
+   into a NEW session (live untouched) and offers the existing X20 resume to
+   switch into it. Both refuse while a turn is streaming, and a row without
+   a server-assigned id never guesses an index. */
+function chatRowAct(e) {
+  const btn = e.target.closest("[data-msg-act]");
+  if (!btn) return;
+  const row = btn.closest(".chat-row");
+  if (!row) return;
+  if (chatBusy) {
+    chatNote("err", t("chat.qBusy", "wait for the current turn"));
+    return;
+  }
+  const mid = row.dataset.mid;
+  if (!mid) {
+    chatNote("err", t("chat.midMissing",
+      "message id not loaded — reload the chat and retry"));
+    return;
+  }
+  if (btn.dataset.msgAct === "edit") chatEditRow(row, Number(mid));
+  else if (btn.dataset.msgAct === "fork") chatForkAt(Number(mid));
+}
+
+function chatEditRow(row, mid) {
+  const bubble = row.querySelector(".chat-bubble");
+  if (!bubble || bubble.dataset.editing === "1") return;
+  const orig = bubble.textContent;
+  bubble.dataset.editing = "1";
+  bubble.textContent = "";
+  const ta = document.createElement("textarea");
+  ta.className = "chat-edit-input";
+  ta.value = orig;
+  ta.rows = Math.min(8, Math.max(2, orig.split("\n").length));
+  const bar = document.createElement("div");
+  bar.className = "chat-edit-bar";
+  const mk = (label, primary) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn" + (primary ? " primary" : "");
+    b.textContent = label;
+    return b;
+  };
+  const restore = () => {
+    delete bubble.dataset.editing;
+    bubble.textContent = orig;
+  };
+  const cancel = mk(t("chat.editCancel", "cancel"), false);
+  cancel.addEventListener("click", restore);
+  const save = mk(t("chat.editSave", "send"), true);
+  save.addEventListener("click", async () => {
+    const text = ta.value;
+    if (!text.trim()) { restore(); return; }
+    if (text === orig) { restore(); return; }        // no-op edit: no rewind
+    const ok = await chatRewind(mid);
+    if (!ok) { restore(); return; }                 // server refusal: keep text
+    // prefix is live now: repaint it, then send through the normal path
+    await chatReload();
+    const input = document.getElementById("chatInput");
+    if (input) { input.value = text; chatSend(); }
+  });
+  bar.appendChild(cancel);
+  bar.appendChild(save);
+  bubble.appendChild(ta);
+  bubble.appendChild(bar);
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+}
+
+async function chatRewind(mid) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    chatNote("err", t("chat.needToken", "access token required (set it in Settings)"));
+    return false;
+  }
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: "rewind", id: mid }) });
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 401) {
+      chatNote("err", t("chat.badToken", "401 · unauthorized"));
+      return false;
+    }
+    if (!r.ok) {
+      chatNote("err", t("chat.rewindErr", "rewind failed: {e}")
+        .replace("{e}", String((body.details || [body.error || "error"])[0] || "")));
+      return false;
+    }
+    return true;
+  } catch (e) {
+    chatNote("err", t("chat.rewindErr", "rewind failed: {e}")
+      .replace("{e}", String(e).slice(0, 120)));
+    return false;
+  }
+}
+
+async function chatForkAt(mid) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    chatNote("err", t("chat.needToken", "access token required (set it in Settings)"));
+    return;
+  }
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ action: "fork", id: mid }) });
+    const body = await r.json().catch(() => ({}));
+    if (r.status === 401) {
+      chatNote("err", t("chat.badToken", "401 · unauthorized"));
+      return;
+    }
+    if (!r.ok) {
+      chatNote("err", t("chat.forkErr", "fork failed: {e}")
+        .replace("{e}", String((body.details || [body.error || "error"])[0] || "")));
+      return;
+    }
+    const fid = String(body.id || "");
+    // live session untouched — offer the EXISTING X20 switch, or leave the
+    // fork in GET /api/sessions for later (nothing is lost either way)
+    if (window.confirm(t("chat.forkOpen", "Fork created — open it now?"))) {
+      await sessionResume(fid);
+    } else {
+      chatNote("ok", t("chat.forked", "forked as {id} — open it from Sessions")
+        .replace("{id}", fid));
+    }
+  } catch (e) {
+    chatNote("err", t("chat.forkErr", "fork failed: {e}")
+      .replace("{e}", String(e).slice(0, 120)));
   }
 }
 
@@ -7017,7 +7191,32 @@ function renderCronList() {
       meta.push(t("cron.next", "next {v}").replace("{v}", String(job.next)));
     }
     if (job.due) meta.push(t("cron.due", "due now"));
+    // car C1 (A-3): control state rides the row — never hidden behind hover
+    if (job.missed) meta.push(t("cron.missed", "missed"));
+    else if (job.done) meta.push(t("cron.doneMark", "done"));
+    if (job.paused) meta.push(t("cron.pausedMark", "paused"));
+    if (job.catchup === "off") meta.push(t("cron.catchupOff", "catch-up off"));
+    if (job.run_queued) meta.push(t("cron.runQueued", "run queued"));
     const jid = String(job.id || "");
+    const btn = (action, label, hint, value) =>
+      `<button class="btn" type="button" data-cron-action="${action}" ` +
+      `data-job="${escapeHtml(jid)}"${value ? ` data-value="${value}"` : ""} ` +
+      `title="${escapeHtml(hint)}" ` +
+      `style="padding:2px 7px;font-size:12.5px;">${escapeHtml(label)}</button>`;
+    const ctrls = jid ? [
+      job.paused
+        ? btn("resume", t("cron.btnResume", "▶ resume"),
+              t("cron.resumeHint", "allow this job to fire automatically"))
+        : btn("pause", t("cron.btnPause", "⏸ pause"),
+              t("cron.pauseHint", "stop automatic fires; manual run still works")),
+      btn("run", t("cron.btnRun", "↻ run"),
+          t("cron.runHint", "run it now (fires within a minute; the schedule is unchanged)")),
+      job.catchup === "off"
+        ? btn("catchup", t("cron.btnCuOn", "cu on"),
+              t("cron.cuOnHint", "missed windows fire late once (default)"), "on")
+        : btn("catchup", t("cron.btnCuOff", "cu off"),
+              t("cron.cuOffHint", "missed windows are skipped, never fired late"), "off"),
+    ].join(" ") : "";
     const del = jid
       ? `<button class="btn" id="cronDelBtn" type="button" data-job="${escapeHtml(jid)}" ` +
         `title="${escapeHtml(t("cron.delConfirm", "Delete cron job {id}?"))
@@ -7027,9 +7226,63 @@ function renderCronList() {
     return `<div class="ctl-row" data-cron="${escapeHtml(jid)}">` +
       `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">${escapeHtml(title)}</label>` +
       `<span class="stat-note" style="margin-top:0;">${escapeHtml(meta.join(" · "))}</span>` +
-      del +
+      ctrls + del +
       `</div>`;
   }).join("");
+}
+
+/* car C1 (A-3): the console leg of the per-job controls — pause / resume /
+   run / catchup through POST /api/cron {action, id[, value]}, the SAME
+   scheduler helpers the /cron command, the model tool and the ops CLI call
+   (one grammar, four entries). The row re-renders from the RESPONSE row
+   (byte-identical to a GET row); a refusal shows the server's detail
+   verbatim. `run` answers queued:true because the SERVICE process fires it
+   at its next 60 s tick — the note says so instead of pretending instant. */
+async function cronControl(action, id, value) {
+  const msg = document.getElementById("cronMsg");
+  if (!id) return;
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = t("save.needToken", "token required"); }
+    return;
+  }
+  const payload = { action: action, id: id };
+  if (value) payload.value = value;
+  if (msg) { msg.className = "save-state"; msg.textContent = "…"; }
+  try {
+    const res = await fetch("/api/cron", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload),
+    });
+    let body = {};
+    try { body = await res.json(); } catch (e) { body = {}; }
+    if (!res.ok) {
+      const err = (body && (body.error || (Array.isArray(body.details) &&
+        body.details.length && body.details.join("; ")))) || ("HTTP " + res.status);
+      if (msg) {
+        msg.className = "save-state err";
+        msg.textContent = t("cron.ctlErr", "action failed: {e}")
+          .replace("{e}", String(err));
+      }
+      return;
+    }
+    if (msg) {
+      msg.className = "save-state";
+      msg.textContent = action === "run"
+        ? t("cron.ctlQueued", "queued — the service runs it within a minute")
+        : "";
+    }
+    refreshCron();
+  } catch (e) {
+    if (msg) {
+      msg.className = "save-state err";
+      msg.textContent = t("cron.ctlErr", "action failed: {e}")
+        .replace("{e}", String(e).slice(0, 120));
+    }
+  }
 }
 
 /* Wave 4 (X9): structured cron create — POST /api/cron {action:"create"}.
@@ -10601,6 +10854,14 @@ if (cronCreateEl) cronCreateEl.addEventListener("click", cronCreate);
 });
 const cronListDelEl = document.getElementById("cronList");
 if (cronListDelEl) cronListDelEl.addEventListener("click", e => {
+  /* car C1 (A-3): the control buttons carry data-cron-action (handled
+     FIRST — they also carry data-job, which is the delete path's hook); a
+     bare [data-job] click stays the delete button's behaviour. */
+  const ctl = e.target.closest("[data-cron-action]");
+  if (ctl && ctl.dataset.job) {
+    cronControl(ctl.dataset.cronAction, ctl.dataset.job, ctl.dataset.value);
+    return;
+  }
   const btn = e.target.closest("#cronDelBtn, [data-job]");
   if (btn && btn.dataset.job) cronDel(btn.dataset.job);
 });
@@ -10947,6 +11208,11 @@ if (overviewSecEl) overviewSecEl.addEventListener("click", e => {
 const ovBackupOpenEl = document.getElementById("ovBackupOpen");
 if (ovBackupOpenEl) ovBackupOpenEl.addEventListener("click", () => openBackupCard());
 document.getElementById("chatSend").addEventListener("click", chatSend);
+/* car C1 (A-2): delegated — bubbles are (re)built on every repaint, so the
+   listener lives on the log element itself (its innerHTML changes, the
+   element never does). */
+const chatLogEl = document.getElementById("chatLog");
+if (chatLogEl) chatLogEl.addEventListener("click", chatRowAct);
 document.getElementById("chatClear").addEventListener("click", chatClear);
 const chatStopEl = document.getElementById("chatStop");
 if (chatStopEl) chatStopEl.addEventListener("click", () => postControl("stop"));

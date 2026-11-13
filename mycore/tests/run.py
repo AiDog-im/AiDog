@@ -2012,15 +2012,21 @@ class FakeTgTransport:
         return json.dumps({"ok": True, "result": {}})
 
 
-def mk_update(update_id, uid, chat_id, text, thread_id=None):
+def mk_update(update_id, uid, chat_id, text, thread_id=None, reply_text=None):
     """A Telegram-style message update (offline fixture). `thread_id` adds
-    message_thread_id (forum topic) — None keeps the plain-chat shape."""
+    message_thread_id (forum topic) — None keeps the plain-chat shape.
+    `reply_text` (car C1 A-2) wraps the message in reply_to_message with
+    that text — the /rewind reply form's target."""
     msg = {"message_id": 1,
            "from": {"id": uid, "is_bot": False, "first_name": "x"},
            "chat": {"id": chat_id, "type": "private"},
            "date": 0, "text": text}
     if thread_id is not None:
         msg["message_thread_id"] = thread_id
+    if reply_text is not None:
+        msg["reply_to_message"] = {"message_id": 99,
+                                   "chat": {"id": chat_id, "type": "private"},
+                                   "date": 0, "text": reply_text}
     return {"update_id": update_id, "message": msg}
 
 
@@ -2682,10 +2688,10 @@ def test_service() -> None:
                                 transport=fake_m, chat=ok_chat,
                                 repo=menu_repo, now=nowf)
             svc_m.run(once=True)
-            check("menu: absent block -> the full 11-command menu published",
+            check("menu: absent block -> the full 12-command menu published",
                   len(fake_m.menus) == 1
                   and fake_m.menus[0][0] == "setMyCommands"
-                  and len(fake_m.menus[0][1]) == 11,
+                  and len(fake_m.menus[0][1]) == 12,
                   str(fake_m.menus)[:200])
             menu_entries = fake_m.menus[0][1] if fake_m.menus else []
             check("menu: every entry is {command, description} from menu.<cmd>",
@@ -13661,16 +13667,16 @@ def test_delta2() -> None:
     _help_names = [ln.split()[0].lstrip("/")
                    for ln in (_en_pack.get("cmd.help.body") or "").split("\n")
                    if ln.strip()]
-    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (11)",
+    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (12)",
           tuple(_help_names) == tuple(_svc_menu.BOT_COMMANDS)
           and set(_branches) == set(_svc_menu.BOT_COMMANDS)
-          and len(_svc_menu.BOT_COMMANDS) == 11,
+          and len(_svc_menu.BOT_COMMANDS) == 12,
           f"help={_help_names} branches={_branches}")
     check("menu lock: web.server validates against the SAME constant",
           ws.BOT_COMMANDS is _svc_menu.BOT_COMMANDS, str(ws.BOT_COMMANDS))
     _no_desc = [n for n in _svc_menu.BOT_COMMANDS
                 if "menu." + n not in _en_pack or "menu." + n not in _zh_pack]
-    check("menu lock: menu.<cmd> exists in both packs for all 11",
+    check("menu lock: menu.<cmd> exists in both packs for all 12",
           not _no_desc, str(_no_desc))
     _too_long = [n for n in _svc_menu.BOT_COMMANDS
                  if len(_en_pack.get("menu." + n, "")) > 120
@@ -17870,6 +17876,726 @@ def test_secrets_store() -> None:
         ss.forget()
 
 
+def test_protected_writes() -> None:
+    """Car C1 (A-1, curator-lock equivalent — gap plan §2 A-1): write_file /
+    edit_file (local registry, execute_code's child helpers, AND the ACP fs
+    proxy) refuse the body/config paths a human or a lint-gated command
+    owns — constitution/skills/memory under the active body root AND the
+    shared overlay copy, the active settings file, <repo>/web/settings.json
+    and any profiles/<name>/settings.json (§13.1 cross-profile clobber).
+    Reads stay open (constitution rides the system stack by design), normal
+    files stay writable, profile state/sessions stay writable, and the
+    refusal is honest: no machine path, no pretend-sandbox claim about
+    run_bash. Hermetic: probes are temp files or never-created paths; the
+    REAL SOUL.md / settings.json are only attempted through the gate."""
+    from mycore import checkpoint as cp
+    from mycore import execute_code as ec
+    from mycore.acp import AcpSession, AcpServer
+    from mycore.tools import (PROTECTED_CONSTITUTION_REASON,
+                              PROTECTED_MEMORY_REASON,
+                              PROTECTED_SETTINGS_REASON,
+                              PROTECTED_SKILLS_REASON,
+                              build_registry, protected_write_reason)
+
+    saved_profile = os.environ.get("AIDOG_PROFILE")
+    saved_pdir = os.environ.get("AIDOG_PROFILES_DIR")
+    os.environ.pop("AIDOG_PROFILE", None)
+    os.environ.pop("AIDOG_PROFILES_DIR", None)
+    repo = Path(REPO)
+    try:
+        reg0 = build_registry()          # default roots: REPO + tempdir
+
+        # 1) write + edit refused on all four classes (real repo paths;
+        #    the gate fires BEFORE any byte moves or checkpoint is taken —
+        #    state_dir is wired so a gate miss WOULD land a checkpoint here)
+        with tempfile.TemporaryDirectory() as td:
+            st = Path(td) / "state"
+            reg = build_registry(state_dir=st)
+            cases = ((repo / "overlay" / "constitution" / "SOUL.md",
+                      PROTECTED_CONSTITUTION_REASON, "constitution"),
+                     (repo / "overlay" / "skills" / "binance-read-only"
+                      / "SKILL.md", PROTECTED_SKILLS_REASON, "skill"),
+                     (repo / "overlay" / "memory" / "MEMORY_curated.md",
+                      PROTECTED_MEMORY_REASON, "memory"),
+                     (repo / "web" / "settings.json",
+                      PROTECTED_SETTINGS_REASON, "settings"))
+            soul_before = (repo / "overlay" / "constitution" / "SOUL.md").read_bytes()
+            for path, reason, label in cases:
+                w = reg.dispatch("write_file", {"path": str(path),
+                                                "content": "pwned"})
+                check(f"c1 a1: write_file refuses {label}",
+                      w == "ERROR: " + reason, w[:90])
+                e = reg.dispatch("edit_file", {"path": str(path),
+                                               "old_text": "x",
+                                               "new_text": "y"})
+                check(f"c1 a1: edit_file refuses {label}",
+                      e == "ERROR: " + reason, e[:90])
+            check("c1 a1: refusal takes no checkpoint",
+                  cp.list_entries(st, limit=10) == [],
+                  str(cp.list_entries(st, limit=10)))
+            check("c1 a1: SOUL.md bytes untouched",
+                  (repo / "overlay" / "constitution" / "SOUL.md").read_bytes()
+                  == soul_before, "SOUL.md changed")
+            check("c1 a1: refusal carries no machine path",
+                  all(str(repo) not in r for r in
+                      (PROTECTED_CONSTITUTION_REASON,
+                       PROTECTED_SKILLS_REASON, PROTECTED_MEMORY_REASON,
+                       PROTECTED_SETTINGS_REASON)), "path leaked")
+
+        # 2) read stays open (constitution is in the system stack anyway)
+        r = reg0.dispatch("read_file", {"path": str(
+            repo / "overlay" / "constitution" / "SOUL.md"), "limit": 5})
+        check("c1 a1: read_file on constitution still open (by design)",
+              r.startswith("     1\t"), r[:60])
+
+        # 3) normal files unaffected + a NOT-yet-existing protected create
+        #    is refused too (the gate runs before mkdir/write)
+        with tempfile.TemporaryDirectory() as td:
+            ok = Path(td) / "ok.md"
+            reg0.dispatch("write_file", {"path": str(ok), "content": "v1"})
+            reg0.dispatch("edit_file", {"path": str(ok), "old_text": "v1",
+                                        "new_text": "v2"})
+            check("c1 a1: ordinary write/edit unaffected",
+                  ok.read_text(encoding="utf-8") == "v2", "normal file broke")
+            probe = repo / "overlay" / "skills" / "__c1_probe" / "SKILL.md"
+            w = reg0.dispatch("write_file", {"path": str(probe),
+                                             "content": "x"})
+            check("c1 a1: creating a NEW skill file is refused too",
+                  w == "ERROR: " + PROTECTED_SKILLS_REASON
+                  and not probe.exists(), w[:90])
+
+        # 4) execute_code child process inherits the gate (same refusal,
+        #    across the process boundary — the read-gate precedent)
+        w = ec.run_code("print(write(%r, 'x'))" % str(
+            repo / "overlay" / "constitution" / "SOUL.md"),
+            (str(repo),), None)
+        check("c1 a1: execute_code write inherits the refusal",
+              w.startswith("exit=1") and PROTECTED_CONSTITUTION_REASON in w,
+              w[:140])
+
+        # 5) ACP fs proxy: same gate BEFORE any client request goes out
+        srv = AcpServer(lines=iter(()), write=lambda f: None)
+        sess = AcpSession("s1", str(repo), (str(repo),))
+        for meth, args, label in ((srv._proxy_write,
+                                   (sess, str(repo / "overlay" /
+                                              "constitution" / "SOUL.md"),
+                                    "x"), "write"),
+                                  (srv._proxy_edit,
+                                   (sess, str(repo / "web" / "settings.json"),
+                                    "a", "b"), "edit")):
+            try:
+                meth(*args)
+                check(f"c1 a1: acp proxy {label} refuses", False, "allowed")
+            except Exception as exc:  # noqa: BLE001 — ToolError expected
+                check(f"c1 a1: acp proxy {label} refuses",
+                      type(exc).__name__ == "ToolError"
+                      and str(exc) in (PROTECTED_CONSTITUTION_REASON,
+                                       PROTECTED_SETTINGS_REASON),
+                      f"{type(exc).__name__}: {exc}")
+
+        # 6) profile mode: active body/settings refused, repo default store
+        #    STILL refused (never clobber it from a profile), other
+        #    profiles' settings/body refused by shape, state stays open
+        with tempfile.TemporaryDirectory() as td:
+            os.environ["AIDOG_PROFILES_DIR"] = td
+            os.environ["AIDOG_PROFILE"] = "alice"
+            tp = Path(td)
+            cases = ((tp / "alice" / "body" / "constitution" / "SOUL.md",
+                      PROTECTED_CONSTITUTION_REASON, "active body"),
+                     (tp / "alice" / "settings.json",
+                      PROTECTED_SETTINGS_REASON, "active settings"),
+                     (tp / "bob" / "settings.json",
+                      PROTECTED_SETTINGS_REASON, "other profile settings"),
+                     (tp / "bob" / "body" / "memory" / "EVOLUTION_learned.md",
+                      PROTECTED_MEMORY_REASON, "other profile memory"),
+                     (repo / "web" / "settings.json",
+                      PROTECTED_SETTINGS_REASON,
+                      "repo default store under a profile"))
+            for path, reason, label in cases:
+                check(f"c1 a1: profile mode refuses {label}",
+                      protected_write_reason(path.resolve()) == reason,
+                      str(protected_write_reason(path.resolve()))[:60])
+            state_ok = tp / "alice" / "state" / "sessions" / "x.jsonl"
+            check("c1 a1: profile state/sessions stay writable",
+                  protected_write_reason(state_ok.resolve()) is None,
+                  "state blocked")
+            images_ok = tp / "alice" / "images" / "x.png"
+            check("c1 a1: profile images stay writable",
+                  protected_write_reason(images_ok.resolve()) is None,
+                  "images blocked")
+    finally:
+        if saved_profile is None:
+            os.environ.pop("AIDOG_PROFILE", None)
+        else:
+            os.environ["AIDOG_PROFILE"] = saved_profile
+        if saved_pdir is None:
+            os.environ.pop("AIDOG_PROFILES_DIR", None)
+        else:
+            os.environ["AIDOG_PROFILES_DIR"] = saved_pdir
+
+
+def test_cron_controls() -> None:
+    """Car C1 (A-3): per-job cron controls — paused / catch-up off / manual
+    run — through the FOUR shared entries (scheduler helpers = the /cron
+    command = the model `cron` tool = POST /api/cron), offline (fake
+    transport, injected clock, temp state dirs). Locks: is_due refuses a
+    paused job; catch-up OFF skips stale windows (interval anchor advances
+    O(1), a missed one-shot becomes done+missed, daily self-heals) while
+    catch-up ON behavior is byte-identical to before; a manual run consumes
+    the window only when it had already arrived (early run never eats a
+    future one-shot) and the fire leg executes it through ONE path (no
+    double fire against the tick); prompt runs re-check the gate and keep
+    the flag while held; the console face answers queued honestly."""
+    from mycore import scheduler as sch
+    from mycore.service import ChatService
+    from mycore.tg import POLL_BOT_ENV
+    from datetime import datetime as _dt
+    import os as _os
+
+    NOW = _dt(2026, 10, 20, 22, 0, tzinfo=sch.BEIJING).timestamp()
+    now = float(NOW)
+
+    # --- scheduler helpers: pause / resume / catchup / run queue ---------
+    jobs: list[dict] = []
+    job = sch.create_job(jobs, "every 30m", "hello", now=now - 7200)
+    jid = job["id"]
+    check("c1 a3: get_job finds by id",
+          sch.get_job(jobs, jid) is job and sch.get_job(jobs, "nope") is None)
+    check("c1 a3: pause sets the flag",
+          sch.set_paused(jobs, jid, True) and job.get("paused") is True)
+    check("c1 a3: a paused job is never due",
+          sch.is_due(job, now) is False)
+    check("c1 a3: a paused job still computes its next fire (display)",
+          sch.next_fire(job, now) is not None)
+    check("c1 a3: resume drops the flag (byte-identical to a fresh job)",
+          sch.set_paused(jobs, jid, False) and "paused" not in job)
+    check("c1 a3: pause/resume unknown id -> False, nothing written",
+          sch.set_paused(jobs, "nope00", True) is False
+          and "paused" not in job)
+    check("c1 a3: catchup accepts on/off only",
+          sch.set_catchup(jobs, jid, "off") and job["catchup"] == "off"
+          and sch.set_catchup(jobs, jid, "bogus") is False
+          and job["catchup"] == "off")
+    check("c1 a3: catchup back to on drops the key (default shape)",
+          sch.set_catchup(jobs, jid, "on") and "catchup" not in job)
+    check("c1 a3: request_run stamps the flag + take_run_requests sees it",
+          sch.request_run(jobs, jid, now=now)
+          and job["run_requested_at"] == now
+          and [x["id"] for x in sch.take_run_requests(jobs)] == [jid])
+    job.pop("run_requested_at", None)
+
+    # --- catch-up OFF matrix (grace = 300 s) -----------------------------
+    stale = {"id": "stale1", "type": "interval", "minutes": 30,
+             "text": "t", "kind": "message", "created_at": now - 7600,
+             "last_fired": now - 7600, "done": False, "catchup": "off"}
+    check("c1 a3: catchup-off stale interval not due (beyond grace)",
+          sch.is_due(stale, now) is False)
+    check("c1 a3: sweep advances the interval anchor exactly once",
+          sch.catchup_sweep([stale], now) is True
+          and sch.catchup_sweep([stale], now) is False)
+    check("c1 a3: after the sweep the next window is future (no burst)",
+          sch.is_due(stale, now) is False
+          and stale["last_fired"] > now - 7600)
+    fresh = {"id": "fresh1", "type": "interval", "minutes": 30,
+             "text": "t", "kind": "message", "created_at": now - 1900,
+             "last_fired": now - 1900, "done": False, "catchup": "off"}
+    check("c1 a3: catchup-off WITHIN grace still fires (tick latency)",
+          sch.is_due(fresh, now) is True
+          and sch.catchup_sweep([fresh], now) is False)
+    on_job = {"id": "onjob", "type": "interval", "minutes": 30,
+              "text": "t", "kind": "message", "created_at": now - 7600,
+              "last_fired": now - 7600, "done": False}
+    check("c1 a3: catchup ON (default) keeps the old late-fire behavior",
+          sch.is_due(on_job, now) is True
+          and sch.catchup_sweep([on_job], now) is False)
+    missed = {"id": "missed1", "type": "once", "at": "2020-01-01 00:00",
+              "text": "t", "kind": "message", "created_at": now - 10,
+              "last_fired": None, "done": False, "catchup": "off"}
+    check("c1 a3: a missed one-shot is skipped, then marked done+missed",
+          sch.is_due(missed, now) is False
+          and sch.catchup_sweep([missed], now) is True
+          and missed["done"] and missed["missed"])
+    daily = {"id": "daily1", "type": "daily", "time": "08:00",
+             "text": "t", "kind": "message", "created_at": now - 86400 * 2,
+             "last_fired": now - 86400 * 2, "done": False, "catchup": "off"}
+    check("c1 a3: catchup-off daily self-heals (no mutation, not due)",
+          sch.is_due(daily, now) is False
+          and sch.catchup_sweep([daily], now) is False)
+
+    # --- window_due: manual-run consumption rule -------------------------
+    future = {"id": "fut1", "type": "once", "at": "2030-01-01 00:00",
+              "text": "t", "kind": "message", "created_at": now,
+              "last_fired": None, "done": False}
+    check("c1 a3: window_due refuses a future one-shot (early run safe)",
+          sch.window_due(future, now) is False)
+    due_once = {"id": "due1", "type": "once", "at": "2020-06-01 00:00",
+                "text": "t", "kind": "message", "created_at": now - 100,
+                "last_fired": None, "done": False}
+    check("c1 a3: window_due accepts an arrived window (run consumes it)",
+          sch.window_due(due_once, now) is True)
+    done_job = dict(due_once, done=True)
+    check("c1 a3: window_due refuses a done job", sch.window_due(done_job, now) is False)
+
+    # --- model tool: the control actions ---------------------------------
+    from mycore.tools import _cron as cron_tool
+    with tempfile.TemporaryDirectory() as td:
+        out = cron_tool("create", "every 30m", "tool job", "message",
+                        None, td)
+        tid = out.split()[1].rstrip(":")
+        check("c1 a3: tool pause answers honestly",
+              cron_tool("pause", None, None, None, tid, td)
+              .startswith("paused "))
+        check("c1 a3: tool list shows the paused marker",
+              " (paused)" in cron_tool("list", None, None, None, None, td))
+        check("c1 a3: tool run queues (never delivers itself)",
+              "queued" in cron_tool("run", None, None, None, tid, td)
+              and sch.get_job(sch.load_jobs(Path(td) / sch.STATE_FILE_NAME),
+                              tid).get("run_requested_at") is not None)
+        check("c1 a3: tool catchup takes the value in spec",
+              "catch-up off" in cron_tool("catchup", "off", None, None,
+                                          tid, td))
+        def tool_err(fn, *a) -> bool:
+            """Direct _cron calls raise ToolError (dispatch renders ERROR)."""
+            try:
+                fn(*a)
+                return False
+            except Exception as exc:  # noqa: BLE001 — any refusal counts
+                return type(exc).__name__ == "ToolError"
+
+        check("c1 a3: tool catchup rejects a bad value",
+              tool_err(cron_tool, "catchup", "maybe", None, None, tid, td))
+        check("c1 a3: tool resume restores",
+              cron_tool("resume", None, None, None, tid, td)
+              .startswith("resumed "))
+        for act, args, why in (("pause", (None, None, None, "nope00", td),
+                                "pause unknown id"),
+                               ("run", (None, None, None, None, td),
+                                "run without id"),
+                               ("catchup", ("off", None, None, None, td),
+                                "catchup without id")):
+            res = None
+            try:
+                res = cron_tool(act, *args)
+            except Exception as exc:  # noqa: BLE001 — ToolError expected
+                res = f"ERROR: {exc}"
+            check(f"c1 a3: tool ERROR path ({why})",
+                  res.startswith("ERROR:"), res[:70])
+        check("c1 a3: tool schema gained the four control actions",
+              any(t["function"]["name"] == "cron" and
+                  set(t["function"]["parameters"]["properties"]["action"]
+                      ["enum"]) == {"create", "list", "delete", "pause",
+                                    "resume", "run", "catchup"}
+                  for t in build_registry().schema()), "cron enum missing")
+
+    # --- console face: cron_control (module function, no HTTP needed) ----
+    from web import server as ws
+    with tempfile.TemporaryDirectory() as td:
+        saved_env = _os.environ.get("AIDOG_MC_STATE")
+        _os.environ["AIDOG_MC_STATE"] = td
+        try:
+            code, out = ws.cron_create("n", "every 45m", "console job")
+            cid = out["job"]["id"] if code == 200 else ""
+            check("c1 a3: console create still works (baseline)",
+                  code == 200 and cid, str(out))
+            check("c1 a3: cron_row exposes the car C1 control fields",
+                  set(("paused", "catchup", "missed", "run_queued"))
+                  <= set(out["job"]) and out["job"]["catchup"] == "on"
+                  and out["job"]["paused"] is False, str(out["job"]))
+            code, out = ws.cron_control("pause", cid)
+            check("c1 a3: console pause -> 200 + paused row",
+                  code == 200 and out["job"]["paused"] is True, str(out))
+            code, out = ws.cron_control("catchup", cid, "off")
+            check("c1 a3: console catchup -> 200 + off row",
+                  code == 200 and out["job"]["catchup"] == "off", str(out))
+            code, out = ws.cron_control("catchup", cid, "maybe")
+            check("c1 a3: console catchup bad value -> 400",
+                  code == 400 and "on | off" in str(out.get("details")),
+                  str(out))
+            code, out = ws.cron_control("run", cid)
+            check("c1 a3: console run answers queued honestly (service fires)",
+                  code == 200 and out.get("queued") is True
+                  and out["job"]["run_queued"] is True, str(out))
+            code, out = ws.cron_control("resume", "nope00")
+            check("c1 a3: console unknown id -> 404", code == 404, str(out))
+            code, out = ws.cron_control("resume", cid)
+            check("c1 a3: console resume clears the flag",
+                  code == 200 and out["job"]["paused"] is False, str(out))
+        finally:
+            if saved_env is None:
+                _os.environ.pop("AIDOG_MC_STATE", None)
+            else:
+                _os.environ["AIDOG_MC_STATE"] = saved_env
+
+    # --- service leg: /cron pause|resume|run|catchup + one fire path ------
+    saved_tok = _os.environ.get(POLL_BOT_ENV)
+    saved_wd = _os.environ.get("MYCORE_WD_CHAT")
+    _os.environ[POLL_BOT_ENV] = "c1-bot-TEST-token"
+    _os.environ.pop("MYCORE_WD_CHAT", None)
+    try:
+        clock = [float(NOW)]
+        fake = FakeTgTransport()
+        with tempfile.TemporaryDirectory() as td:
+            svc = ChatService(Path(td), frozenset({111}), transport=fake,
+                              chat=lambda messages=None, tools=None, **kw:
+                              fake_response(text="pong"),
+                              now=lambda: clock[0])
+
+            def cmd(text, cid=424242, uid=111, upd=1):
+                before = len(fake.sends)
+                svc.handle_update(mk_update(upd, uid, cid, text))
+                return fake.sends[before][1] if len(fake.sends) > before \
+                    else None
+
+            reg_path = Path(td) / sch.STATE_FILE_NAME
+            out = cmd("/cron add every 30m :: control me")
+            jid = sch.load_jobs(reg_path)[0]["id"]
+            check("c1 a3: /cron add baseline", "created" in str(out), str(out))
+            out = cmd("/cron pause " + jid)
+            check("c1 a3: /cron pause answers honestly",
+                  out is not None and "paused" in out
+                  and sch.load_jobs(reg_path)[0].get("paused") is True,
+                  str(out))
+            check("c1 a3: /cron list marks the paused job",
+                  "(paused)" in str(cmd("/cron")), str(cmd("/cron")))
+            out = cmd("/cron resume " + jid)
+            check("c1 a3: /cron resume clears it",
+                  out is not None and "resumed" in out
+                  and "paused" not in sch.load_jobs(reg_path)[0], str(out))
+            out = cmd("/cron catchup " + jid + " off")
+            check("c1 a3: /cron catchup off",
+                  out is not None and "catch-up off" in out
+                  and sch.load_jobs(reg_path)[0].get("catchup") == "off",
+                  str(out))
+            out = cmd("/cron catchup " + jid + " sideways")
+            check("c1 a3: /cron catchup bad value -> usage",
+                  out is not None and "/cron catchup" in out, str(out))
+            out = cmd("/cron pause nope00")
+            check("c1 a3: /cron pause unknown id is honest",
+                  out is not None and "nope00" in out, str(out))
+            # run: in-process nudge -> delivered immediately, one path
+            # (the cmd() reply itself is also a send: [delivery, receipt])
+            fake.sends.clear()
+            clock[0] += 61
+            out = cmd("/cron run " + jid)
+            check("c1 a3: /cron run delivers immediately (in-process nudge)",
+                  len(fake.sends) == 2
+                  and fake.sends[0][1] == "control me"
+                  and "ran now" in fake.sends[-1][1]
+                  and out is not None and "control me" in out,
+                  f"sends={fake.sends} out={out}")
+            after = sch.load_jobs(reg_path)[0]
+            check("c1 a3: a run of a NOT-due job leaves the schedule intact",
+                  after.get("run_requested_at") is None
+                  and after.get("last_fired") is None
+                  and not after.get("done"), str(after))
+            # run of a DUE job consumes the window (no double fire next tick)
+            sch.save_jobs(reg_path, [])
+            jl = sch.load_jobs(reg_path)
+            sch.create_job(jl, "every 1m", "due job", origin=424242,
+                           now=clock[0] - 120)
+            sch.save_jobs(reg_path, jl)
+            jid2 = sch.load_jobs(reg_path)[0]["id"]
+            fake.sends.clear()
+            svc._cron_check = 0.0
+            out = cmd("/cron run " + jid2)
+            first = len(fake.sends)      # delivery + cmd receipt
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()          # the very next tick
+            check("c1 a3: run of a due job consumes the window (no double fire)",
+                  first == 2 and len(fake.sends) == first,
+                  f"first={first} total={len(fake.sends)} out={out}")
+            # catchup-off sweep runs inside the fire leg
+            sch.save_jobs(reg_path, [])
+            jl = sch.load_jobs(reg_path)
+            jl.append({"id": "stale9", "type": "interval", "minutes": 30,
+                       "text": "stale", "kind": "message",
+                       "created_at": clock[0] - 7600,
+                       "last_fired": clock[0] - 7600, "done": False,
+                       "catchup": "off", "origin": 424242})
+            sch.save_jobs(reg_path, jl)
+            fake.sends.clear()
+            svc._cron_check = 0.0
+            svc._maybe_fire_cron()
+            swept = sch.load_jobs(reg_path)[0]
+            check("c1 a3: fire leg sweeps catch-up-off before due math",
+                  fake.sends == [] and swept["last_fired"] > clock[0] - 7600,
+                  str(swept))
+    finally:
+        if saved_tok is None:
+            _os.environ.pop(POLL_BOT_ENV, None)
+        else:
+            _os.environ[POLL_BOT_ENV] = saved_tok
+        if saved_wd is None:
+            _os.environ.pop("MYCORE_WD_CHAT", None)
+        else:
+            _os.environ["MYCORE_WD_CHAT"] = saved_wd
+
+
+def _err(res: str) -> bool:
+    """Helper for control legs: a tool refusal arrives as `ERROR: ...`."""
+    return isinstance(res, str) and res.startswith("ERROR:")
+
+
+def test_rewind_fork() -> None:
+    """Car C1 (A-2): message-level rewind/fork — console faces, the session
+    primitives, the /api/chat dispatch, and the TG /rewind minimal face.
+    Locks: chat_history carries ABSOLUTE message ids; rewind drops the
+    selected USER row + tail non-destructively (pre-rewind transcript lands
+    in archive/, crash-safe order); fork snapshots messages[:id+1] into a NEW
+    session and leaves the live file byte-identical; role/range/type gates
+    answer 400/404 honestly; the TG command's reply form matches from the
+    end, the count form counts VISIBLE rows only, and a rewind that would
+    empty the chat points at /reset. Offline: temp sessions dir, module
+    surgery on ws.chat_sessions_dir, fake transport for the service leg."""
+    import io as _io
+    from mycore.service import ChatService
+    from mycore.tg import POLL_BOT_ENV
+    from mycore.session import (Session, read_head, session_file,
+                                write_session_file)
+    from web import server as ws
+    import os as _os
+
+    def seed(path: Path) -> None:
+        """5 rows in REAL session shape: user -> assistant(tool_calls) ->
+        tool -> assistant final -> user. Visible rows (what history renders
+        and /rewind counts) = 0, 1 (has text), 3, 4 — tool rows never are."""
+        path.parent.mkdir(parents=True, exist_ok=True)
+        s = Session.create(path, meta={"model": "m"})
+        s.append({"role": "user", "content": "q one"})
+        s.append({"role": "assistant", "content": "a one",
+                  "tool_calls": [{"id": "call_1", "type": "function",
+                                  "function": {"name": "peek",
+                                               "arguments": "{}"}}]})
+        s.append({"role": "tool", "content": "tool row",
+                  "tool_call_id": "call_1"})
+        s.append({"role": "assistant", "content": "a two"})
+        s.append({"role": "user", "content": "q three long enough text"})
+
+    # ---------------- session primitives ---------------------------------
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "web.jsonl"
+        seed(p)
+        meta, head = read_head(p, 3)
+        check("c1 a2: read_head keeps the prefix + meta",
+              len(head) == 3 and head[0]["content"] == "q one"
+              and meta.get("model") == "m", str([m["content"] for m in head]))
+        for bad in (-1, 6, 99, True, "2"):
+            try:
+                read_head(p, bad)
+                check(f"c1 a2: read_head refuses keep={bad!r}", False, "accepted")
+            except ValueError:
+                check(f"c1 a2: read_head refuses keep={bad!r}", True)
+            except Exception as e:  # noqa: BLE001
+                check(f"c1 a2: read_head refuses keep={bad!r}", False,
+                      type(e).__name__)
+        q = Path(td) / "copy.jsonl"
+        write_session_file(q, meta, head)
+        s2 = Session(q)
+        check("c1 a2: write_session_file round-trips meta + messages",
+              [m["content"] for m in s2.load()] == ["q one", "a one", "tool row"]
+              and s2.meta().get("model") == "m",
+              str([m["content"] for m in s2.load()]))
+
+    # ---------------- console faces (module surgery) ---------------------
+    saved = {"dirs": ws.chat_sessions_dir}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            sdir = Path(td) / "sessions"
+            ws.chat_sessions_dir = lambda: sdir  # type: ignore[assignment]
+            active = ws.chat_session_path()
+
+            # history ids are absolute indices into the file
+            seed(active)
+            hist = ws.chat_history()
+            ids = [m["id"] for m in hist["messages"]]
+            check("c1 a2: chat_history carries absolute ids (tool rows consume one)",
+                  ids == [0, 1, 3, 4], str(ids))
+            check("c1 a2: chat_history count stays message count",
+                  hist["count"] == 4, str(hist["count"]))
+
+            # --- rewind gates ---
+            for bad, code, why in (("x", 400, "non-int id"),
+                                   (True, 400, "bool id"),
+                                   (None, 400, "null id"),
+                                   (99, 404, "out of range"),
+                                   (-1, 404, "negative id")):
+                c, out = ws.rewind_chat_session(bad)
+                check(f"c1 a2: rewind {why} -> {code}", c == code,
+                      f"{c} {str(out)[:80]}")
+            c, out = ws.rewind_chat_session(1)      # assistant row
+            check("c1 a2: rewind an assistant row -> 400 (fork instead)",
+                  c == 400 and "fork" in str(out.get("details")), str(out))
+            check("c1 a2: refused rewinds leave the session byte-identical",
+                  Session(active).load()[0]["content"] == "q one"
+                  and len(Session(active).load()) == 5, "session changed")
+
+            # --- rewind happy path: drop id=4 (last user row) + tail ---
+            before = active.read_bytes()
+            c, out = ws.rewind_chat_session(4)
+            after = Session(active).load()
+            arch_dir = sdir / "archive"
+            archived = list(arch_dir.glob("web.*.jsonl")) if arch_dir.is_dir() else []
+            check("c1 a2: rewind ok -> 200 + dropped count",
+                  c == 200 and out.get("ok") is True and out.get("dropped") == 1,
+                  f"{c} {out}")
+            check("c1 a2: rewind truncates to the prefix",
+                  [m["content"] for m in after] ==
+                  ["q one", "a one", "tool row", "a two"],
+                  str([m["content"] for m in after]))
+            check("c1 a2: pre-rewind transcript survives in archive/ (non-destructive)",
+                  len(archived) == 1 and archived[0].read_bytes() == before,
+                  str([a.name for a in archived]))
+            check("c1 a2: meta survives the rewind",
+                  Session(active).meta().get("model") == "m")
+
+            # --- fork: id=1 (assistant row) -> messages[:2], live untouched ---
+            live_before = active.read_bytes()
+            c, out = ws.fork_chat_session(1)
+            check("c1 a2: fork ok -> 200 + new sid + kept count",
+                  c == 200 and out.get("ok") is True and out.get("kept") == 2
+                  and str(out.get("id", "")).startswith("web.fork."), str(out))
+            fork_sid = str(out.get("id", ""))
+            check("c1 a2: fork leaves the live session byte-identical",
+                  active.read_bytes() == live_before, "live session changed")
+            fpath = session_file(sdir, fork_sid)
+            check("c1 a2: fork file holds messages[:id+1] incl. the anchor",
+                  [m["content"] for m in Session(fpath).load()] ==
+                  ["q one", "a one"],
+                  str([m["content"] for m in Session(fpath).load()]))
+            c, out = ws.fork_chat_session(99)
+            check("c1 a2: fork out of range -> 404", c == 404, str(out))
+            c, out = ws.fork_chat_session("x")
+            check("c1 a2: fork non-int -> 400", c == 400, str(out))
+            # same-second collision: a second fork of the same id gets a
+            # distinct sid (the collision counter), never an overwrite
+            c2, out2 = ws.fork_chat_session(1)
+            check("c1 a2: same-second fork collision -> distinct sid",
+                  c2 == 200 and out2.get("id") != fork_sid,
+                  f"{fork_sid} vs {out2.get('id')}")
+
+            # --- /api/chat dispatch: rewind/fork ride the action gate -----
+            saved_env = {"set": _os.environ.get("AIDOG_MC_STATE")}
+            _os.environ["AIDOG_MC_STATE"] = td     # state root for the token
+            saved_set = ws.SETTINGS_FILE
+            saved_sec = ws.SECRETS
+            ws.SETTINGS_FILE = Path(td) / "settings.json"
+            ws.SETTINGS_FILE.write_text("{}", encoding="utf-8")
+            ws.SECRETS = Path(td) / "secrets.env"
+            tok = "a2-token-0123456789abcdef"
+            ws.SECRETS.write_text(f"WEB_TOKEN={tok}\n", encoding="utf-8")
+
+            def call(doc, bearer=tok):
+                h = ws.Handler.__new__(ws.Handler)
+                raw = json.dumps(doc).encode()
+                h.headers = {"Content-Length": str(len(raw))}
+                if bearer:
+                    h.headers["Authorization"] = f"Bearer {bearer}"
+                h.rfile = _io.BytesIO(raw)
+                h.path = "/api/chat"
+                box: dict = {}
+                h._json = lambda obj, code=200: box.setdefault("res", (code, obj))
+                h._send = lambda code, body, ctype: box.setdefault(
+                    "res", (code, (body, ctype)))
+                h._sse_start = lambda: None
+                h._sse = lambda ev, data: True
+                h._handle_chat()
+                return box.get("res")
+
+            try:
+                r = call({"action": "rewind", "id": "nope"})
+                check("c1 a2: POST rewind non-int id -> 400",
+                      r is not None and r[0] == 400, str(r))
+                r = call({"action": "rewind", "id": 99})
+                check("c1 a2: POST rewind unknown id -> 404",
+                      r is not None and r[0] == 404, str(r))
+                r = call({"action": "fork", "id": 1})
+                check("c1 a2: POST fork -> 200 (dispatch before text gate)",
+                      r is not None and r[0] == 200
+                      and r[1].get("ok") is True, str(r))
+                r = call({"action": "rewind"}, bearer=None)
+                check("c1 a2: POST rewind without bearer -> 401",
+                      r is not None and r[0] == 401, str(r))
+                r = call({"action": "nope"})
+                check("c1 a2: unknown action still hits the text gate -> 400",
+                      r is not None and r[0] == 400, str(r))
+            finally:
+                ws.SETTINGS_FILE = saved_set
+                ws.SECRETS = saved_sec
+                if saved_env["set"] is None:
+                    _os.environ.pop("AIDOG_MC_STATE", None)
+                else:
+                    _os.environ["AIDOG_MC_STATE"] = saved_env["set"]
+    finally:
+        ws.chat_sessions_dir = saved["dirs"]  # type: ignore[assignment]
+
+    # ---------------- TG /rewind minimal face ----------------------------
+    saved_tok = _os.environ.get(POLL_BOT_ENV)
+    saved_wd = _os.environ.get("MYCORE_WD_CHAT")
+    _os.environ[POLL_BOT_ENV] = "a2-bot-TEST-token"
+    _os.environ.pop("MYCORE_WD_CHAT", None)
+    try:
+        fake = FakeTgTransport()
+        with tempfile.TemporaryDirectory() as td:
+            svc = ChatService(Path(td), frozenset({111}), transport=fake,
+                              chat=lambda messages=None, tools=None, **kw:
+                              fake_response(text="pong"),
+                              now=lambda: 0.0)
+            reg_path = Path(td) / "sessions" / "424242.jsonl"
+
+            def cmd(text, uid=111, upd=1, reply_text=None):
+                before = len(fake.sends)
+                svc.handle_update(mk_update(upd, uid, 424242, text,
+                                            reply_text=reply_text))
+                return fake.sends[before][1] if len(fake.sends) > before \
+                    else None
+
+            out = cmd("/rewind")
+            check("c1 a2: /rewind on an empty chat is honest",
+                  out is not None and "nothing to rewind" in out, str(out))
+            seed(reg_path)
+            out = cmd("/rewind banana")
+            check("c1 a2: /rewind bad count -> usage",
+                  out is not None and "/rewind <n>" in out, str(out))
+            out = cmd("/rewind 9")
+            check("c1 a2: /rewind n covering the chat -> /reset pointer",
+                  out is not None and "/reset" in out, str(out))
+            out = cmd("/rewind 2")
+            msgs = Session(reg_path).load()
+            check("c1 a2: /rewind 2 drops the last 2 VISIBLE rows, keeping "
+                  "the tool row its kept assistant called",
+                  out is not None and "2 message" in out
+                  and [m["content"] for m in msgs] ==
+                  ["q one", "a one", "tool row"],
+                  f"out={out} msgs={[m['content'] for m in msgs]}")
+            check("c1 a2: TG rewind archives the pre-rewind transcript",
+                  list((Path(td) / "sessions" / "archive").glob("424242.*.jsonl"))
+                  and Session(list((Path(td) / "sessions" / "archive")
+                                   .glob("424242.*.jsonl"))[0]).load()[0]
+                  ["content"] == "q one", "archive missing or wrong")
+            # reply form: match from the end by content
+            out = cmd("/rewind", reply_text="a one")
+            msgs = Session(reg_path).load()
+            check("c1 a2: /rewind as a reply drops the target + tail",
+                  out is not None and "dropped" in out
+                  and [m["content"] for m in msgs] == ["q one"],
+                  f"out={out} msgs={[m['content'] for m in msgs]}")
+            out = cmd("/rewind", reply_text="not in history anymore")
+            check("c1 a2: /rewind reply with no match is honest",
+                  out is not None and "not in this chat" in out, str(out))
+            check("c1 a2: /rewind is a published bot command",
+                  "rewind" in __import__("mycore.service",
+                                         fromlist=["BOT_COMMANDS"]).BOT_COMMANDS)
+    finally:
+        if saved_tok is None:
+            _os.environ.pop(POLL_BOT_ENV, None)
+        else:
+            _os.environ[POLL_BOT_ENV] = saved_tok
+        if saved_wd is None:
+            _os.environ.pop("MYCORE_WD_CHAT", None)
+        else:
+            _os.environ["MYCORE_WD_CHAT"] = saved_wd
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -17949,6 +18675,9 @@ def main() -> int:
         test_ledger,
         test_agent_plan,
         test_secrets_store,
+        test_protected_writes,
+        test_cron_controls,
+        test_rewind_fork,
     ]
     rows = []
     for fn in suites:

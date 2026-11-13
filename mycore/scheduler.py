@@ -13,7 +13,8 @@ Entry points (dual-driven, same registry):
   * model    the `cron` tool (build_registry): the model translates plain
              speech ("remind me every day at 8") into a spec string, so the
              natural-language surface costs zero parsing code here.
-  * ops      python3 -m mycore.scheduler --list|--add|--del [--json]
+  * ops      python3 -m mycore.scheduler --list|--add|--del
+             |--pause|--resume|--run|--catchup [--json]
 
 Schedule spec (one grammar for all entries; Beijing time, fixed +08:00,
 no DST — same convention as mycore.evolution):
@@ -41,8 +42,45 @@ evolution cron leg's philosophy applied per job):
               (walking back at most 7 days).
     once      now >= at and not done -> fires exactly once, then done=true.
 
-Execution order in the due leg: persist the mark FIRST, then execute —
-a crash mid-fire can lose one delivery but never duplicates it.
+Per-job controls (car C1, A-3 — one grammar, four entries: /cron, the
+model `cron` tool, python3 -m mycore.scheduler, POST /api/cron):
+    paused        bool — is_due never fires it (run-now still executes:
+                  an explicit human action is not an automatic fire).
+    catchup       "on" (default, the behavior above) | "off" — a window
+                  that expired more than CATCHUP_GRACE_SEC ago is SKIPPED
+                  instead of fired late: is_due refuses it and
+                  catchup_sweep() advances the interval anchor (or marks a
+                  missed one-shot done+missed) so the job keeps scheduling
+                  the NEXT window instead of dying or bursting. Daily /
+                  weekly need no mutation — their occurrence moves forward
+                  by itself. Grace covers normal tick latency (60 s cadence
+                  + slack); with catch-up off, a sub-grace interval job
+                  still fires on its current window (documented).
+    run_requested_at  epoch — a manual run queued by any entry point. The
+                  service fire leg executes it through the SAME delivery
+                  path as a scheduled fire, BEFORE due math: the window is
+                  consumed (mark_fired) only when it had already arrived
+                  (scheduler.window_due), so an early run never eats a
+                  future one-shot (upstream: "manual run does not consume
+                  one-shot") and a run of a due job replaces the tick's
+                  fire instead of doubling it. kind=message runs always
+                  execute (a delivery, no tokens — pause never blocks an
+                  explicit human send); kind=prompt runs pass the SAME gate
+                  as any new turn (pause + budget) and stay queued while it
+                  holds. The TG /cron run command nudges the fire leg
+                  immediately (same process); console / CLI / model-tool
+                  runs land as the flag and fire at the next 60 s tick.
+    missed        bool — set by catchup_sweep for a skipped one-shot
+                  (displayed "(missed)" instead of "(done)").
+
+There is no in-flight cancel: a fire is one synchronous delivery or one
+model turn inside the poll loop — no long-running job process exists to
+stop. `paused` holds the NEXT fire; an executing fire completes (bounded
+by the turn's own timeout). Documented honestly, never pretended.
+
+Execution order in the due leg: sweep stale catch-up-off windows, run any
+queued manual request, then persist the mark FIRST for scheduled fires, then
+execute — a crash mid-fire can lose one delivery but never duplicates it.
 
 Delivery (why the notebook says "MYCORE_WD_CHAT unset -> log, no error"):
     job.origin as int (the chat that created it)   -> _send
@@ -67,6 +105,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import sys
@@ -88,6 +127,10 @@ MAX_JOBS = 50
 MAX_TEXT = 4000
 MAX_NAME = 64                      # display label for a console-created job
 MAX_INTERVAL_MIN = 10080                 # 7 days
+# Car C1 (A-3): catch-up OFF skips a window that expired this long ago
+# (seconds). 300 = 5x the 60 s fire cadence — normal operation always fires
+# inside it; only real downtime / a long hold trips the skip.
+CATCHUP_GRACE_SEC = 300
 
 # Job-name grammar (console create; ONE rule for every entry point): 1..64
 # visible chars, no control characters and no '/'. The '/' ban is a payload
@@ -230,8 +273,10 @@ def occurrence(job: dict, now: float) -> float | None:
 
 
 # ------------------------------------------------------------------- due ----
-def is_due(job: dict, now: float) -> bool:
-    """True when this job's window has arrived and not yet been taken."""
+def window_due(job: dict, now: float) -> bool:
+    """Raw schedule math: the window has arrived and the job is not done.
+    Ignores `paused` and the catch-up grace — is_due layers those on top;
+    a manual run uses this to decide whether it consumes the window."""
     if not isinstance(job, dict) or job.get("done"):
         return False
     typ = job.get("type")
@@ -250,6 +295,85 @@ def is_due(job: dict, now: float) -> bool:
     anchor = max(float(job.get("last_fired") or 0),
                  float(job.get("created_at") or 0))
     return anchor < occ
+
+
+def _late_by(job: dict, now: float) -> float | None:
+    """Seconds past the window arrival (>= 0 once due); None = no window."""
+    typ = job.get("type")
+    if typ == "interval":
+        try:
+            minutes = int(job.get("minutes"))
+        except (ValueError, TypeError):
+            return None
+        base = job.get("last_fired") or job.get("created_at") or 0
+        return now - (float(base) + minutes * 60)
+    occ = occurrence(job, now)
+    return None if occ is None else now - occ
+
+
+def is_due(job: dict, now: float) -> bool:
+    """True when this job's window has arrived and not yet been taken.
+    Car C1 (A-3): a paused job never fires; catch-up OFF only fires within
+    CATCHUP_GRACE_SEC of the window arrival (stale windows are skipped —
+    catchup_sweep advances the anchor so the job keeps scheduling)."""
+    if not window_due(job, now):
+        return False
+    if job.get("paused"):
+        return False
+    if job.get("catchup") == "off":
+        late = _late_by(job, now)
+        if late is not None and late > CATCHUP_GRACE_SEC:
+            return False
+    return True
+
+
+def catchup_sweep(jobs: list[dict], now: float) -> bool:
+    """Catch-up OFF bookkeeping (car C1 A-3): skip windows that expired
+    beyond CATCHUP_GRACE_SEC, so a missed window is DROPPED instead of
+    fired late. Mutates in place; returns True when anything changed (the
+    caller persists). catch-up ON jobs are never touched (their one late
+    fire is the documented default).
+
+    interval : advance the anchor past every stale window in O(1) — without
+               this the job would either never fire again (the grace check
+               in is_due) or burst every missed window at once.
+    once     : a missed one-shot becomes done + missed (honest display —
+               it will never fire).
+    daily/weekly: no mutation — the occurrence moves forward by itself and
+               is_due's grace check skips today's stale window.
+    Paused jobs are swept too: with catch-up OFF, windows that pass while
+    held are skipped by definition (resume fires only the NEXT window)."""
+    changed = False
+    for job in jobs:
+        if not isinstance(job, dict) or job.get("done"):
+            continue
+        if job.get("catchup") != "off":
+            continue
+        typ = job.get("type")
+        if typ == "interval":
+            try:
+                minutes = int(job.get("minutes"))
+            except (ValueError, TypeError):
+                continue
+            if minutes <= 0:
+                continue
+            step = minutes * 60
+            base = float(job.get("last_fired") or job.get("created_at") or 0)
+            # max j >= 1 with base + j*step + GRACE < now  (O(1), ceil so an
+            # exact deadline+grace boundary stays INSIDE the grace window)
+            j = math.ceil((now - CATCHUP_GRACE_SEC - base) / step) - 1
+            if j >= 1:
+                job["last_fired"] = base + j * step
+                changed = True
+        elif typ == "once":
+            at = _at_epoch(job.get("at") or "")
+            if at is None:
+                continue
+            if now > at + CATCHUP_GRACE_SEC:
+                job["done"] = True
+                job["missed"] = True
+                changed = True
+    return changed
 
 
 def next_fire(job: dict, now: float) -> float | None:
@@ -424,6 +548,70 @@ def delete_job(jobs: list[dict], job_id: str) -> bool:
     return False
 
 
+# ---------------------------------------------------- per-job controls ----
+# Car C1 (A-3): one registry, four entries (/cron, the model `cron` tool,
+# the ops CLI, POST /api/cron) — these four helpers are the ONLY mutation
+# each entry calls, so the grammar can never drift between them.
+
+def get_job(jobs: list[dict], job_id: str) -> dict | None:
+    """Find by id; None when absent (every entry maps that to its own
+    honest not-found line — the id is echoed, never a path)."""
+    for j in jobs:
+        if j.get("id") == job_id:
+            return j
+    return None
+
+
+def set_paused(jobs: list[dict], job_id: str, paused: bool) -> bool:
+    """Pause/resume one job (mutates); False when nothing matched.
+    A paused job never fires automatically; run-now still executes it."""
+    job = get_job(jobs, job_id)
+    if job is None:
+        return False
+    if paused:
+        job["paused"] = True
+    else:
+        job.pop("paused", None)
+    return True
+
+
+def set_catchup(jobs: list[dict], job_id: str, value: str) -> bool:
+    """Per-job missed-window policy: 'on' (default behavior) | 'off'
+    (skip windows stale beyond CATCHUP_GRACE_SEC). Mutates; False when
+    nothing matched or the value is not on/off (fail-closed)."""
+    if value not in ("on", "off"):
+        return False
+    job = get_job(jobs, job_id)
+    if job is None:
+        return False
+    if value == "off":
+        job["catchup"] = "off"
+    else:
+        job.pop("catchup", None)
+    return True
+
+
+def request_run(jobs: list[dict], job_id: str, now: float | None = None) -> bool:
+    """Queue a manual run (mutates); False when nothing matched.
+    Sets `run_requested_at` — the service fire leg executes it through the
+    same delivery path as a scheduled fire (window consumed only when it
+    had already arrived, see module doc). The console/CLI answer honestly:
+    queued, fires at the next 60 s tick; the TG command nudges the leg
+    in-process for an immediate run."""
+    job = get_job(jobs, job_id)
+    if job is None:
+        return False
+    job["run_requested_at"] = time.time() if now is None else now
+    return True
+
+
+def take_run_requests(jobs: list[dict]) -> list[dict]:
+    """Jobs with a queued manual run, registry order (read-only view —
+    the fire leg clears the flag after executing)."""
+    return [j for j in jobs if isinstance(j, dict)
+            and j.get("run_requested_at") is not None]
+
+
 def due_jobs(jobs: list[dict], now: float) -> list[dict]:
     """Jobs whose window has arrived, in registry order."""
     return [j for j in jobs if is_due(j, now)]
@@ -469,7 +657,8 @@ def _parse_origin(value: str) -> int | str:
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(
         prog="mycore.scheduler",
-        description="natural-language cron: job registry (list/add/del)")
+        description="natural-language cron: job registry "
+                    "(list/add/del/pause/resume/run/catchup)")
     ap.add_argument("--list", action="store_true", help="list jobs (default)")
     ap.add_argument("--add", metavar="SPEC", help="create a job from a spec")
     ap.add_argument("--text", default="", help="job text (with --add)")
@@ -478,10 +667,62 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--origin", type=_parse_origin, default=None,
                     help="origin chat id or route:target channel endpoint")
     ap.add_argument("--del", dest="delete", metavar="ID", help="delete a job")
+    # Car C1 (A-3): per-job controls — same registry helpers the /cron
+    # command, the model tool and POST /api/cron call (one grammar).
+    ap.add_argument("--pause", metavar="ID", help="pause a job (no auto fire)")
+    ap.add_argument("--resume", metavar="ID", help="resume a paused job")
+    ap.add_argument("--run", dest="run_now", metavar="ID",
+                    help="queue a manual run (fires at the service's next "
+                         "tick; the schedule is not consumed early)")
+    ap.add_argument("--catchup", nargs=2, metavar=("ID", "on|off"),
+                    help="set the missed-window policy for a job")
     ap.add_argument("--json", action="store_true", help="JSON output")
     args = ap.parse_args(argv)
 
     path = default_jobs_path()
+    # --- per-job control ops (car C1) share one load-modify-save shape ---
+    ctrl = None
+    if args.pause:
+        ctrl = (args.pause, "pause", None)
+    elif args.resume:
+        ctrl = (args.resume, "resume", None)
+    elif args.run_now:
+        ctrl = (args.run_now, "run", None)
+    elif args.catchup:
+        ctrl = (args.catchup[0], "catchup", args.catchup[1])
+    if ctrl:
+        job_id, op, value = ctrl
+        try:
+            jobs = load_jobs(path)
+            if op == "pause":
+                ok = set_paused(jobs, job_id, True)
+            elif op == "resume":
+                ok = set_paused(jobs, job_id, False)
+            elif op == "run":
+                ok = request_run(jobs, job_id)
+            else:
+                ok = set_catchup(jobs, job_id, value or "")
+            if ok:
+                save_jobs(path, jobs)
+        except OSError as e:
+            print(f"{op} failed: {type(e).__name__}", file=sys.stderr)
+            return 1
+        if not ok:
+            if op == "catchup" and value not in ("on", "off"):
+                print("catchup failed: expected on|off", file=sys.stderr)
+            else:
+                print(f"no job with id {job_id}", file=sys.stderr)
+            return 1
+        if op == "pause":
+            print(f"paused {job_id} — no automatic fires; --run still works")
+        elif op == "resume":
+            print(f"resumed {job_id}")
+        elif op == "run":
+            print(f"queued {job_id} — runs at the service's next tick "
+                  "(the schedule is unchanged)")
+        else:
+            print(f"catchup {value} set for {job_id}")
+        return 0
     if args.add:
         try:
             jobs = load_jobs(path)
@@ -523,6 +764,10 @@ def main(argv: list[str] | None = None) -> int:
               "type": j.get("type"), "text": j.get("text"),
               "origin": j.get("origin"), "source": j.get("source"),
               "done": bool(j.get("done")),
+              "paused": bool(j.get("paused")),
+              "catchup": "off" if j.get("catchup") == "off" else "on",
+              "missed": bool(j.get("missed")),
+              "run_requested": j.get("run_requested_at") is not None,
               "next": fmt_beijing(next_fire(j, now)),
               "due": is_due(j, now)} for j in jobs],
             ensure_ascii=False, indent=2))
@@ -530,7 +775,12 @@ def main(argv: list[str] | None = None) -> int:
         if not jobs:
             print("cron: no jobs")
         for j in jobs:
-            state = " (done)" if j.get("done") else ""
+            state = " (missed)" if j.get("missed") else \
+                    " (done)" if j.get("done") else ""
+            if j.get("paused"):
+                state += " (paused)"
+            if j.get("catchup") == "off":
+                state += " (catchup off)"
             print(f"{j['id']} · {describe(j)} · {j.get('kind')} · "
                   f"next {fmt_beijing(next_fire(j, now))}{state} · "
                   f"{j.get('text', '')[:40]}")

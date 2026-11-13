@@ -407,7 +407,8 @@ from mycore.model import ChatClient  # noqa: E402
 from mycore.service import (state_dir as mycore_state_dir,  # noqa: E402
                             BOT_COMMANDS)
 from mycore.session import (Session, export_session, list_sessions,  # noqa: E402
-                             prune_old, session_file)
+                             prune_old, read_head, session_file,
+                             write_session_file)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
                           resolve_disabled_tools, outbound_probe,
                           outbound_validate)
@@ -4473,17 +4474,26 @@ def chat_history(limit: int = 200) -> dict:
     """Read-only session view for GET /api/chat/history: user/assistant turns
     only (system constitution and tool payloads never leave the server),
     content capped at CHAT_HISTORY_CAP. Loopback read, no bearer needed.
-    `context` (X14) rides along: session-level usage counters, never content."""
+    `context` (X14) rides along: session-level usage counters, never content.
+    Car C1 (A-2): every message carries `id` — its ABSOLUTE index in the
+    session file (Session.load() order, append-only = stable), the handle
+    POST /api/chat {action:'rewind'|'fork'} resolves. Ids are only as fresh
+    as this read: a clear/resume/fork renumbers, so the client re-reads
+    history after any of them (it already does)."""
     sess = Session(chat_session_path())
+    full = sess.load()
+    start = max(0, len(full) - limit)
     out = []
-    for m in sess.load()[-limit:]:
+    for idx in range(start, len(full)):
+        m = full[idx]
         role = m.get("role")
         if role not in ("user", "assistant"):
             continue
         content = m.get("content")
         if not isinstance(content, str):
             continue
-        out.append({"role": role, "content": content[:CHAT_HISTORY_CAP]})
+        out.append({"id": idx, "role": role,
+                    "content": content[:CHAT_HISTORY_CAP]})
     return {"messages": out, "count": len(out),
             "context": chat_context_usage()}
 
@@ -4662,6 +4672,149 @@ def resume_chat_session(sid: str) -> tuple[int, dict]:
     if leftover:
         payload["leftover_source"] = True
     return 200, payload
+
+
+# ------------------------------------- car C1 (A-2): rewind / fork ----------
+def rewind_chat_session(msg_id: object) -> tuple[int, dict]:
+    """POST /api/chat {action:'rewind', id} — message-level edit-resend.
+    Truncates the LIVE console session to `messages[:id]` (the selected
+    USER message and everything after it are dropped — the client then
+    sends the edited text as a normal turn). Returns (http_code, payload).
+
+    Crash-safe in the X20 order: (1) write the prefix to an entropy tmp IN
+    THE SESSIONS ROOT (nothing committed yet), (2) rotate the current live
+    session into archive/ — the pre-rewind transcript survives byte-identical
+    (non-destructive: the dropped tail is recoverable from archive/), (3)
+    atomic rename onto the active path; a rename failure restores the
+    archived copy first, so the live path always ends whole. Validation:
+    `id` must be an int index (bool rejected) into the CURRENT message list,
+    pointing at a `user` row (only the user's own question is re-sendable —
+    an assistant anchor answers 400; use `fork` there). 400 bad id / not a
+    user row · 404 out of range. ONE sanitized stderr audit line (index
+    only, never content), like every other /api/chat action."""
+    audit_id = "-"
+    if isinstance(msg_id, bool) or not isinstance(msg_id, int):
+        sys.stderr.write("chat rewind id=- result=bad_id\n")
+        return 400, {"error": "validation failed",
+                     "details": ["id must be an integer message index"]}
+    audit_id = str(msg_id)
+
+    def _audit(result: str) -> None:
+        sys.stderr.write(f"chat rewind id={audit_id} result={result}\n")
+
+    root = chat_sessions_dir()
+    active = chat_session_path()
+    try:
+        sess = Session(active)
+        all_msgs = sess.load()
+        meta = sess.meta()
+    except OSError:
+        _audit("read_failed")
+        return 404, {"error": "not found",
+                     "details": ["no live session to rewind"]}
+    if not 0 <= msg_id < len(all_msgs):
+        _audit("bad_range")
+        return 404, {"error": "not found",
+                     "details": ["message id out of range for this session"]}
+    if all_msgs[msg_id].get("role") != "user":
+        _audit("not_user")
+        return 400, {"error": "validation failed",
+                     "details": ["only a user message can be rewound "
+                                 "(use fork to branch from any message)"]}
+    msgs = all_msgs[:msg_id]                          # drop target + tail
+    stamp = int(time.time())
+    tmp = root / f"{CHAT_SESSION_NAME}.rewind-{stamp}." \
+               f"{os.urandom(4).hex()}.jsonl.tmp"
+    try:
+        write_session_file(tmp, meta, msgs)          # 1. prefix, not live yet
+    except OSError as e:  # noqa: BLE001 — type name only
+        _audit(f"tmp_failed:{type(e).__name__}")
+        return 500, {"error": "rewind failed",
+                     "details": [f"prefix write failed ({type(e).__name__})"]}
+    archived: Path | None = None
+    if active.is_file():
+        try:
+            archived = _rotate_active_session()      # 2. keep the old tail
+        except OSError as e:  # noqa: BLE001 — type name only
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+            _audit(f"archive_failed:{type(e).__name__}")
+            return 500, {"error": "rewind failed",
+                         "details": [f"archive failed ({type(e).__name__})"]}
+    try:
+        os.replace(str(tmp), str(active))            # 3. commit
+    except OSError as e:  # noqa: BLE001 — type name only
+        restored = True
+        if archived is not None:
+            try:
+                shutil.move(str(archived), str(active))
+                archived = None
+            except OSError:
+                restored = False
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        _audit(f"rename_failed:{type(e).__name__}:{int(restored)}")
+        return 500, {"error": "rewind failed",
+                     "details": ["rename failed — the live session was "
+                                 + ("restored" if restored
+                                    else "left in archive/")]}
+    _audit("ok")
+    return 200, {"ok": True, "id": msg_id,
+                 "dropped": len(all_msgs) - len(msgs),
+                 "archived": archived is not None}
+
+
+def fork_chat_session(msg_id: object) -> tuple[int, dict]:
+    """POST /api/chat {action:'fork', id} — branch INTO A NEW SESSION.
+    Creates `<stem>.fork.<stamp>.jsonl` in the sessions root holding
+    `messages[:id+1]` (the selected message INCLUDED — one rule for both
+    roles: "everything up to and including this one"), the LIVE session
+    byte-untouched (no rotation, no switch — the fork appears in
+    GET /api/sessions and the client switches via the existing X20 resume
+    when the user chooses to; that switch archives the original exactly
+    like any session open). Crash-safe: entropy tmp + atomic rename, same
+    directory. Validation mirrors rewind (int index, in range) but accepts
+    ANY role. Returns {ok, id, kept} — `id` is the fork's session id."""
+    if isinstance(msg_id, bool) or not isinstance(msg_id, int):
+        sys.stderr.write("chat fork id=- result=bad_id\n")
+        return 400, {"error": "validation failed",
+                     "details": ["id must be an integer message index"]}
+    audit_id = str(msg_id)
+
+    def _audit(result: str) -> None:
+        sys.stderr.write(f"chat fork id={audit_id} result={result}\n")
+
+    root = chat_sessions_dir()
+    try:
+        meta, msgs = read_head(chat_session_path(), msg_id + 1)
+    except ValueError:
+        _audit("bad_range")
+        return 404, {"error": "not found",
+                     "details": ["message id out of range for this session"]}
+    except OSError:
+        _audit("read_failed")
+        return 404, {"error": "not found",
+                     "details": ["no live session to fork"]}
+    stamp = int(time.time())
+    sid = f"{CHAT_SESSION_NAME}.fork.{stamp}"
+    dst = root / f"{sid}.jsonl"
+    n = 0
+    while dst.exists():                              # same-second collisions
+        n += 1
+        sid = f"{CHAT_SESSION_NAME}.fork.{stamp}.{n}"
+        dst = root / f"{sid}.jsonl"
+    try:
+        write_session_file(dst, meta, msgs)          # atomic within root
+    except OSError as e:  # noqa: BLE001 — type name only
+        _audit(f"write_failed:{type(e).__name__}")
+        return 500, {"error": "fork failed",
+                     "details": [f"fork write failed ({type(e).__name__})"]}
+    _audit("ok")
+    return 200, {"ok": True, "id": sid, "kept": len(msgs)}
 
 
 # ------------------------------------------- Wave 6 delta2: X12 auto-prune ---
@@ -5227,7 +5380,8 @@ def cron_row(job: dict, now: float | None = None) -> dict:
     """One display row for GET /api/cron AND the create response — the SAME
     fixed field whitelist for both, so a console-created job and a CLI/NL job
     are indistinguishable in shape (the scheduler's own display fields plus
-    the optional `name` label); no filesystem path can enter the payload by
+    the optional `name` label and the car C1 controls: paused / catchup /
+    missed / run_queued); no filesystem path can enter the payload by
     construction."""
     from mycore import scheduler as _scheduler   # noqa: PLC0415 — lazy import
     now = time.time() if now is None else now
@@ -5244,6 +5398,10 @@ def cron_row(job: dict, now: float | None = None) -> dict:
         "created_at": job.get("created_at"),
         "last_fired": job.get("last_fired"),
         "done": bool(job.get("done")),
+        "paused": bool(job.get("paused")),
+        "catchup": "off" if job.get("catchup") == "off" else "on",
+        "missed": bool(job.get("missed")),
+        "run_queued": job.get("run_requested_at") is not None,
         "due": bool(_scheduler.is_due(job, now)),
         "next": _scheduler.fmt_beijing(_scheduler.next_fire(job, now)),
     }
@@ -6682,6 +6840,49 @@ def cron_create(name: str, schedule: str, prompt: str,
     return 200, {"ok": True, "job": cron_row(job)}
 
 
+def cron_control(action: str, job_id: str,
+                 value: str | None = None) -> tuple[int, dict]:
+    """POST /api/cron {action:'pause'|'resume'|'run'|'catchup', id,
+    value?} — the console leg of the car C1 controls, through the SAME
+    scheduler helpers the /cron command, the model tool and the ops CLI
+    call (one grammar, four entries). pause/resume/catchup mutate the job
+    and answer the updated `cron_row`; `run` queues `run_requested_at` and
+    answers `run_queued:true` — the SERVICE process executes it at its next
+    60 s tick through the one shared fire path (this server never delivers
+    to a chat itself), so the response stays honest about the timing.
+    404 unknown id · 400 a catchup value other than on/off · 500 class-only
+    on a persist failure — mirroring cron_delete."""
+    from mycore import scheduler as _scheduler   # noqa: PLC0415 — lazy import
+    if action == "catchup" and value not in ("on", "off"):
+        return 400, {"error": "validation failed",
+                     "details": ["value must be one of: on | off"]}
+    try:
+        jobs = _scheduler.load_jobs(_cron_jobs_path())
+        if action == "pause":
+            ok = _scheduler.set_paused(jobs, job_id, True)
+        elif action == "resume":
+            ok = _scheduler.set_paused(jobs, job_id, False)
+        elif action == "run":
+            ok = _scheduler.request_run(jobs, job_id)
+        elif action == "catchup":
+            ok = _scheduler.set_catchup(jobs, job_id, value or "")
+        else:                                   # caller filters; belt+braces
+            return 400, {"error": "validation failed",
+                         "details": ["action must be one of: pause | resume | "
+                                     "run | catchup"]}
+        if not ok:
+            return 404, {"error": "unknown job id"}
+        job = _scheduler.get_job(jobs, job_id)
+        _scheduler.save_jobs(_cron_jobs_path(), jobs)
+    except OSError as e:  # noqa: BLE001 — type name only, never a path/value
+        sys.stderr.write(f"cron control failed action={action} "
+                         f"err={type(e).__name__}\n")
+        return 500, {"error": f"persist failed: {type(e).__name__}"}
+    sys.stderr.write(f"cron control ok action={action}\n")
+    return 200, {"ok": True, "job": cron_row(job),
+                 "queued": action == "run"}
+
+
 # ----------------------------------------------------------------- server ----
 
 MIME = {
@@ -7655,10 +7856,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_cron_post(self) -> None:
         """POST /api/cron {action:'del', id} | {action:'create', name,
-        schedule, prompt, kind?} — Bearer gate, then either the CLI `--del`
-        semantics (404 unknown id) or `cron_create` (400 on a bad spec/name/
-        size, 200 + the same row shape GET /api/cron serves). Any other
-        action is refused with the allowed set."""
+        schedule, prompt, kind?} | car C1: {action:'pause'|'resume'|'run',
+        id} and {action:'catchup', id, value:'on'|'off'} — Bearer gate,
+        then either the CLI `--del` semantics (404 unknown id), `cron_create`
+        (400 on a bad spec/name/size, 200 + the same row shape GET /api/cron
+        serves) or `cron_control` (200 + updated row; `run` answers
+        queued:true because the SERVICE fires it at its next tick). Any
+        other action is refused with the allowed set."""
         if not self._require_token():
             return
         doc = self._read_json_body()
@@ -7667,10 +7871,29 @@ class Handler(BaseHTTPRequestHandler):
         action = doc.get("action")
         if action == "create":
             return self._cron_create(doc)
+        if action in ("pause", "resume", "run", "catchup"):
+            job_id = doc.get("id")
+            if not isinstance(job_id, str) or not job_id.strip():
+                return self._json({"error": "validation failed",
+                                   "details": ["id must be a non-empty "
+                                               "string"]}, 400)
+            value = doc.get("value")
+            if action == "catchup" and not isinstance(value, str):
+                return self._json({"error": "validation failed",
+                                   "details": ["value must be one of: "
+                                               "on | off"]}, 400)
+            code, out = cron_control(action, job_id.strip(),
+                                     value.strip() if isinstance(value, str)
+                                     else None)
+            if code != 200:
+                sys.stderr.write(f"cron control refused action={action} "
+                                 f"rc={code}\n")
+            return self._json(out, code)
         if action != "del":
             return self._json({
                 "error": "validation failed",
-                "details": ["action must be one of: create | del"]}, 400)
+                "details": ["action must be one of: create | del | pause | "
+                            "resume | run | catchup"]}, 400)
         job_id = doc.get("id")
         if not isinstance(job_id, str) or not job_id.strip():
             return self._json({"error": "validation failed",
@@ -8542,6 +8765,23 @@ class Handler(BaseHTTPRequestHandler):
                                   400)
             code, payload = resume_chat_session(sid.strip())
             return self._json(payload, code)
+        if doc.get("action") in ("rewind", "fork"):
+            # Car C1 (A-2): message-level rewind/fork — dispatched BEFORE the
+            # text gate like clear/resume (they carry `id`, never `text`).
+            # rewind drops the selected user row + tail (the client then
+            # sends the edited text as a normal turn); fork snapshots
+            # messages[:id+1] into a NEW session, live untouched.
+            mid = doc.get("id")
+            if isinstance(mid, bool) or not isinstance(mid, int):
+                return self._json({"error": "validation failed",
+                                   "details": ["id is required (an integer "
+                                               "message index from GET "
+                                               "/api/chat/history)"]}, 400)
+            if doc.get("action") == "rewind":
+                code, payload = rewind_chat_session(mid)
+            else:
+                code, payload = fork_chat_session(mid)
+            return self._json(payload, code)
         text = doc.get("text")
         if not isinstance(text, str) or not text.strip():
             return self._json({"error": "validation failed",
@@ -8615,6 +8855,10 @@ class Handler(BaseHTTPRequestHandler):
         if not history and not sess.meta():
             sess = Session.create(path, meta={"model": cfg.model})
             history = []
+        # car C1 (A-2): absolute base index of THIS turn's rows in the file —
+        # load() counts every persisted message line (system rows are never
+        # persisted, but counting the raw list keeps the arithmetic honest)
+        base_len = len(history)
         history = [m for m in history if m.get("role") != "system"]
 
         stack = build_system_stack(
@@ -8642,12 +8886,12 @@ class Handler(BaseHTTPRequestHandler):
 
             return self._drive_chat_turn(
                 messages, pre_ids, cfg, image, content, sess, alive,
-                stop_base)
+                stop_base, base_len)
         finally:
             _bump_active_turn(-1)
 
     def _drive_chat_turn(self, messages, pre_ids, cfg, image, content, sess,
-                         alive, stop_base) -> bool:
+                         alive, stop_base, base_len=0) -> bool:
         """The model/observer half of _run_chat_turn (split so the
         active-turn counter in the caller covers the whole turn in a
         finally — a crash must not leave the tail stuck at "working")."""
@@ -8746,11 +8990,27 @@ class Handler(BaseHTTPRequestHandler):
             sess.append_many(delta)
         except OSError as e:  # noqa: BLE001 — stream stays honest, log only
             sys.stderr.write(f"chat session append failed err={type(e).__name__}\n")
+            delta = None                    # rows are NOT in the file — no ids
+        # car C1 (A-2): absolute ids of THIS turn's persisted rows, so the
+        # client can offer edit/fork on the bubbles it just drew without a
+        # refetch. Omitted (null) when the append failed — an id must never
+        # point at a row that is not there.
+        ids = None
+        if delta:
+            found: dict = {}
+            for i, m in enumerate(delta):
+                role = m.get("role")
+                if role == "user" and "user" not in found:
+                    found["user"] = base_len + i
+                elif role == "assistant":
+                    found["assistant"] = base_len + i   # keep the LAST one
+            ids = found or None
         if not alive[0]:
             return False
         return self._sse("done", {"text": res.text, "stop": res.stop,
                                   "iterations": res.iterations,
-                                  "tool_calls": res.tool_calls})
+                                  "tool_calls": res.tool_calls,
+                                  "ids": ids})
 
     # ------------------------------------------------- OpenAI v1 gateway ---
     def _openai_error(self, code: int, message: str, type_: str) -> None:
