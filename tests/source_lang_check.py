@@ -38,6 +38,9 @@ SCAN_SUFFIXES = (".py", ".sh", ".js")
 INLINE_MARKER = "i18n-allow"
 
 # Directory names never scanned (runtime state, caches, vendored blobs).
+# `dist` = build output (electron-builder copies, win-src build trees —
+# gitignored exactly like the rest of this list's entries; car J found the
+# scan walking a Windows build copy).
 # `vendor` = third-party code shipped byte-exact (web/static/vendor/): it is
 # not our source, it carries the upstream's own message tables — which may
 # legitimately hold non-English strings — and the publish leak scan still
@@ -47,7 +50,7 @@ INLINE_MARKER = "i18n-allow"
 # repos and must stay invisible to this lint exactly as .gitignore keeps them
 # out of git; without these entries the lint would walk into them.
 SKIP_DIR_NAMES = {".git", "__pycache__", "node_modules", ".venv", "venv",
-                  "data", "tmp", ".screenshots", ".voice", ".pi",
+                  "data", "tmp", ".screenshots", ".voice", ".pi", "dist",
                   "aidog-internal", "aidog-skills", "aidog-public",
                   "_public_meta", "vendor"}
 # Path prefixes exempt from the scan (relative, POSIX-style).
