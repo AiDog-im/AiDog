@@ -380,12 +380,18 @@ def test_wizard_endpoint_and_boot_yes(t: Path) -> None:
     t2 = make_repo(sub(t, "ep"))
     # endpoint: invalid then change; model: change; boot: y (stub install.sh)
     # — region answer "" keeps global between the slot block and the endpoint
+    # Wrap-up audit W2-01: the attempt ladder now also proves a userinfo
+    # URL is refused with the SAME reason (never the value itself).
+    bad_userinfo = "http://user:pass@example.com/v1"
     stdin = "\n".join([TOK_WEB, TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
-                       "", "ftp://bad-endpoint", TOK_ENDPOINT,
+                       "", "ftp://bad-endpoint", bad_userinfo, TOK_ENDPOINT,
                        TOK_MODEL, "y"]) + "\n"
     rc, out = run(setup_py(t2), [], stdin=stdin, extra_env={"FAKE_RC": "0"})
     st = json.loads((t2 / "web" / "settings.json").read_text(encoding="utf-8"))
     check("invalid endpoint rejected with reason", "base_url: invalid" in out, out[:600])
+    check("userinfo endpoint refused with reason, value never echoed",
+          out.count("base_url: invalid") == 2 and no_leak(out, bad_userinfo),
+          f"n={out.count('base_url: invalid')} {out[:300]}")
     check("endpoint updated + JSON valid", st["mycore"]["base_url"] == TOK_ENDPOINT,
           str(st.get("mycore")))
     check("model updated", st["mycore"]["model"] == TOK_MODEL, str(st.get("mycore")))
@@ -421,6 +427,29 @@ def test_dispatch_flags(t: Path) -> None:
           rc == 2 and (t2 / "secrets.env").is_file(), f"rc={rc}")
     check("dispatcher --yes --no-boot never booted",
           not (t2 / "deploy" / "install.marker").exists())
+
+
+def test_url_userinfo_guard() -> None:
+    """Wrap-up audit W2-01/W4-05 (v0.5.74): the wizard's URL helpers refuse
+    embedded credentials and redact userinfo before any print — in-process
+    unit legs (import aidog_setup directly; no I/O, no fake repo)."""
+    import importlib.util as _ilu
+    spec = _ilu.spec_from_file_location("aidog_setup_urlguard", SETUP)
+    mod = _ilu.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    check("wizard _url_ok accepts a plain https base",
+          mod._url_ok("https://example.com/v1") is True)
+    check("wizard _url_ok refuses userinfo (user:pass@host)",
+          mod._url_ok("http://user:pass@example.com/v1") is False)
+    check("wizard _url_ok refuses a non-URL", mod._url_ok("example.com") is False)
+    check("wizard _url_ok allows @ inside the query only",
+          mod._url_ok("https://example.com/v1?next=http://a@b") is True)
+    red = mod._redact_url("http://user:pass@example.com/v1")
+    check("wizard _redact_url masks userinfo before print",
+          red == "http://***@example.com/v1" and no_leak(red, "user:pass"),
+          red)
+    check("wizard _redact_url leaves a plain URL byte-identical",
+          mod._redact_url("https://example.com/v1") == "https://example.com/v1")
 
 
 def test_local_model_detected_adopt(t: Path) -> None:
@@ -593,6 +622,7 @@ def main() -> int:
         test_wizard_endpoint_and_boot_yes(base)
         test_region_prompt_and_check(base)
         test_dispatch_flags(base)
+        test_url_userinfo_guard()
 
         test_local_model_detected_adopt(base)
         test_local_model_miss_default(base)

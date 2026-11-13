@@ -764,6 +764,18 @@ def test_modeltier() -> None:
         except ValueError:
             pass
     check("tier: invalid specs rejected with ValueError", bad_ok)
+    # wrap-up audit W2-01: userinfo in a persisted URL = credentials in
+    # settings — refused with a chat-safe reason (no value echoed).
+    for spec in ("http://user:pass@a.example/v1", "https://u@b.example/v1"):
+        why = None
+        try:
+            mt.parse_upstreams(spec)
+            ui_ok = False
+        except ValueError as exc:
+            why = str(exc)
+            ui_ok = "credentials" in why and "pass" not in why
+        check(f"tier: userinfo URL refused ({spec.split('@')[0][:12]}...)",
+              ui_ok, (why or "no error raised")[:120])
     try:
         mt.parse_upstreams(",".join(["http://a.example/v1"] * 5))
         cap_ok = False
@@ -2051,18 +2063,18 @@ def test_service() -> None:
                 check("service: /version up to date says so (installed shown)",
                       "0.5.69" in v_ok and "up to date" in v_ok, v_ok[:140])
 
-                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.73")
-                staged({"day": "x", "pending": "0.5.73"})
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.74")
+                staged({"day": "x", "pending": "0.5.74"})
                 svc.handle_update(mk_update(31, 111, 123456789, "/version"))
                 v_up = fake.sends[-1][1]
                 check("service: /version update -> latest + apply command",
-                      "0.5.73" in v_up and "aidog_update.py apply" in v_up,
+                      "0.5.74" in v_up and "aidog_update.py apply" in v_up,
                       v_up[:170])
                 st_after = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: /version consumes the staged notice (no dup)",
                       not st_after.get("pending")
-                      and st_after.get("notified") == "0.5.73",
+                      and st_after.get("notified") == "0.5.74",
                       str(st_after))
 
                 svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", None, fail=True)
@@ -2073,7 +2085,7 @@ def test_service() -> None:
                       and "RuntimeError" in v_err, v_err[:170])
 
                 # daily check: stages once, day-capped, then one-shot attach
-                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.73")
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.74")
                 (state1 / "release_notice.json").unlink(missing_ok=True)
                 svc._maybe_release_check()
                 n1 = fetch_calls["n"]
@@ -2083,28 +2095,28 @@ def test_service() -> None:
                 stg = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: newer release stages exactly one pending notice",
-                      stg.get("pending") == "0.5.73", str(stg))
+                      stg.get("pending") == "0.5.74", str(stg))
 
                 svc.handle_update(mk_update(33, 111, 123456789, "hello again"))
                 note1 = fake.sends[-1][1]
                 check("service: next message carries the release note once",
-                      "0.5.73" in note1 and "pong" in note1, note1[:220])
+                      "0.5.74" in note1 and "pong" in note1, note1[:220])
                 svc.handle_update(mk_update(34, 111, 123456789, "and again"))
                 note2 = fake.sends[-1][1]
                 check("service: the note is one-shot (second message clean)",
                       note2 == "pong", repr(note2))
 
                 # commands never carry the note; the pending survives them
-                staged({"day": "x", "pending": "0.5.73"})
+                staged({"day": "x", "pending": "0.5.74"})
                 svc.handle_update(mk_update(35, 111, 123456789, "/help"))
                 h_txt = fake.sends[-1][1]
                 check("service: commands do not carry the release note",
-                      "/version" in h_txt and "0.5.73" not in h_txt,
+                      "/version" in h_txt and "0.5.74" not in h_txt,
                       h_txt[:90])
                 st_h = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: an unconsumed pending survives a command",
-                      st_h.get("pending") == "0.5.73", str(st_h))
+                      st_h.get("pending") == "0.5.74", str(st_h))
 
                 # already-upgraded guard: pending == VERSION on disk -> cleared
                 ver = (Path(svc.repo) / "VERSION").read_text().strip()
@@ -4434,7 +4446,12 @@ def test_mcp() -> None:
                                    "command": "x", "tools": []}]),
                       "empty allow list drops all?"),
                      ("x" * 5000, "overlong config"),
-                     ('["a\\u0000b"]', "nul")):
+                     ('["a\\u0000b"]', "nul"),
+                     # wrap-up audit W2-01: http transport URL with embedded
+                     # credentials — refused (auth belongs in headers/$SLOT)
+                     (json.dumps([{"name": "a", "transport": "http",
+                                   "url": "http://user:pass@h/mcp"}]),
+                      "userinfo on http url")):
         try:
             mcp.parse_config(bad)
             err = None
@@ -13237,6 +13254,18 @@ def test_model_gateway() -> None:
             pass
     check("gw: 12 invalid structured shapes rejected", not gw_bad,
           str(gw_bad)[:200])
+    # wrap-up audit W2-01: userinfo in a structured endpoint URL is refused.
+    ui_bad = []
+    for raw in ([{"url": "http://user:pass@a.example/v1"}],
+                [{"url": "https://u@b.example/v1"}]):
+        try:
+            gmt.parse_endpoints(raw)
+            ui_bad.append(raw)
+        except ValueError as e:
+            if "credentials" not in str(e):
+                ui_bad.append((raw, str(e)))
+    check("gw: 2 userinfo endpoint URLs rejected", not ui_bad,
+          str(ui_bad)[:200])
     try:
         gmt.parse_endpoints([{"url": "http://a.example/v1",
                               "keys": ["WEB_TOKEN"]}])

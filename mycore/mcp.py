@@ -50,6 +50,7 @@ import shlex
 import subprocess
 import threading
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import deque
 from dataclasses import dataclass, field
@@ -210,6 +211,13 @@ def parse_config(raw: str | None) -> list[ServerConfig]:
                 raise ValueError(f"mcp server '{name}': http needs a url "
                                  "starting with http:// or https:// "
                                  "(max 512 chars, no spaces)")
+            try:
+                _p = urllib.parse.urlsplit(url)
+            except ValueError:
+                _p = None
+            if _p is not None and (_p.username or _p.password):
+                raise ValueError(f"mcp server '{name}': http url must not "
+                                 "embed credentials (use headers with $SLOT)")
             cfg.url = url
         cfg.env = _kv(entry.get("env"), "env", name)
         cfg.headers = _kv(entry.get("headers"), "headers", name)

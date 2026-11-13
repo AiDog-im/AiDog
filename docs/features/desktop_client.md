@@ -65,7 +65,7 @@ tier of any kind is touched — no auto-update service, no telemetry).
 | Command | Result |
 |---|---|
 | `cd desktop && npx electron . --no-sandbox` | run the shell (root/WSL needs `--no-sandbox`) |
-| `cd desktop && npm test` | `node --test` → **17/17** (repo + supervisor incl. the car-J win32 attach-only leg; fakes, no ports) |
+| `cd desktop && npm test` | `node --test` → **23/23** (repo + supervisor incl. the car-J win32 attach-only leg and the wrap-up #14 hardening legs; fakes, no ports) |
 | `cd desktop && npx electron . --selftest --no-sandbox` | end-to-end selftest → one line `SELFTEST {"ok":true,...}` + rc 0 |
 | `cd desktop && npx electron-builder --linux dir tar.gz` | package → `desktop/dist/linux-unpacked/aidog-desktop` + `desktop/dist/aidog-desktop-<version>.tar.gz` (≈114 MB) |
 | Windows side: `npm run pack:win` (in an isolated copy, see §4.1) | package → `desktop/dist/win/aidog-desktop-<version>-win.zip` (≈146 MB) + `win-unpacked/aidog-desktop.exe` |

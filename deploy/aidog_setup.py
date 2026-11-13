@@ -88,6 +88,30 @@ SLOTS: list[tuple[str, str, "re.Pattern[str]", bool, str]] = [
 
 URL_RE = re.compile(r"^https?://\S+$")
 MODEL_RE = re.compile(r"^\S+$")
+
+
+def _url_ok(value: str) -> bool:
+    """URL shape check + no embedded credentials: userinfo (user:pass@host)
+    belongs in a secrets slot, never in a URL the wizard stores or prints
+    (wrap-up audit W2-01/W4-05 — mirrors web/server.py's URL rules)."""
+    if not URL_RE.match(str(value)):
+        return False
+    rest = str(value).split("://", 1)[1]
+    authority = re.split(r"[/?#]", rest, 1)[0]
+    return "@" not in authority
+
+
+def _redact_url(value: str) -> str:
+    """Strip userinfo before any print — the wizard never echoes credentials
+    (wrap-up audit W4-05)."""
+    s = str(value)
+    if "://" in s:
+        head, rest = s.split("://", 1)
+        authority = re.split(r"[/?#]", rest, 1)[0]
+        if "@" in authority:
+            host = authority.rsplit("@", 1)[1]
+            return head + "://***@" + host + rest[len(authority):]
+    return s
 # Car I (owner #16): the explicit feature-visibility region. Mirrors
 # web/server.py REGION_CODES — the wizard never detects a region (no locale
 # sniffing, no geo lookup): the operator types it or presses ENTER to keep.
@@ -144,6 +168,32 @@ def format_violations(text: str) -> list[int]:
     return bad
 
 
+def _atomic_write(path: Path, data: str, chmod: int | None = None) -> None:
+    """Mirror of web/server.py _atomic_write (wrap-up audit W2-02): the old
+    fixed `.tmp` name was predictable — a pre-planted symlink got this
+    write to follow it. Random sibling name + O_CREAT|O_EXCL (a planted
+    entry is EEXIST, never followed). The wizard is standalone, so the
+    helper lives here instead of importing the console."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    # W5a-01 hardening (mirror of web/server.py): create the temp file with
+    # its FINAL mode when one is given — never briefly readable at the umask
+    # default before the post-write chmod (secrets 0600 contract).
+    fd = os.open(tmp, flags, 0o666 if chmod is None else chmod)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(data)
+        if chmod is not None:
+            os.chmod(tmp, chmod)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def write_slot(key: str, value: str) -> tuple[bool, str]:
     """Replace or append one KEY=value line, keeping every other byte intact.
     Returns (ok, readback_detail). Values are never included in the detail."""
@@ -156,9 +206,7 @@ def write_slot(key: str, value: str) -> tuple[bool, str]:
         new = text.rstrip("\n") + "\n" if text.strip() else ""
         new += f"{key}={value}\n"
     try:
-        tmp = SECRETS.with_name(SECRETS.name + ".tmp")
-        tmp.write_text(new, encoding="utf-8")
-        os.replace(tmp, SECRETS)
+        _atomic_write(SECRETS, new, chmod=0o600)
         try:
             os.chmod(SECRETS, 0o600)
         except OSError:
@@ -203,10 +251,7 @@ def required_slots() -> tuple[str, ...]:
 
 def write_settings(data: dict) -> tuple[bool, str]:
     try:
-        tmp = SETTINGS.with_name(SETTINGS.name + ".tmp")
-        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n",
-                       encoding="utf-8")
-        os.replace(tmp, SETTINGS)
+        _atomic_write(SETTINGS, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
         json.loads(SETTINGS.read_text(encoding="utf-8"))  # syntax re-check
     except (OSError, ValueError) as e:
         return False, f"settings write failed ({type(e).__name__})"
@@ -307,7 +352,7 @@ def slot_report() -> tuple[int, list[str]]:
     base = mc.get("base_url", "")
     model = mc.get("model", "")
     say(f"settings region: {settings_region_code()} (feature-visibility tier)")
-    if not URL_RE.match(str(base)):
+    if not _url_ok(str(base)):
         say(f"settings mycore.base_url: MISSING/invalid — set any http(s):// OpenAI-compatible endpoint")
         pending.append("mycore.base_url")
     else:
@@ -415,14 +460,14 @@ def cmd_wizard(boot: bool) -> int:
     # zero-key onboarding (interactive only): local model server detection,
     # inserted between settings.json creation and the manual base_url prompt
     local_choice = detect_local_model()
-    if local_choice is not None:
+    if local_choice is not None and _url_ok(str(local_choice.get("base_url", ""))):
         data = read_settings()
         prev = data.get("mycore")
         prev = prev if isinstance(prev, dict) else {}
         data["mycore"] = {**prev, "base_url": str(local_choice["base_url"]),
                           "model": str(local_choice["model"])}
         ok, detail = write_settings(data)
-        say(f"using local model server: {local_choice['base_url']} "
+        say(f"using local model server: {_redact_url(local_choice['base_url'])} "
             f"(model: {local_choice['model']}) — no API key needed")
         say(detail)
         if not ok:
@@ -435,11 +480,11 @@ def cmd_wizard(boot: bool) -> int:
         cur_model = str(mc.get("model") or "mimo-v2.6-flash")
         new_base, new_model = cur_base, cur_model
         for attempt in range(1, MAX_TRIES + 1):
-            raw = read_value(f"model endpoint base_url [{cur_base}]", False)
+            raw = read_value(f"model endpoint base_url [{_redact_url(cur_base)}]", False)
             if raw is None:
                 break
             new_base = raw or cur_base
-            if URL_RE.match(new_base):
+            if _url_ok(new_base):
                 break
             say(f"base_url: invalid — expected http(s)://... (attempt {attempt}/{MAX_TRIES})")
             new_base = cur_base
