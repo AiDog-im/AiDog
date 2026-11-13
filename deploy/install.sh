@@ -25,8 +25,16 @@
 #   bash deploy/install.sh --check
 #                               # REPORT ONLY: same status logic below, zero
 #                               # writes (no provisioning, no CLI install, no
-#                               # boot, no logs), same 0/2/1 semantics as
-#                               # `aidog setup --check`
+#                               # boot, no logs). EXIT CONTRACT (car A, made
+#                               # explicit for automation callers):
+#                               #   --check exits 0 = fully ready (all
+#                               #     preflight checks pass, doctor clean)
+#                               #   --check exits 2 = installed but pending
+#                               #     (credential slots and/or model backend
+#                               #     still empty — fail-closed by design)
+#                               #   --check exits 1 = hard prerequisite failure
+#                               #     (python3/tmux missing, port hijacked, …)
+#                               # Identical semantics to `aidog setup --check`.
 #   aidog setup                # interactive wizard (fill slots, then boot +
 #                              # verify); --check status, --yes = this script
 #

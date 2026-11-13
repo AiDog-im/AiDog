@@ -21,7 +21,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
   lint-and-review gated skills repository; `GET /api/skills/remote` serves the same catalog fail-soft
   (remote -> bundled copy -> honest `unavailable`, never a 5xx).
 - Evidence (the same numbers shown in the site's fact strip): core tests 2081/2081 · console smoke 432/432 · skill router 30/30 · memory 58/58 · setup wizard 99/99 · profile isolation 63/63 · desktop shell 15/15 · doctor 0 FAIL · 0 WARN · 22 real-machine E2E suites · 1224 locale keys per pack · 27 registered tools · 36 capability documents · 37 self-developed modules ≈ 22.0k LOC.
-- Current release: 0.5.61.
+- Current release: 0.5.62.
 
 ## Interfaces
 
@@ -32,7 +32,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 
 ## Live stats
 
-- [Usage stats](https://aidog.im/api/stats): public aggregates over the anonymous daily usage ledger — installs, requests, token totals, the last seven UTC days and per-model / per-scenario breakdowns. Each install reports once per UTC day; reports carry model names and counts only — never prompts, files, paths or credentials — and verification canary rows (ids starting with `_`) are stored but never aggregated. If the ledger is not configured the endpoint answers `503` with an error object instead of a fabricated zero.
+- [Usage stats](https://aidog.im/api/stats): public aggregates over the anonymous daily usage ledger — installs, requests, token totals, the last seven UTC days and per-model / per-scenario breakdowns. Each install reports once per UTC day; reports carry model names and counts only — never prompts, files, paths or credentials — and verification canary rows (ids starting with `_`) are stored but never aggregated. The `install_id` is a random per-install pseudonym, not a device or account fingerprint; deleting its state file resets it. If the ledger is not configured the endpoint answers `503` with an error object instead of a fabricated zero.
 - [Visits](https://aidog.im/api/visits): JSON counter returning `{"count": <integer>, "unit": "page views", "note": "approximate, includes crawlers and refreshes"}`. One increment per page load; approximate by design. Append `?format=text` for `text/plain` output (`visits: <integer>`). If the counter is not configured the endpoint answers `503` with an error object instead of a fabricated number.
 
 ## Links

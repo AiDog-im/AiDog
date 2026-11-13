@@ -15807,76 +15807,89 @@ def test_ledger() -> None:
 
 
 def main() -> int:
-    test_model()
-    test_registry_and_tools()
-    test_tools_toggle()
-    test_community()
-    test_community_tool()
-    test_envslots()
-    test_model_key_slots()
-    test_decision()
-    test_decision_wiring()
-    test_bridge()
-    test_leash()
-    test_obedience()
-    test_watchdog_escalation()
-    test_ckxbackup()
-    test_settings_models_budget()
-    test_loop()
-    test_compact()
-    test_session()
-    test_assembly()
-    test_context_files()
-    test_context_refs()
-    test_checkpoint()
-    test_modeltier()
-    test_model_gateway()
-    test_sniff()
-    test_skill_dirs_chain()
-    test_loop_budget()
-    test_cli_precedence()
-    test_tg()
-    test_watchdog()
-    test_service()
-    test_evolution()
-    test_scheduler()
-    test_stream()
-    test_loop_on_delta()
-    test_typing()
-    test_wd_locale()
-    test_subagent()
-    test_result_compression()
-    test_result_budget_dedupe()
-    test_compact_semantics()
-    test_token_fold()
-    test_recall()
-    test_stable_prefix()
-    test_execute_code()
-    test_mcp()
-    test_channels()
-    test_channels_inbound_health()
-    test_channels_service()
-    test_channels_domestic()
-    test_channels_wa_signal()
-    test_hooks()
-    test_acp()
-    test_tg_topics()
-    test_browser()
-    test_terminal()
-    test_localmodels()
-    test_stt()
-    test_imagegen()
-    test_connectors()
-    test_media_tools()
-    test_exchanges()
-    test_exchanges_w2()
-    test_tg_media()
-    test_service_media()
-    test_profiles()
-    test_mission()
-    test_wave3()
-    test_delta2()
-    test_ledger()
+    # Car A (P8): per-suite accounting — every suite reports its own
+    # pass/fail delta so a regression names its suite, not just a total.
+    suites = [
+        test_model,
+        test_registry_and_tools,
+        test_tools_toggle,
+        test_community,
+        test_community_tool,
+        test_envslots,
+        test_model_key_slots,
+        test_decision,
+        test_decision_wiring,
+        test_bridge,
+        test_leash,
+        test_obedience,
+        test_watchdog_escalation,
+        test_ckxbackup,
+        test_settings_models_budget,
+        test_loop,
+        test_compact,
+        test_session,
+        test_assembly,
+        test_context_files,
+        test_context_refs,
+        test_checkpoint,
+        test_modeltier,
+        test_model_gateway,
+        test_sniff,
+        test_skill_dirs_chain,
+        test_loop_budget,
+        test_cli_precedence,
+        test_tg,
+        test_watchdog,
+        test_service,
+        test_evolution,
+        test_scheduler,
+        test_stream,
+        test_loop_on_delta,
+        test_typing,
+        test_wd_locale,
+        test_subagent,
+        test_result_compression,
+        test_result_budget_dedupe,
+        test_compact_semantics,
+        test_token_fold,
+        test_recall,
+        test_stable_prefix,
+        test_execute_code,
+        test_mcp,
+        test_channels,
+        test_channels_inbound_health,
+        test_channels_service,
+        test_channels_domestic,
+        test_channels_wa_signal,
+        test_hooks,
+        test_acp,
+        test_tg_topics,
+        test_browser,
+        test_terminal,
+        test_localmodels,
+        test_stt,
+        test_imagegen,
+        test_connectors,
+        test_media_tools,
+        test_exchanges,
+        test_exchanges_w2,
+        test_tg_media,
+        test_service_media,
+        test_profiles,
+        test_mission,
+        test_wave3,
+        test_delta2,
+        test_ledger,
+    ]
+    rows = []
+    for fn in suites:
+        p0, f0 = len(PASS), len(FAIL)
+        fn()
+        rows.append((fn.__name__, len(PASS) - p0, len(FAIL) - f0))
+    print()
+    width = max(len(name) for name, _p, _f in rows)
+    for name, p, f in rows:
+        print(f"{name:<{width}}  {p:>4} pass  {f:>3} fail")
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

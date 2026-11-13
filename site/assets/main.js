@@ -593,8 +593,6 @@
   function paintStats() {
     var d = liveStats;
     if (!d) return;
-    var banner = document.getElementById("modelsBanner");
-    if (banner) banner.hidden = true;
     var frame = document.querySelector("#models .chart-frame");
     if (!frame) return;
     var bars = frame.querySelectorAll(".chart-bars i");
@@ -656,6 +654,16 @@
     wrap.hidden = false;
   }
 
+  // The LIVE banner is now the honest default copy (it ships in the HTML and
+  // the packs), so a reachable endpoint no longer hides it. Only a FAILED
+  // fetch rewrites the body to say this visit could not reach the endpoint —
+  // the page never fabricates a number, and never claims a number it lacks.
+  function markStatsUnreachable() {
+    var body = document.getElementById("modelsStatusBody");
+    if (body) body.textContent = tt("models.unreachable",
+      "The stats endpoint is deployed, but this page could not reach it on this visit.");
+  }
+
   if (!loopbackHost()) {
     fetch("/api/stats", { cache: "no-store" })
       .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
@@ -665,6 +673,6 @@
         liveStats = d;
         paintStats();
       })
-      .catch(function () { /* keep the honest placeholder */ });
+      .catch(function () { markStatsUnreachable(); });
   }
 })();
