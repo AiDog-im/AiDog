@@ -1395,14 +1395,17 @@ function renderStatus() {
     }
   }
 
-  // service cards (Overview)
+  // relayout 4.1 (0.5.82): the Overview panels are TABLE rows now — same
+  // data, same #panels id, same four-state chip vocabulary as everywhere else
+  // (.st-ok / .st-err / .st-warn / .st-off carry dot + ink, never colour
+  // alone). The detail column prints exactly what the cards used to print.
+  const stateChip = { up: "st-ok", down: "st-err", unknown: "st-warn" };
   document.getElementById("panels").innerHTML = panels.map(p => `
-    <div class="mini ${p.state}">
-      <span class="m-dot" aria-hidden="true"></span>
-      <div class="m-name">${escapeHtml(t("panel." + p.id, p.id))}</div>
-      <div class="m-state">${escapeHtml(t("state." + p.state, p.state.toUpperCase()))}</div>
-      <div class="m-detail">${escapeHtml(p.detail || "")}</div>
-    </div>`).join("");
+    <tr>
+      <td class="svc-name">${escapeHtml(t("panel." + p.id, p.id))}</td>
+      <td class="svc-state"><span class="chip ${stateChip[p.state] || "st-off"}">${escapeHtml(t("state." + p.state, p.state.toUpperCase()))}</span></td>
+      <td class="svc-detail">${escapeHtml(p.detail || "—")}</td>
+    </tr>`).join("");
 
   // Wave 3 (X3): the raw status.mycore block — the panels only summarize it.
   renderMycoreFacts();
