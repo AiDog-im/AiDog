@@ -18942,6 +18942,91 @@ def test_usage_range() -> None:
             umtr.activate(was_dir)
 
 
+def test_macos_report() -> None:
+    """macOS field-report fixes (0.5.87): the four product defects a first
+    real Mac install surfaced — a Feishu allowlist entry that lets the bot
+    answer itself forever, a `configured: true` channel that polls nothing,
+    and the two doctor false FAILs (a keyless 401 probe, an archive install
+    with no .git). Offline: a local 401 server stands in for the auth-gated
+    endpoint, and the doctor module is loaded from file so its seams can be
+    patched without touching production config."""
+    import importlib.util as _ilu
+    import threading as _th
+    from http.server import BaseHTTPRequestHandler as _BH, ThreadingHTTPServer as _THS
+    from mycore import channels as ch
+    from web import server as ws
+
+    # --- Feishu allowlist: the bot's own app id is refused at save time --
+    _c, errs = ws.validate_settings_patch(
+        {"channels": {"feishu": {"allow": ["cli_self_bot"]}}})
+    check("mac: feishu allow refuses the bot's own cli_ app id",
+          len(errs) == 1 and "answer itself forever" in errs[0], str(errs))
+    _c, errs = ws.validate_settings_patch(
+        {"channels": {"feishu": {"allow": ["ou_human"]}}})
+    check("mac: feishu allow still accepts a human open_id",
+          errs == [], str(errs))
+    _c, errs = ws.validate_settings_patch(
+        {"channels": {"feishu": {"enabled": True, "chat_ids": ["oc_1"]}}})
+    check("mac: feishu chat_ids still validate as before",
+          errs == [], str(errs))
+
+    # --- Feishu inbound honesty: credentials alone are not "will receive" --
+    empty = ch.FeishuChannel(REPO, cfg={"enabled": True, "chat_ids": []})
+    filled = ch.FeishuChannel(REPO, cfg={"enabled": True, "chat_ids": ["oc_1"]})
+    check("mac: feishu with no chat_ids says inbound polls nothing",
+          "no chat_ids" in empty.inbound_note, repr(empty.inbound_note))
+    check("mac: feishu with chat_ids keeps the silent-ready note",
+          filled.inbound_note == "", repr(filled.inbound_note))
+
+    # --- doctor: a keyless 401 is an ANSWERED endpoint, not an unreachable one
+    class _H(_BH):
+        def do_GET(self):  # noqa: N802
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):  # noqa: D102
+            pass
+
+    srv = _THS(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    _th.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        spec = _ilu.spec_from_file_location(
+            "aidog_doctor_mac", REPO / "deploy" / "aidog_doctor.py")
+        doc = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(doc)
+        saved_base, saved_shim = doc.settings_mycbase, doc.SHIM_PRESENT
+        saved_tok = doc.env_line_value                 # keep the test offline
+        try:
+            doc.SHIM_PRESENT = False
+            doc.settings_mycbase = lambda: f"http://127.0.0.1:{port}/v1"
+            doc.env_line_value = lambda *a, **k: None
+            doc.RESULTS.clear()
+            doc.check_endpoints()
+            row = next((r for r in doc.RESULTS if r[1] == "model.endpoint"), None)
+            check("mac: doctor reads a keyless 401 as answered, not dead",
+                  row is not None and row[0] == "PASS" and "401" in row[2],
+                  str(row))
+
+            # --- doctor: an archive install is a SKIP, never a FAIL --------
+            doc.RESULTS.clear()
+            saved_repo = doc.REPO
+            with tempfile.TemporaryDirectory() as td:
+                doc.REPO = Path(td)               # no .git -> codeload zip
+                doc.check_repo()
+            doc.REPO = saved_repo
+            row = next((r for r in doc.RESULTS if r[1] == "repo.git"), None)
+            check("mac: doctor skips repo.git on an archive install",
+                  row is not None and row[0] == "SKIP" and "archive" in row[2],
+                  str(row))
+        finally:
+            doc.settings_mycbase, doc.SHIM_PRESENT = saved_base, saved_shim
+            doc.env_line_value = saved_tok
+    finally:
+        srv.shutdown()
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -19026,6 +19111,7 @@ def main() -> int:
         test_rewind_fork,
         test_user_fixes,
         test_usage_range,
+        test_macos_report,
     ]
     rows = []
     for fn in suites:

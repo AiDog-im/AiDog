@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2487%2F2487-brightgreen?style=flat-square" alt="core tests 2487/2487">
+  <img src="https://img.shields.io/badge/core_tests-2494%2F2494-brightgreen?style=flat-square" alt="core tests 2494/2494">
   <img src="https://img.shields.io/badge/console_smoke-558%2F558-brightgreen?style=flat-square" alt="console smoke 558/558">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
@@ -70,11 +70,24 @@ subagents, MCP, and an institutional self-evolution loop (`/learn`,
 **Platforms.** Linux via `install.sh` (the reference path, fully tested,
 including WSL2 on Windows), Windows through the same WSL2 command **plus a
 native portable shell** (zip on the GitHub Release, attach-only to the
-WSL2 console, selftest-verified), macOS expected-but-untested, and
+WSL2 console, selftest-verified), macOS verified on arm64 (2026-11-12: Miniconda
++ conda tmux, no Homebrew/sudo), and
 iOS/Android through the chat channel plus the website — the console binds
 loopback-only on your own machine, so phone
 access is an SSH tunnel, never a cloud console. The honest matrix lives on
 the site's Platforms section; the guide is [docs/installation.md](docs/installation.md).
+
+**Desktop HUD shell.** A frameless Electron overlay (transparency slider,
+always-on-top, tray) ships as a portable archive on the
+[GitHub Releases page](https://github.com/AiDog-im/AiDog/releases) — no
+installer, no registry entries, no auto-update, no telemetry — and it
+**attaches** to the console you already run instead of spawning a second
+stack. Platform status, stated plainly: **Linux** built + `--selftest`
+green; **Windows** built + `--selftest` green (portable zip, attach-only
+to the WSL2 console, unsigned by design); **macOS** shell not built yet —
+the product itself does run on macOS (verified 2026-11-12). Details and
+the manual test checklist live in
+[docs/features/desktop_client.md](docs/features/desktop_client.md).
 
 **Web3, gated by a human.** Since v0.5.38 nine venues live in one catalog
 behind six `exchange_*` tools — public market data needs no credential,
@@ -108,7 +121,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 | ⚡ | **Local & portable** | stdlib-only core (voice/image extras lazy-load), service bound to local loopback, SSE streaming throughout, `execute_code` folds multi-step runs into one round trip |
 | 🖥️ | **Loopback web console** | Ten views — Overview · Chat · Skills · Stream · Sniff · Exchange · Community · Evolution · Help · Settings (Usage & Cost and Voice are cards): activation checklist with fix deep-links, credential slot editor (37 editable slots — names + lengths only, values never rendered), cron list with delete, capability grid, channel forms with send test, hooks editor, evolution schedule, Web3 caps, a **Connections** card (Cloudflare + GitHub token slots, a per-permission scope checklist with a read-only default posture, and a real read-only test call) and a **Bridge** card (a reverse proxy YOU deploy on your own account — explicit target allow-list, one-click kill switch, one audit line per proxied request), plus a **Backup & Restore** card (one passphrase-protected `.ckx` file of credentials · settings · memory, encrypted in the browser with an in-page round-trip check before the download) whose **AGENT BACKUP** section schedules the same encrypted run through the vendored CKX CLI — Node probe, passphrase-slot presence, a local call meter and a one-click MCP switch, all read from the server, bound to `127.0.0.1`, token-gated writes |
 | 🖼️ | **Media built in** | Local STT voice sessions with fuzzy wake phrases, TTS announcements, BYOK image generation, Telegram photo send |
-| 🖥️ | **Desktop HUD shell** | Electron frameless shell: transparency slider, always-on-top, tray — Linux packaging verified (Win/macOS not built yet, honestly) |
+| 🖥️ | **Desktop HUD shell** | Electron frameless shell: transparency slider, always-on-top, tray — Linux and Windows portable packaging verified (selftest green on both; Windows is attach-only to the WSL2 console), macOS not built yet |
 | 👥 | **Multi-profile isolation** | `AIDOG_PROFILE` selects fully isolated profiles (settings / secrets / state / body) — 63/63 isolation gate + 18-leg real-machine E2E |
 | 🩺 | **Self-healing ops** | `aidog doctor` health checks + a one-click **Run doctor** button in the console, restart watchdog, one-command upgrades with a dirty-tree guard, plus in-console **restart / update check / update apply** controls |
 | 🆓 | **Permanently free** | A permanent product commitment: zero paid touchpoints in product, docs, or packages — introducing one is treated as a defect |
@@ -229,7 +242,7 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2487/2487** |
+| `mycore` core suite | **2494/2494** |
 | Console smoke (live HTTP) | **558/558** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |

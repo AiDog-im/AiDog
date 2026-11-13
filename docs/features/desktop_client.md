@@ -156,3 +156,80 @@ controls, so opening `hud.html` in a plain browser does not break.
   `ELECTRON_GET_USE_PROXY=1 GLOBAL_AGENT_HTTPS_PROXY=$https_proxy node node_modules/electron/install.js`.
   On Windows builds where GitHub release assets crawl, use
   `ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/` instead (§4.1).
+
+## 9. Manual test checklist (Windows / macOS)
+
+This checklist exists for **manual, on-device verification**. Automated
+`--selftest` runs already exist and are recorded (§4, §5) — they cover the
+repo lookup, console attach, and an opacity roundtrip, but not visuals,
+interaction, or day-to-day use. An unchecked box means **not verified**;
+nothing below may be described as verified until it is checked.
+
+### 9.1 Windows (manual)
+
+Prerequisite: the portable zip `aidog-desktop-<version>-win.zip` built
+2026-11-03 (§4.1), extracted to any folder. The Windows shell is
+**attach-only** (it attaches to the console running in WSL2, it never spawns
+the stack itself) and is **unsigned** (§6, §8).
+
+- [ ] Extract the zip and launch `aidog-desktop.exe` — it starts with no
+      installer and no build step.
+- [ ] With the console already serving in WSL2, the shell attaches and the
+      console renders (attach-only path; a stopped console fails fast with
+      the attach-only message, never a spawn attempt).
+- [ ] The opacity slider on the HUD strip visibly changes window
+      transparency (`setOpacity`, 0.2–1.0; plain alpha, no vibrancy on
+      Windows).
+- [ ] The always-on-top (pin) toggle from the tray menu / HUD takes effect
+      and releases.
+- [ ] The tray menu works: open console, show HUD, pin — and **Quit lives
+      only in the tray menu**.
+- [ ] Closing the main window hides it to the tray (it does not quit the
+      shell).
+- [ ] With no repo resolvable (fresh environment, no `AIDOG_REPO`), the
+      shell shows `error.html` with the `AIDOG_REPO` guidance instead of a
+      blank window or a crash.
+- [ ] The HUD/console language follows the console's language setting
+      (en/zh, `hud.*` keys — §7) after switching it.
+- [ ] A full session of ordinary use: no crashes, no console errors, no
+      orphaned processes after Quit.
+- [ ] (Optional) Behave sanely at high DPI and across multiple monitors
+      (window position/scale after moving between displays).
+
+### 9.2 macOS — build prerequisites, then manual checklist
+
+**Build prerequisites (must run on a real Mac):**
+
+- The macOS shell has **never been built** (§6: `desktop/package.json`
+  originally shipped only the `linux`/`win` targets; the `mac` target is
+  added as build configuration, but compiling and testing require a real
+  Mac — a Linux host cannot do it for you).
+- Build on the Mac: `cd desktop && npm ci && npm run pack:mac`.
+- The package is **unsigned and unnotarized** (§8): on first open,
+  right-click → Open, or allow the locally built app in system settings.
+- The product core (Python + tmux runtime) is already known to work on
+  macOS 26 arm64 (verified 2026-11-12 with Miniconda + conda tmux) — that
+  covers the console underneath, **not** the Electron shell below.
+
+**Manual checklist (aligned with Windows):**
+
+- [ ] `npm run pack:mac` produces a runnable app on a real Mac.
+- [ ] Launch the built app; it attaches to a running local console (or
+      shows `error.html` with `AIDOG_REPO` guidance when no install is
+      found).
+- [ ] The opacity slider visibly changes transparency.
+- [ ] **vibrancy**: `main.js` enables vibrancy only when
+      `process.platform === 'darwin'` (§6) — this branch has **never run
+      on any machine** and is the key observation item of this checklist:
+      confirm the macOS window actually shows the vibrancy effect and that
+      disabling opacity still behaves sanely with it.
+- [ ] Always-on-top pin toggle takes effect and releases.
+- [ ] Tray (menu bar) menu works, and Quit lives only there; closing the
+      window hides to tray.
+- [ ] Language follows the console's en/zh setting (§7).
+- [ ] A full ordinary-use session: no crashes, no console errors, no
+      orphaned processes after Quit.
+
+Until every box above for a platform is checked, the §6 table keeps that
+platform's Verified status as-is ("selftest" / not verified); only a fully
+checked checklist may upgrade it to "manual acceptance".

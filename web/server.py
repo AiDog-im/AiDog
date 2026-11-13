@@ -2051,6 +2051,21 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             errors.append(f"channels.{name}.{key} entries must be "
                                           "single-line strings of at most 256 chars")
                             continue
+                        # 0.5.87 (Mac user report, problem 7): a Feishu
+                        # allowlist entry starting with `cli_` is the APP's
+                        # own sender id — every message the bot sends would
+                        # match it and be answered again, forever. Refused
+                        # at save time with an actionable reason instead of
+                        # being discovered as an infinite reply loop.
+                        if (name == "feishu" and key == "allow"
+                                and any(isinstance(i, str) and i.startswith("cli_")
+                                        for i in val)):
+                            errors.append(
+                                "channels.feishu.allow: an entry starting with "
+                                "'cli_' is the bot's own app id, which would make "
+                                "it answer itself forever — list the human open_ids "
+                                "(ou_...) instead")
+                            continue
                         clean_sub[key] = list(val)
                     elif key in ("smtp_port", "imap_port"):
                         if isinstance(val, bool) or not isinstance(val, int) \

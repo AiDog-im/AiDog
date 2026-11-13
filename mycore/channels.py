@@ -873,6 +873,17 @@ class FeishuChannel(Channel):
 
     name = "feishu"
 
+    @property
+    def inbound_note(self) -> str:
+        """Ready-row honesty (0.5.87, Mac user report problem 6): the app
+        credentials alone do NOT make feishu inbound work — with no
+        `chat_ids` the poller walks zero chats, so `configured: true` must
+        not read as "will receive". Names the settings key, never a value;
+        an empty string keeps the historical silent-ready row."""
+        if not _id_list(self.cfg.get("chat_ids")):
+            return "no chat_ids configured — inbound polls nothing"
+        return ""
+
     def configured(self) -> tuple[bool, str]:
         if not self._secret(SLOT_FEISHU_APP_ID):
             return False, f"missing {SLOT_FEISHU_APP_ID} slot"

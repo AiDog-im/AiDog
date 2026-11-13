@@ -152,7 +152,7 @@ rollback: `docs/design/usage_ledger_design.md`.
   copy the home chart: unreachable says so, zero data waits for the first
   report.
 - **Platforms matrix** — an honest `#platforms` section on the home page
-  (Linux reference path / Windows via WSL2 / macOS expected-but-untested /
+  (Linux reference path / Windows via WSL2 / macOS verified on arm64 /
   iOS-Android via bot + site), mirrored by a `Platforms:` line in
   `llms.txt` and a paragraph in both READMEs; the nav stays at its nine
   anchors (the section indices run 01…09 with `platforms`=02, `pulse`=09 —
