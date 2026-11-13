@@ -792,6 +792,19 @@ def cmd_setup(args: argparse.Namespace) -> int:
     return subprocess.call([sys.executable, str(setup_py), *flags])
 
 
+def cmd_secrets(args: argparse.Namespace) -> int:
+    """E2 static-encryption control — delegate to deploy/aidog_secrets.py
+    (status / enable / disable + deploy-script helpers). The passphrase and
+    slot values never pass through this dispatcher."""
+    import subprocess
+    cli_py = Path(__file__).resolve().parent / "aidog_secrets.py"
+    argv = [sys.executable, str(cli_py)]
+    if getattr(args, "secrets_cmd", None):
+        argv.append(args.secrets_cmd)
+    argv.extend(getattr(args, "rest", None) or [])
+    return subprocess.call(argv)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="aidog",
@@ -808,6 +821,15 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-boot", action="store_true",
                    help="skip the boot/verify step (wizard: no final question; --yes: provision + report only)")
     s.set_defaults(func=cmd_setup)
+
+    sc = sub.add_parser("secrets",
+                        help="E2 static encryption of secrets.env (opt-in, "
+                             "default off): status / enable / disable")
+    sc.add_argument("secrets_cmd", nargs="?", default="status",
+                    help="status (default) | enable | disable")
+    sc.add_argument("rest", nargs=argparse.REMAINDER,
+                    help="sub-command flags (e.g. --state, --keep-passphrase)")
+    sc.set_defaults(func=cmd_secrets)
 
     e = sub.add_parser("export", help="bundle memory (+persona) into a manifest tarball")
     e.add_argument("--src", help="memory source dir (highest precedence)")

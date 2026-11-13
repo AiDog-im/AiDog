@@ -133,11 +133,40 @@ def env_line_value(text: str, key: str) -> str | None:
     return m.group(1) if m else None
 
 
-def read_secrets() -> str:
+def _store_text() -> str:
+    """The secrets store text through the ONE shared reader (E2): plaintext
+    as-is, decrypted in memory when encrypted, "" when locked (fail-closed
+    absence — never a ciphertext parse). The mycore import is lazy so the
+    wizard stays standalone; if it fails, a NON-encrypted file still reads
+    directly (a doctor-broken install keeps diagnosing) while ciphertext
+    degrades to "" instead of garbage."""
     try:
-        return SECRETS.read_text(encoding="utf-8")
-    except OSError:
-        return ""
+        from mycore import secrets_store  # noqa: PLC0415 — REPO on sys.path
+        return secrets_store.secrets_text(SECRETS)
+    except Exception:  # noqa: BLE001
+        try:
+            with SECRETS.open("rb") as fh:
+                head = fh.read(4)
+            return "" if head == b"SAFE" else SECRETS.read_text(
+                encoding="utf-8")
+        except OSError:
+            return ""
+
+
+def store_locked() -> bool:
+    """E2: True only when the store IS encrypted and unreadable here — the
+    state where every writer must refuse (rule 3, never a plaintext
+    fallback) instead of clobbering the other slots with an empty read."""
+    try:
+        from mycore import secrets_store  # noqa: PLC0415
+        return (secrets_store.detect(SECRETS) == "encrypted"
+                and secrets_store.is_locked(SECRETS))
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def read_secrets() -> str:
+    return _store_text()
 
 
 def provision_secrets() -> bool:
@@ -153,7 +182,34 @@ def provision_secrets() -> bool:
     except OSError:  # 9p/CIFS mounts reject chmod (harmless, doctor knows)
         pass
     say("created secrets.env from template (mode 0600 best-effort)")
+    _encrypt_if_enabled()
     return True
+
+
+def _encrypt_if_enabled() -> bool:
+    """E2: when source A (the out-of-tree passphrase file) exists, a freshly
+    provisioned store ends ENCRYPTED too — provisioning must never leave
+    plaintext at rest behind an operator who enabled E2. No passphrase file
+    = E2 off: the store stays plaintext byte-identical (default-off rule)."""
+    try:
+        from mycore import secrets_store  # noqa: PLC0415
+        if not secrets_store.passphrase_path().is_file():
+            return False
+        if secrets_store.detect(SECRETS) == "encrypted":
+            return False
+        raw = SECRETS.read_bytes()
+        blob = secrets_store.encrypt_bytes(raw)
+        if blob is None:
+            say("passphrase file present but unusable — store left "
+                "plaintext (run: aidog secrets status)")
+            return False
+        _atomic_write(SECRETS, blob, chmod=0o600)
+        secrets_store.set_text(SECRETS, raw.decode("utf-8"))
+        say("secrets.env encrypted at rest (E2 on — passphrase file "
+            "present)")
+        return True
+    except Exception:  # noqa: BLE001 — provisioning never dies on E2
+        return False
 
 
 def format_violations(text: str) -> list[int]:
@@ -168,7 +224,7 @@ def format_violations(text: str) -> list[int]:
     return bad
 
 
-def _atomic_write(path: Path, data: str, chmod: int | None = None) -> None:
+def _atomic_write(path: Path, data: str | bytes, chmod: int | None = None) -> None:
     """Mirror of web/server.py _atomic_write (wrap-up audit W2-02): the old
     fixed `.tmp` name was predictable — a pre-planted symlink got this
     write to follow it. Random sibling name + O_CREAT|O_EXCL (a planted
@@ -181,8 +237,12 @@ def _atomic_write(path: Path, data: str, chmod: int | None = None) -> None:
     # default before the post-write chmod (secrets 0600 contract).
     fd = os.open(tmp, flags, 0o666 if chmod is None else chmod)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            fh.write(data)
+        if isinstance(data, bytes):          # E2: ciphertext rides bytes
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(data)
+        else:
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
+                fh.write(data)
         if chmod is not None:
             os.chmod(tmp, chmod)
         os.replace(tmp, path)
@@ -196,7 +256,15 @@ def _atomic_write(path: Path, data: str, chmod: int | None = None) -> None:
 
 def write_slot(key: str, value: str) -> tuple[bool, str]:
     """Replace or append one KEY=value line, keeping every other byte intact.
-    Returns (ok, readback_detail). Values are never included in the detail."""
+    Returns (ok, readback_detail). Values are never included in the detail.
+
+    E2: a LOCKED store refuses up front (an empty read would otherwise
+    rebuild the file around ONE line and destroy every other slot — rule 3);
+    an unlocked encrypted store is edited in memory and re-encrypted before
+    the atomic replace (rule 2), then the in-process snapshot is refreshed
+    so the read-back below sees THIS write."""
+    if store_locked():
+        return False, "store locked (E2) — passphrase unavailable"
     text = read_secrets()
     if re.search(rf"(?m)^{re.escape(key)}=\S*$", text):
         # replacement via lambda: user values may contain backslashes
@@ -206,7 +274,20 @@ def write_slot(key: str, value: str) -> tuple[bool, str]:
         new = text.rstrip("\n") + "\n" if text.strip() else ""
         new += f"{key}={value}\n"
     try:
-        _atomic_write(SECRETS, new, chmod=0o600)
+        try:
+            from mycore import secrets_store  # noqa: PLC0415
+            encrypted = secrets_store.detect(SECRETS) == "encrypted"
+        except Exception:  # noqa: BLE001
+            encrypted = False
+        payload: str | bytes = new
+        if encrypted:
+            blob = secrets_store.encrypt_bytes(new.encode("utf-8"))
+            if blob is None:
+                return False, "store locked (E2) — passphrase unavailable"
+            payload = blob
+        _atomic_write(SECRETS, payload, chmod=0o600)
+        if encrypted:
+            secrets_store.set_text(SECRETS, new)
         try:
             os.chmod(SECRETS, 0o600)
         except OSError:
@@ -315,6 +396,12 @@ def guide_slot(text: str, key: str, label: str, pat: "re.Pattern[str]",
 
 def slot_report() -> tuple[int, list[str]]:
     """Print slot status (names + lengths only). Returns (pending_required, notes)."""
+    if store_locked():
+        # E2: presence is unknowable without the passphrase — honest
+        # fail-closed pending, never "ABSENT" (the slots may be filled).
+        say("secrets.env: LOCKED (E2 encrypted, passphrase unavailable) "
+            "— run: aidog secrets status")
+        return 2, ["secrets.env locked"]
     text = read_secrets()
     if not text:
         say("secrets.env: ABSENT (run 'aidog setup' to provision)")

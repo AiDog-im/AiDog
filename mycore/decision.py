@@ -57,6 +57,7 @@ import urllib.request
 import uuid
 
 from lib import profile_paths as pp
+from . import envslots  # noqa: E402  (E2: the one store reader)
 
 from . import meter
 
@@ -170,7 +171,7 @@ def _slot_value(name: str) -> str:
     if env:
         return env
     try:
-        text = pp.secrets_path().read_text(encoding="utf-8")
+        text = envslots.secrets_text(pp.secrets_path())
     except OSError:
         return ""
     m = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", text)

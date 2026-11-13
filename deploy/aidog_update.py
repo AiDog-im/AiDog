@@ -59,11 +59,29 @@ def installed_version() -> str:
         return "0.0.0"
 
 
-def env_slot(name: str) -> str | None:
+def _store_text() -> str:
+    """The secrets store text via the ONE shared reader (E2): plaintext
+    as-is, decrypted in memory when encrypted, "" when locked (fail-closed:
+    the update check then behaves like an absent optional slot — anonymous
+    reads still work). The mycore import is lazy; its failure falls back to
+    a direct read ONLY for a non-encrypted file — ciphertext is not env
+    text."""
     try:
-        m = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", SECRETS.read_text())
-    except OSError:
-        return None
+        if str(REPO) not in sys.path:
+            sys.path.insert(0, str(REPO))
+        from mycore import secrets_store  # noqa: PLC0415 — REPO on sys.path
+        return secrets_store.secrets_text(SECRETS)
+    except Exception:  # noqa: BLE001
+        try:
+            with SECRETS.open("rb") as fh:
+                head = fh.read(4)
+            return "" if head == b"SAFE" else SECRETS.read_text()
+        except OSError:
+            return ""
+
+
+def env_slot(name: str) -> str | None:
+    m = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", _store_text())
     return m.group(1).strip() if m else None
 
 

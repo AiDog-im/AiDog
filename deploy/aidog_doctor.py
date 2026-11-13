@@ -12,10 +12,13 @@ Phase-aware counting (P5-3) — `deploy/upstream_shim.env` is the phase resolver
     as `SKIP (post-swap)` entries — counted separately in the summary line,
     NEVER FAIL — and 4 mycore-runtime checks activate instead:
     mycore.service.pid, mycore.watchdog.state, mycore.secrets.slots,
-    mycore.web.console. Post-swap expected = **12 active + 20 SKIP** (32 entries),
-    target 0 FAIL / 0 WARN (repo dirt is the only tolerated WARN).
-    The 12 include the push-gate triple added by the desensitization car
-    (2026-10-28): git.remote_vault, git.hooks_path, git.pre_push_hook.
+    mycore.web.console. Post-swap expected = **13 active + 20 SKIP** (33
+    entries), target 0 FAIL / 0 WARN (repo dirt is the only tolerated WARN).
+    The 13 include the push-gate triple added by the desensitization car
+    (2026-10-28): git.remote_vault, git.hooks_path, git.pre_push_hook — and
+    the E2 at-rest row secrets.store.at_rest (2026-11-08, static-encryption
+    car: plaintext / encrypted-unlocked / LOCKED / absent, honest WARN on
+    a locked store).
 
 Exit code: 0 = all pass (warnings + skips allowed), 1 = at least one FAIL.
 """
@@ -112,12 +115,51 @@ def sh(cmd: list[str], timeout: int = 10) -> str:
 
 
 def env_line_value(path: Path, key: str) -> str | None:
-    """Return value if KEY sits on its OWN line (the P1 glue-pit detector)."""
+    """Return value if KEY sits on its OWN line (the P1 glue-pit detector).
+    E2: for the secrets STORE the text comes through the one shared reader
+    (decrypted in memory when encrypted; locked -> "" -> None, fail-closed
+    absence — never a ciphertext mis-parse). Other paths (.env) are plain
+    reads exactly as before."""
     try:
-        m = re.search(rf"(?m)^{re.escape(key)}=(\S+)$", path.read_text())
+        text = store_text() if path == SECRETS else path.read_text()
+        m = re.search(rf"(?m)^{re.escape(key)}=(\S+)$", text)
         return m.group(1) if m else None
     except Exception:  # noqa: BLE001
         return None
+
+
+def _secrets_store_mod():
+    """mycore.secrets_store, imported lazily (doctor must keep diagnosing a
+    broken install: sys.path gets the repo root, then the import)."""
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from mycore import secrets_store  # noqa: PLC0415 — lazy on purpose
+    return secrets_store
+
+
+def store_text() -> str:
+    """The secrets store text through the ONE shared reader (E2): plaintext
+    as-is, decrypted in memory when encrypted, "" when locked. Import
+    failure falls back to a direct read ONLY for a non-encrypted file —
+    ciphertext is not an env file and must never be parsed as one."""
+    try:
+        return _secrets_store_mod().secrets_text(SECRETS)
+    except Exception:  # noqa: BLE001 — doctor never raises
+        try:
+            with SECRETS.open("rb") as fh:
+                head = fh.read(4)
+            return "" if head == b"SAFE" else SECRETS.read_text()
+        except OSError:
+            return ""
+
+
+def store_state() -> str:
+    """absent | plain | locked | unlocked (E2 at-rest state), or "unknown"
+    when mycore cannot even be imported — the row reports that honestly."""
+    try:
+        return _secrets_store_mod().state(SECRETS)
+    except Exception:  # noqa: BLE001 — doctor never raises
+        return "unknown"
 
 
 def check_repo() -> None:
@@ -255,9 +297,6 @@ def check_secrets() -> None:
         add("WARN", "secrets.env", "absent (template only) — fill before P2 web console")
         return
     mode = stat.S_IMODE(SECRETS.stat().st_mode)
-    filled = sum(1 for line in SECRETS.read_text().splitlines()
-                 if line.strip() and not line.strip().startswith("#")
-                 and "=" in line and line.split("=", 1)[1].strip())
     fs = fs_type(SECRETS)
     if fs in {"9p", "drvfs", "virtiofs"} and (mode & 0o077):
         # WSL drive mounts expose no POSIX mode enforcement (chmod is a no-op);
@@ -267,7 +306,41 @@ def check_secrets() -> None:
     else:
         ok_mode = (mode & 0o077) == 0
         add("PASS" if ok_mode else "FAIL", "secrets.env.mode", oct(mode) + (" (0600-ish)" if ok_mode else " TOO OPEN"))
-    add("PASS" if filled else "WARN", "secrets.env.values", f"{filled} credential slots filled (values not shown)")
+    st = store_state()
+    if st == "locked":
+        # E2: presence is genuinely unknowable here — say so instead of
+        # reporting "0 filled" from ciphertext (fail-closed honesty).
+        add("WARN", "secrets.env.values",
+            "store LOCKED (encrypted, passphrase unavailable) — presence "
+            "unknown; see secrets.store.at_rest")
+    else:
+        filled = sum(1 for line in store_text().splitlines()
+                     if line.strip() and not line.strip().startswith("#")
+                     and "=" in line and line.split("=", 1)[1].strip())
+        add("PASS" if filled else "WARN", "secrets.env.values", f"{filled} credential slots filled (values not shown)")
+
+
+def check_secrets_store() -> None:
+    """E2 at-rest state of secrets.env (the 13th post-swap row): plaintext
+    = opt-in off (PASS), encrypted+unlocked = protected (PASS),
+    encrypted+LOCKED = live misconfiguration, readers fail-closed (WARN),
+    absent = nothing at rest yet (PASS — the provisioning WARN belongs to
+    check_secrets). Never prints a value or the passphrase."""
+    st = store_state()
+    if st == "plain":
+        add("PASS", "secrets.store.at_rest",
+            "plaintext at rest (E2 off — opt-in)")
+    elif st == "unlocked":
+        add("PASS", "secrets.store.at_rest", "encrypted at rest, unlocked")
+    elif st == "locked":
+        add("WARN", "secrets.store.at_rest",
+            "encrypted at rest, LOCKED — passphrase unavailable; readers "
+            "fail-closed (empty store)")
+    elif st == "absent":
+        add("PASS", "secrets.store.at_rest", "absent (nothing at rest yet)")
+    else:
+        add("WARN", "secrets.store.at_rest",
+            "store state unreadable (mycore import failed)")
 
 
 def check_profile_env() -> None:
@@ -556,6 +629,13 @@ def check_mycore_secrets() -> None:
     """Required secrets.env slot count for the post-swap product (presence and
     length only — key names are printed, never values)."""
     required = ("WEB_TOKEN", "MYCORE_TG_TOKEN")
+    if store_state() == "locked":
+        # E2: presence is unknowable without the passphrase — honest WARN
+        # pointing at the root cause, never "0/2 filled" from ciphertext.
+        add("WARN", "mycore.secrets.slots",
+            "store LOCKED — presence unknown (fail-closed; see "
+            "secrets.store.at_rest)")
+        return
     present = {k: bool(env_line_value(SECRETS, k)) for k in required}
     have = sum(1 for ok in present.values() if ok)
     if have == len(required):
@@ -604,7 +684,7 @@ def _run(fn) -> None:
 
 def main() -> int:
     plan = (check_repo, check_publish_guard, check_upstream_clean,
-            check_secrets, check_profile_env,
+            check_secrets, check_secrets_store, check_profile_env,
             check_config, check_soul_sync, check_memory, check_processes,
             check_endpoints, check_version)
     for fn in plan:

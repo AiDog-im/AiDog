@@ -29,7 +29,17 @@ die() { echo "DEPLOY_SITE: $*" >&2; exit 1; }
 
 # ---- credentials (subshell load; never print values) -----------------------
 [ -f secrets.env ] || die "secrets.env missing"
-set -a; . ./secrets.env; set +a
+if [ "$(head -c 4 secrets.env)" = "SAFE" ]; then
+  # E2: the store is encrypted — decrypt into THIS shell's memory only
+  # (stdout is captured by $(...), never echoed; the passphrase travels
+  # only inside the helper's child env, never in argv).
+  _aidog_env="$(python3 deploy/aidog_secrets.py shell-env)" \
+    || die "secrets.env locked/unreadable (E2) — run: aidog secrets status"
+  eval "$_aidog_env"
+  unset _aidog_env
+else
+  set -a; . ./secrets.env; set +a
+fi
 : "${AIDOG_CF_API_TOKEN:?AIDOG_CF_API_TOKEN missing}"
 : "${AIDOG_CF_DNS_TOKEN:?AIDOG_CF_DNS_TOKEN missing}"
 : "${AIDOG_CF_ACCOUNT_ID:?AIDOG_CF_ACCOUNT_ID missing}"
@@ -351,7 +361,7 @@ if grep -q "## Product" /tmp/deploy_site_llms.txt \
    && grep -q "nine venues" /tmp/deploy_site_llms.txt \
    && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
    && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
-   && grep -q "2268/2268" /tmp/deploy_site_llms.txt \
+   && grep -q "2297/2297" /tmp/deploy_site_llms.txt \
    && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else

@@ -140,14 +140,31 @@ fi
 #                 (optional on the public repo; anonymous reads are rate-limited)
 SLOTS_REQUIRED="WEB_TOKEN MYCORE_TG_TOKEN AIDOG_TG_ALLOWED_USERS"
 SLOTS_RECOMMENDED="MODEL_API_KEY AIDOG_GH_PAT"
+# E2: ciphertext is not greppable — a store that starts with the SAFE
+# magic is read through the store helper instead (one python cost for the
+# whole list). A locked store reports EVERY name: presence is unknowable,
+# so fail-closed pending is the honest answer. Plain stores keep the exact
+# historical grep below (default-off byte-identical rule).
+SECRETS_STATE=""
+if [ -f secrets.env ] && [ "$(head -c 4 secrets.env)" = "SAFE" ]; then
+  SECRETS_STATE="$(python3 deploy/aidog_secrets.py status --state 2>/dev/null)" || SECRETS_STATE="unknown"
+  note "secrets.env: E2 encrypted (state: $SECRETS_STATE) — presence via store reader"
+fi
 slot_empty() { ! grep -Eq "^$1=[^[:space:]]+$" secrets.env 2>/dev/null; }
 empty_required="" empty_recommended=""
-for k in $SLOTS_REQUIRED; do
-  slot_empty "$k" && empty_required="$empty_required $k"
-done
-for k in $SLOTS_RECOMMENDED; do
-  slot_empty "$k" && empty_recommended="$empty_recommended $k"
-done
+if [ -n "$SECRETS_STATE" ]; then
+  empty_required="$(python3 deploy/aidog_secrets.py empty-slots $SLOTS_REQUIRED 2>/dev/null)" || empty_required="$SLOTS_REQUIRED"
+  [ -n "$empty_required" ] && empty_required=" $empty_required"
+  empty_recommended="$(python3 deploy/aidog_secrets.py empty-slots $SLOTS_RECOMMENDED 2>/dev/null)" || empty_recommended="$SLOTS_RECOMMENDED"
+  [ -n "$empty_recommended" ] && empty_recommended=" $empty_recommended"
+else
+  for k in $SLOTS_REQUIRED; do
+    slot_empty "$k" && empty_required="$empty_required $k"
+  done
+  for k in $SLOTS_RECOMMENDED; do
+    slot_empty "$k" && empty_recommended="$empty_recommended $k"
+  done
+fi
 if [ -n "$empty_required" ]; then
   note "secrets.env REQUIRED slots still empty:$empty_required"
   note "  -> edit secrets.env (values live only there; never paste them anywhere else)"

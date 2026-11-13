@@ -22,6 +22,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (profile path seam)
+from . import secrets_store  # noqa: E402  (E2: the one store reader)
 
 # The one slot this module resolves today; callers keep their own regex over
 # the returned text (the value itself is never echoed anywhere).
@@ -34,11 +35,26 @@ def secrets_file(path: Path | str | None = None) -> Path:
     return Path(path) if path is not None else pp.secrets_path(REPO)
 
 
+def secrets_text(path: Path | str | None = None) -> str:
+    """THE store reader every credential-slot leg shares (E2 wiring).
+
+    plain    -> the file bytes as text (byte-identical historical reads);
+    encrypted-> the decrypted text from memory (unlock once, cache);
+    locked   -> "" (fail-closed honest absence — never a plaintext
+    fallback; `secrets_store.state()` is how a surface tells locked from
+    unset).
+    """
+    try:
+        return secrets_store.secrets_text(secrets_file(path))
+    except OSError:
+        return ""
+
+
 def slot_value(name: str, path: Path | str | None = None) -> str:
     """Own-line read of one slot (glue-pit safe: `^NAME=<non-space...>`).
     Absent/unreadable file or absent slot -> "" (honest empty)."""
     try:
-        text = secrets_file(path).read_text(encoding="utf-8")
+        text = secrets_text(path)
     except OSError:
         return ""
     m = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", text)

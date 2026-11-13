@@ -3924,6 +3924,10 @@ const CRED_HINTS = {
     "read-only: no access token on this machine — set WEB_TOKEN in secrets.env"],
   needToken: ["cred.needToken",
     "access token required — set it in Access"],
+  // E2: a locked store is the ROOT cause — it outranks readOnly/needToken
+  // (slots read as empty and every write is refused until source A returns).
+  locked: ["cred.locked",
+    "store locked — secrets.env is encrypted and the passphrase is unavailable; slots read as empty and writes are refused"],
 };
 
 let credsData = null;      // last GET /api/secrets payload (names/lengths only)
@@ -4612,8 +4616,10 @@ async function loadCreds() {
     renderConnections(body);
     renderProxyCred(body);        // car H: AIDOG_PROXY_AUTH row on its own card
     list.hidden = false;
-    credHintReason = body.writable === false ? "readOnly"
-      : ((localStorage.getItem(TOKEN_KEY) || "") ? "" : "needToken");
+    const storeLocked = !!(body.store && body.store.locked);
+    credHintReason = storeLocked ? "locked"
+      : (body.writable === false ? "readOnly"
+      : ((localStorage.getItem(TOKEN_KEY) || "") ? "" : "needToken"));
   } catch (e) {                       // 404 / network: honest unavailable
     credsData = null;
     list.hidden = true;

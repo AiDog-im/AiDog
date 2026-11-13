@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2268%2F2268-brightgreen?style=flat-square" alt="core tests 2268/2268">
+  <img src="https://img.shields.io/badge/core_tests-2297%2F2297-brightgreen?style=flat-square" alt="core tests 2297/2297">
   <img src="https://img.shields.io/badge/console_smoke-547%2F547-brightgreen?style=flat-square" alt="console smoke 547/547">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
@@ -56,7 +56,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **39 modules ≈ 24.0k LOC, 2,268 tests**, and zero upstream
+  stop reasons, **40 modules ≈ 24.5k LOC, 2,297 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -91,7 +91,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 39 modules, 2,268 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 40 modules, 2,297 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 37/37 |
@@ -182,7 +182,7 @@ Automated E2E covers the stack on this machine; a **manual spot-check**
 completes the acceptance pass. Quick version:
 
 ```bash
-python3 deploy/aidog_doctor.py       # health gate: 12 checks · 0 FAIL · 20 SKIP
+python3 deploy/aidog_doctor.py       # health gate: 13 checks · 0 FAIL · 20 SKIP
 bash deploy/boot_services.sh status  # console + service + watchdog green
 bash deploy/run_service.sh --check   # readiness rc=0
 python3 deploy/aidog_update.py check # version channel: up to date
@@ -200,7 +200,7 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2268/2268** |
+| `mycore` core suite | **2297/2297** |
 | Console smoke (live HTTP) | **547/547** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |
@@ -214,7 +214,7 @@ Every release is cut only after these run green on a clean tree:
 Catalog scope: **28 registered tools** · **9 exchange venues** · **27
 real-machine E2E suites** — all green.
 
-Locale packs: `en` (default) + `zh`, **1460 keys** each, parity lint in CI;
+Locale packs: `en` (default) + `zh`, **1463 keys** each, parity lint in CI;
 the marketing site ships its own **341-key** bilingual pack.
 
 ## Documentation
