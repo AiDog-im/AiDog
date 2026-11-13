@@ -110,7 +110,7 @@
   "caps.c6T": "9-route channel gateway",
   "caps.c6B": "Telegram is live; nine adapters — Discord / Slack / Email / Webhook / DingTalk / Feishu / WeChat / WhatsApp / Signal — each reports an honest status and stays silent while unconfigured.",
   "caps.c7T": "Desktop HUD shell",
-  "caps.c7B": "An Electron frameless shell with transparency slider, always-on-top and tray — Linux packaging verified, Win/macOS honestly not built yet; desktop suite 15/15.",
+  "caps.c7B": "An Electron frameless shell with transparency slider, always-on-top and tray — Linux packaging verified, Win/macOS honestly not built yet; desktop suite 16/16.",
   "caps.c8T": "Multi-profile isolation",
   "caps.c8B": "AIDOG_PROFILE selects fully isolated profiles — settings, secrets, state and body kept apart — proven by a 63/63 isolation gate and an 18-leg real-machine E2E.",
   "caps.c9T": "Terminal backends & code runs",
