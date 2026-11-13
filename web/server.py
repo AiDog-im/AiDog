@@ -103,7 +103,8 @@ Routes:
                                    latency_ms, error_class}] — exception class /
                                    HTTP status only: never a URL query, a body
                                    or a key
-  POST /api/models/discover    -> Bearer; {base_url, api_key?} ONE read-only
+  POST /api/models/discover    -> Bearer; {base_url, api_key? | slot?} ONE
+                                   read-only
                                    GET of that endpoint's model directory
                                    (the OpenAI-compatible /models read — never
                                    a completion, zero tokens) -> {ok:true,
@@ -677,7 +678,8 @@ USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
-               "max_tpm", "sniff", "decision", "subagent", "timeout")
+               "max_tpm", "sniff", "decision", "subagent", "timeout",
+               "max_tokens")
 # Car 4 (D6): fields the mycore.decision block accepts — the key slot is NOT
 # one of them (see the DEFAULT_SETTINGS note).
 DECISION_KEYS = ("enabled", "url", "model", "router_model")
@@ -1672,6 +1674,19 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             or not 5 <= val <= 600:
                         errors.append(
                             "mycore.timeout must be an integer of 5..600 seconds")
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "max_tokens":
+                    # console fix car (owner 2026-11-05): per-request OUTPUT
+                    # cap — the hardcoded 4096 clipped long replies
+                    # mid-sentence (model_usage out:4096). Closed range; the
+                    # absent key keeps ModelConfig.max_tokens (4096)
+                    # byte-identical.
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not 128 <= val <= 65536:
+                        errors.append(
+                            "mycore.max_tokens must be an integer of 128..65536")
                         continue
                     clean_mc[key] = val
                     continue
@@ -5825,18 +5840,31 @@ def _discover_candidates(base: str) -> list[str]:
     return out
 
 
-def _discover_auth(base: str, api_key: str) -> tuple[str, str]:
-    """api_key rule (D1), the three cases, in order:
+def _discover_auth(base: str, api_key: str, slot: str = "") -> tuple[str, str]:
+    """api_key rule (D1 + console fix car slot), the cases, in order:
       1. an inline key travels ONLY as this host's Authorization header;
-      2. an empty key against the CONFIGURED endpoint (settings
+      2. an explicit `slot` NAME resolves its saved value (process env first,
+         then secrets.env — the same seam as upstreams/test); the value
+         lives in this frame only and the response reports auth="slot".
+         The handler already refused an unset slot, so an empty resolve
+         here answers "none" — never a silent fallback to another key;
+      3. an empty key against the CONFIGURED endpoint (settings
          mycore.base_url) resolves the saved MODEL_API_KEY slot — handy, and
          the value never leaves this machine;
-      3. an empty key against any other endpoint sends NO Authorization, so
+      4. an empty key against any other endpoint sends NO Authorization, so
          an honest 401 tells the operator a key is needed.
     The returned value lives in the caller's frame only — it is never echoed,
     never logged and never serialized."""
     if api_key:
         return api_key, "key"
+    if slot:
+        try:
+            value = (os.environ.get(slot, "") or read_env_slot(slot) or "")
+        except Exception:  # noqa: BLE001 — an unreadable store reads absent
+            value = ""
+        if value:
+            return value, "slot"
+        return "", "none"
     stored = ""
     try:
         mc = load_settings().get("mycore")
@@ -5855,7 +5883,7 @@ def _discover_auth(base: str, api_key: str) -> tuple[str, str]:
     return "", "none"
 
 
-def discover_models(base: str, api_key: str = "") -> dict:
+def discover_models(base: str, api_key: str = "", slot: str = "") -> dict:
     """D1: one read-only GET of {base}/models — a directory read, so zero
     tokens are spent and no completion is ever touched.
 
@@ -5868,7 +5896,7 @@ def discover_models(base: str, api_key: str = "") -> dict:
     `count < total` — by either cap or filter — is visible instead of silent.
     A reflecting endpoint cannot echo the key back either: an id containing
     it is dropped like a malformed one."""
-    key, auth = _discover_auth(base, api_key)
+    key, auth = _discover_auth(base, api_key, slot)
     try:
         parts = urllib.parse.urlsplit(base)
         scheme, host = parts.scheme, parts.hostname
@@ -7708,10 +7736,17 @@ class Handler(BaseHTTPRequestHandler):
         return self._json(results)
 
     def _handle_models_discover(self) -> None:
-        """POST /api/models/discover {base_url, api_key?} — Bearer gate, then
-        ONE read-only GET of the endpoint's model directory (D1): the
-        OpenAI-compatible /models list, so a discovery spends **zero tokens**
+        """POST /api/models/discover {base_url, api_key? | slot?} — Bearer
+        gate, then ONE read-only GET of the endpoint's model directory (D1):
+        the OpenAI-compatible /models list, so a discovery spends **zero tokens**
         and never reaches a completion.
+
+        Console fix car (owner 2026-11-05): the optional `slot` lets ANY
+        endpoint row discover WITH its saved key — the same model-slot
+        grammar, presence check and zero-echo frame as
+        /api/mycore/upstreams/test (a slot value never leaves this request).
+        `api_key` and `slot` are mutually exclusive (the UI sends one or the
+        other; precedence is never guessed).
 
         Same trust posture as /api/mycore/upstreams/test: the console Bearer
         IS the owner, and the existing hook editor can already write argv, so
@@ -7762,7 +7797,35 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "validation failed",
                                "details": [f"api_key too long (max "
                                            f"{DISCOVER_KEY_MAX} chars)"]}, 400)
-        result = discover_models(base, key.strip())
+        slot = doc.get("slot")
+        if slot is not None:
+            if not isinstance(slot, str) or not slot.strip():
+                return self._json({"error": "validation failed",
+                                   "details": ["slot must be a non-empty "
+                                               "string"]}, 400)
+            slot = slot.strip()
+            if not MODEL_KEY_SLOT_RE.match(slot):
+                # defense in depth: only model slots resolve here — the same
+                # grammar as upstreams/test, checked before any value reads.
+                return self._json({"error": "validation failed",
+                                   "details": ["slot must be a model key slot "
+                                               "(MODEL_API_KEY|"
+                                               "OPENAI_API_TOKEN|MODEL_UP_K*)"]},
+                                  400)
+            if key:
+                return self._json({"error": "validation failed",
+                                   "details": ["api_key and slot are "
+                                               "mutually exclusive (send "
+                                               "one)"]}, 400)
+            try:
+                resolved = os.environ.get(slot, "") or (read_env_slot(slot) or "")
+            except Exception:  # noqa: BLE001 — an unreadable store reads absent
+                resolved = ""
+            if not resolved:
+                return self._json({"error": "validation failed",
+                                   "details": [f"slot {slot} is not set"]}, 400)
+            key = ""                  # only the NAME travels below
+        result = discover_models(base, key.strip(), slot=slot or "")
         # counts + a boolean only — endpoint, key and body stay out of the log
         sys.stderr.write("models discover ok=%s n=%s total=%s auth=%s\n" %
                          ("yes" if result.get("ok") else "no",

@@ -193,9 +193,10 @@
                (never replacing it — the words stay the accessible truth) -->
           <span class="tail-mood" id="tailMood" data-state="idle" aria-hidden="true">
             <svg viewBox="0 0 16 16" width="16" height="16" focusable="false">
-              <path d="M3 14 C 3 9 5 5 9 3.5 C 11.5 2.6 13.5 3 14.5 4"
-                    fill="none" stroke="currentColor" stroke-width="2"
-                    stroke-linecap="round"/>
+              <!-- console fix car (owner 2026-11-05): the old squiggle read as
+                   a stray glyph — now a plain status dot (state colors below;
+                   the words in #tailState stay the accessible truth) -->
+              <circle cx="8" cy="8" r="5" fill="currentColor"/>
             </svg>
           </span>
           <span class="stat-note" id="tailState" role="status">–</span>
@@ -482,7 +483,8 @@
           <input id="chatInput" class="chat-input" maxlength="4000" autocomplete="off"
                  data-i18n-ph="chat.ph" placeholder="ask the assistant…">
           <button class="btn primary" id="chatSend" data-i18n="chat.send">SEND</button>
-          <button class="btn" id="chatClear" data-i18n="chat.clear">CLEAR</button>
+          <button class="btn" id="chatClear" data-i18n="chat.clear"
+                  title="archive the current session and start a new one">NEW SESSION</button>
           <button class="btn" id="chatStop" data-i18n="chat.stop"
                   title="abort the turn that is running right now">STOP</button>
           <label class="btn" title="attach an image for your next message — the model endpoint must support vision; a non-multimodal endpoint answers with an honest refusal, never a fake"
@@ -1464,6 +1466,14 @@
             <input type="number" id="mycTimeout" min="5" max="600" step="1"
                    data-i18n-ph="ctl.mycTimeoutPh" placeholder="120 = default (5..600)">
           </div>
+          <!-- console fix car (owner 2026-11-05): per-request OUTPUT cap —
+               the hardcoded 4096 clipped long replies mid-sentence.
+               Dirty-block like timeout: untouched never rides along. -->
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycMaxTokens">Max output tokens</label>
+            <input type="number" id="mycMaxTokens" min="128" max="65536" step="1"
+                   data-i18n-ph="ctl.mycMaxTokensPh" placeholder="4096 = default (128..65536)">
+          </div>
           <!-- Wave 6 delta2 (X12/X15): OPT-IN switches — an untouched form
                changes nothing (0 days = off; effort off = the default wire
                byte-for-byte). Prune age is applied on save, at most hourly
@@ -1507,7 +1517,7 @@
           </div>
           <!-- v0.5.55 gateway car: structured endpoint manager ---------- -->
           <div class="ctl-row">
-            <label data-i18n="ctl.mycEndpoints">Failover endpoints</label>
+            <label data-i18n="ctl.mycEndpoints">Model source routes</label>
             <span class="save-state" id="epSourceChip" role="status" hidden></span>
           </div>
           <div id="epList" class="ep-list"></div>
@@ -1753,8 +1763,8 @@
                 <input type="datetime-local" id="missionDeadline">
               </label>
               <div class="cs-field">
-                <span><span data-i18n="mission.csRedlines">red lines (never cross)</span>
-                  <span class="cs-count" id="missionRedlinesCount">0/500</span></span>
+                <label for="missionRedlines"><span data-i18n="mission.csRedlines">red lines (never cross)</span>
+                  <span class="cs-count" id="missionRedlinesCount">0/500</span></label>
                 <textarea id="missionRedlines" rows="2" maxlength="500"
                           spellcheck="false"></textarea>
               </div>

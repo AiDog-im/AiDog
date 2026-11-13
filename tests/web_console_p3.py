@@ -830,6 +830,13 @@ def main() -> int:
     check("GET endpoints: presence booleans only, no values",
           all(isinstance(k.get("set"), bool) for k in _ep0["keys"])
           and len(json.dumps(eps)) < 4000, json.dumps(eps)[:200])
+    # console fix car (owner 2026-11-06): capture the owner's endpoint rows
+    # BEFORE this leg rewrites them — the gateway cleanup below restores
+    # them verbatim ("leave settings as found" was only true while the
+    # stored list was always empty; a production row must survive the smoke).
+    _s0, _st0 = get("/api/settings")
+    _eps_orig = (((_st0 or {}).get("mycore") or {}).get("endpoints")
+                 or []) if _s0 == 200 else []
     if token:
         s, body = post("/api/settings", {"mycore": {"endpoints": [
             {"url": "https://gw.example/v1", "model": "m",
@@ -1365,16 +1372,19 @@ def main() -> int:
         s, body = post("/api/secrets", {"name": "MODEL_UP_K1", "value": ""},
                        token)
         check("clear MODEL_UP_K1 -> 200", s == 200, f"got {s} {body}")
-        # reset every knob this leg touched (leave settings as found)
+        # reset every knob this leg touched (leave settings as found — the
+        # owner's endpoint rows captured above are restored verbatim)
         s, body = post("/api/settings", {
-            "mycore": {"endpoints": [], "rotation": "", "max_rpm": 0,
+            "mycore": {"endpoints": _eps_orig, "rotation": "", "max_rpm": 0,
                        "max_tpm": 0},
             "usage": {"model_pricing": {}}}, token)
         check("gateway leg cleanup -> 200", s == 200, f"got {s} {body}")
         s, eps = get("/api/mycore/endpoints")
-        check("cleanup verified: source back to none/primary-only",
-              s == 200 and eps.get("source") in ("none", "upstreams")
-              and len(eps.get("endpoints") or []) == 1
+        _n0 = len(_eps_orig)
+        check("cleanup verified: endpoints back to the pre-leg state",
+              s == 200 and len(eps.get("endpoints") or []) == 1 + _n0
+              and (eps.get("source") == "endpoints" if _n0
+                   else eps.get("source") in ("none", "upstreams"))
               and eps.get("rotation") == "" and eps.get("max_rpm") == 0,
               str(eps)[:300])
 
@@ -4224,23 +4234,34 @@ def main() -> int:
                   f"got {s} {str(body)[:150]}")
 
     # backlog (owner 2026-11-02): mycore.timeout — closed 5..600 range.
+    # console fix car (owner 2026-11-05): mycore.max_tokens folded into the
+    # SAME legs (128..65536) — count unchanged by car discipline.
     # Only refusals cross the wire here (a legal write would need a key the
     # API cannot delete, so the legal path is pinned by core's validate +
     # resolve legs instead — zero production-settings mutation).
     s, settings_now = get("/api/settings")
-    _tmo = (settings_now.get("mycore") or {}).get("timeout") if isinstance(settings_now, dict) else "missing"
-    check("GET settings mycore.timeout shape (absent or int 5..600)",
+    _mc_now = (settings_now.get("mycore") or {}) if isinstance(settings_now, dict) else {}
+    _tmo = _mc_now.get("timeout")
+    _mxt = _mc_now.get("max_tokens")
+    check("GET settings mycore.timeout/max_tokens shape (absent or in range)",
           s == 200 and (_tmo is None
-                        or (type(_tmo) is int and 5 <= _tmo <= 600)),
-          f"got {s} timeout={_tmo!r}")
+                        or (type(_tmo) is int and 5 <= _tmo <= 600))
+          and (_mxt is None
+               or (type(_mxt) is int and 128 <= _mxt <= 65536)),
+          f"got {s} timeout={_tmo!r} max_tokens={_mxt!r}")
     if token:
-        for _bad in (4, 601, 0, -1, "30", True, 3.5):
-            s, body = post("/api/settings", {"mycore": {"timeout": _bad}}, token)
-            check(f"settings mycore.timeout {_bad!r} -> 400",
-                  s == 400 and isinstance(body, dict)
+        for _bt, _bm in ((4, 127), (601, 65537), (0, 0), (-1, -1),
+                         ("30", "30"), (True, True), (3.5, 3.5)):
+            s1, b1 = post("/api/settings", {"mycore": {"timeout": _bt}}, token)
+            s2, b2 = post("/api/settings", {"mycore": {"max_tokens": _bm}}, token)
+            check(f"settings mycore.timeout {_bt!r} / max_tokens {_bm!r} -> 400",
+                  s1 == 400 and isinstance(b1, dict)
                   and any("mycore.timeout" in str(d)
-                          for d in body.get("details", [])),
-                  f"got {s} {str(body)[:130]}")
+                          for d in b1.get("details", []))
+                  and s2 == 400 and isinstance(b2, dict)
+                  and any("mycore.max_tokens" in str(d)
+                          for d in b2.get("details", [])),
+                  f"got {s1}/{s2} {str(b1)[:80]} {str(b2)[:80]}")
 
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:

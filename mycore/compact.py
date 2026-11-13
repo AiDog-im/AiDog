@@ -144,11 +144,17 @@ def compact(messages: list[dict], budget_chars: int,
             keep_tail: int = KEEP_TAIL_TURNS) -> tuple[list[dict], int]:
     """Fold oldest non-system turns until `measure() <= budget_chars`.
 
-    Returns (new_messages, folded_count). Never touches system messages and
-    never folds the newest `keep_tail` messages. Deterministic: same input ->
-    same output. If the tail alone exceeds the budget, nothing is folded
-    (honest: we do not delete live dialogue — the caller may raise the budget
-    or the model call will simply be long).
+    Returns (new_messages, folded_count). Never touches system messages,
+    never folds the newest `keep_tail` messages, and never folds the newest
+    user message — that is the live question being answered right now
+    (every caller appends it last; only assistant/tool rows land after it
+    mid-turn), so folding it would hide the task from the model AND drop
+    the user's row from the persisted session delta (system markers are
+    filtered out on save — owner 2026-11-05: tool-heavy turns lost the
+    user's messages). Deterministic: same input -> same output. If the
+    protected region alone exceeds the budget, nothing is folded (honest:
+    we do not delete live dialogue — the caller may raise the budget or
+    the model call will simply be long).
     """
     if budget_chars <= 0:
         raise ValueError("budget_chars must be positive")
@@ -156,10 +162,22 @@ def compact(messages: list[dict], budget_chars: int,
         return messages, 0
 
     result = list(messages)
+    # The live question = the newest user-role row (callers append it last;
+    # only assistant/tool rows arrive after it mid-turn). It is never
+    # foldable: the model must keep seeing the task, and the session delta
+    # persists user rows by identity — a folded question becomes a system
+    # marker and silently vanishes from the record (owner 2026-11-05).
+    live_user = -1
+    for i in range(len(result) - 1, -1, -1):
+        m = result[i]
+        if isinstance(m, dict) and m.get("role") == "user":
+            live_user = i
+            break
     folded = 0
     while measure(result) > budget_chars:
         # fold the oldest foldable turn: not system, not an already-folded
-        # marker, and inside the region kept intact at the tail
+        # marker, not the live question, and inside the region kept intact
+        # at the tail
         target = None
         for i in range(len(result) - keep_tail):
             m = result[i]
@@ -167,6 +185,8 @@ def compact(messages: list[dict], budget_chars: int,
                 continue
             if m.get("role") == "system":
                 continue                                # constitution never folds
+            if i == live_user:
+                continue                                # never fold the live question
             content = m.get("content")
             if isinstance(content, str) and content.startswith("[compacted "):
                 continue                                # never re-fold a marker
