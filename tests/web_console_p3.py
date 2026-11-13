@@ -4223,6 +4223,25 @@ def main() -> int:
                   and any(_want in str(d) for d in body.get("details", [])),
                   f"got {s} {str(body)[:150]}")
 
+    # backlog (owner 2026-11-02): mycore.timeout — closed 5..600 range.
+    # Only refusals cross the wire here (a legal write would need a key the
+    # API cannot delete, so the legal path is pinned by core's validate +
+    # resolve legs instead — zero production-settings mutation).
+    s, settings_now = get("/api/settings")
+    _tmo = (settings_now.get("mycore") or {}).get("timeout") if isinstance(settings_now, dict) else "missing"
+    check("GET settings mycore.timeout shape (absent or int 5..600)",
+          s == 200 and (_tmo is None
+                        or (type(_tmo) is int and 5 <= _tmo <= 600)),
+          f"got {s} timeout={_tmo!r}")
+    if token:
+        for _bad in (4, 601, 0, -1, "30", True, 3.5):
+            s, body = post("/api/settings", {"mycore": {"timeout": _bad}}, token)
+            check(f"settings mycore.timeout {_bad!r} -> 400",
+                  s == 400 and isinstance(body, dict)
+                  and any("mycore.timeout" in str(d)
+                          for d in body.get("details", [])),
+                  f"got {s} {str(body)[:130]}")
+
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))
