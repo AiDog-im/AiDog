@@ -55,7 +55,22 @@ WEB_PORT="${WEB_PORT:-19167}"
 # plus an `env` prefix on each start command for determinism.
 PROXY_URL=${HTTPS_PROXY:-${https_proxy:-http://127.0.0.1:12334}}
 NO_PROXY_VAL=${NO_PROXY:-${no_proxy:-localhost,127.0.0.1,::1}}
-PROXY_ENV="env HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL http_proxy=$PROXY_URL https_proxy=$PROXY_URL NO_PROXY=$NO_PROXY_VAL no_proxy=$NO_PROXY_VAL"
+# Car K (recovery center B4, owner ask 2026-11-01): deploy/proxy.local wins
+# over the env chain — a NON-EMPTY first line pins the proxy URL, an EMPTY
+# file means DIRECT MODE (no proxy env at all, for a dead local proxy).
+# The console's DIRECT MODE switch writes it; the change applies on the next
+# service restart (honest restart_required, never a live re-bind).
+PROXY_FILE="$REPO/deploy/proxy.local"
+PROXY_DIRECT=""
+if [ -f "$PROXY_FILE" ]; then
+  _pv="$(head -n1 "$PROXY_FILE" | tr -d '[:space:]')"
+  if [ -n "$_pv" ]; then PROXY_URL="$_pv"; else PROXY_DIRECT="1"; fi
+fi
+if [ -n "$PROXY_DIRECT" ]; then
+  PROXY_ENV="env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy"
+else
+  PROXY_ENV="env HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL http_proxy=$PROXY_URL https_proxy=$PROXY_URL NO_PROXY=$NO_PROXY_VAL no_proxy=$NO_PROXY_VAL"
+fi
 
 inject_proxy() {
   tmux set-environment -g HTTP_PROXY "$PROXY_URL"

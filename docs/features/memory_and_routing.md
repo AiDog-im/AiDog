@@ -141,7 +141,7 @@ against the survey/spec before widening the surface.
 
 ## Cross-machine portability (P4, 2026-10-18)
 
-Owner decree: the memory sync source must be **self-contained** (a fresh machine
+Product rule: the memory sync source must be **self-contained** (a fresh machine
 must not depend on machine-specific absolute paths of another project), and the
 **private memory repository** is the single source of truth across machines.
 Both are implemented by the `./aidog` CLI (root shim → `deploy/aidog_persist.py`,

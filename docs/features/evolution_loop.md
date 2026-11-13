@@ -6,7 +6,7 @@ ship `/learn` as a feature; this is a **system**: learn → reflect
 (daily/weekly/monthly) → evolution log → lint gate, growing more familiar
 with use.
 
-**Honest boundary (owner red line):** the loop exists as code + gates + tests
+**Honest boundary (a hard product rule):** the loop exists as code + gates + tests
 only after this lands. The cron leg is **off by default** (`evolution.enabled
 = false`, fail-closed), reflect drafts are **fact skeletons with a Human
 conclusion placeholder** — conclusions are never generated, only written by
