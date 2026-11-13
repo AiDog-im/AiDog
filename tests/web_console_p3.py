@@ -702,11 +702,20 @@ def main() -> int:
                                                 "token_day": 250000},
           str(st.get("guardrails")))
     s, ctl5 = get("/api/control")
-    check("control view follows the new caps (states still ok/unknown)",
+    # Host-state honesty (car E): the state word tracks the LIVE meter — once
+    # today's real usage passes the written cap, `over` is the CORRECT answer
+    # (the gate doing its job), not a regression. The leg's claim is that the
+    # view FOLLOWS the caps: limits echo the write, and the state must be
+    # consistent with usage (over only when actually over).
+    _tok = (ctl5.get("budget") or {}).get("tokens") or {}
+    _used = _tok.get("used")
+    check("control view follows the new caps (states track usage honestly)",
           s == 200 and ctl5.get("budget", {}).get("limits")
           == {"usd_day": 5.0, "token_day": 250000}
-          and ctl5.get("budget", {}).get("tokens", {}).get("state")
-          in ("ok", "unknown"), str(ctl5.get("budget"))[:200])
+          and _tok.get("state") in ("ok", "unknown", "over")
+          and (_tok.get("state") != "over"
+               or (isinstance(_used, int) and _used > 250000)),
+          str(ctl5.get("budget"))[:200])
     for bad, needle in [({"usd_day": -1}, "usd_day"),
                         ({"token_day": True}, "token_day"),
                         ({"nope": 1}, "nope")]:
@@ -1054,6 +1063,207 @@ def main() -> int:
         s, body = post("/api/settings", {"extensions": _ext_orig}, token)
         check("extensions restored after the smoke leg", s == 200,
               f"got {s} {str(body)[:120]}")
+        # ---- car E (security self-check): endpoint contract + probe units ----
+        def _get_sec(hdr_token):
+            _req = urllib.request.Request(BASE + "/api/security")
+            if hdr_token is not None:
+                _req.add_header("Authorization", f"Bearer {hdr_token}")
+            try:
+                with urllib.request.urlopen(_req, timeout=15) as _r:
+                    return _r.status, json.loads(_r.read().decode())
+            except urllib.error.HTTPError as _e:
+                _b = _e.read().decode()
+                try:
+                    return _e.code, json.loads(_b)
+                except ValueError:
+                    return _e.code, _b
+            except Exception as _e:  # noqa: BLE001
+                return 0, f"{type(_e).__name__}: {_e}"
+
+        s, body = _get_sec(None)
+        check("GET /api/security no token -> 401", s == 401, f"got {s}")
+        s, body = _get_sec("wrong-token")
+        check("GET /api/security wrong token -> 401", s == 401, f"got {s}")
+        s, sec = _get_sec(token)
+        _ids = ["listening", "firewall", "token", "sentinel", "age",
+                "perms"]
+        check("GET /api/security shape (6 fixed checks, verdict + summary)",
+              s == 200 and isinstance(sec, dict)
+              and sec.get("verdict") in ("ok", "warn", "fail", "unknown")
+              and isinstance(sec.get("summary"), dict)
+              and isinstance(sec.get("checks"), list)
+              and [c.get("id") for c in sec["checks"]] == _ids
+              and all(c.get("state") in ("ok", "warn", "fail", "unknown")
+                      and isinstance(c.get("detail"), str)
+                      and str(c.get("i18n", "")).startswith("sck.d.")
+                      and isinstance(c.get("args"), dict)
+                      for c in sec["checks"])
+              and sum(sec["summary"].values()) == 6,
+              f"got {s} {str(sec)[:240]}")
+        # zero echo: no secrets.env value and no Bearer material in the body
+        # (letter-bearing values only: a pure-digit chat id could collide with
+        # the epoch in `ts` and make this leg flaky for no safety gain —
+        # security.py reads only WEB_TOKEN and emits slot NAMES)
+        _sec_blob = json.dumps(sec) if isinstance(sec, (dict, list)) \
+            else str(sec)
+        _leaks = []
+        for _ln in SECRETS.read_text().splitlines():
+            if "=" in _ln and not _ln.lstrip().startswith("#"):
+                _v = _ln.split("=", 1)[1].strip()
+                if len(_v) >= 6 and any(ch.isalpha() for ch in _v):
+                    _leaks.append(_v)
+        check("security report echoes zero credential values",
+              bool(sec) and all(v not in _sec_blob for v in _leaks)
+              and "Bearer" not in _sec_blob,
+              "value in payload" if any(v in _sec_blob for v in _leaks)
+              else "")
+        # in-process probe units (seams — no live-host assumptions)
+        import tempfile as _tmpsec
+        from mycore import security as _secmod
+        _Res = _secmod._Res
+        _saved_runner = _secmod._RUNNER
+        try:
+            # token strength buckets (the value never leaves the heuristic)
+            _wk = _secmod.token_strength("changeme")
+            _sh = _secmod.token_strength("aB3kZq7w")   # 8 chars -> fail
+            _st = _secmod.token_strength("x" * 40)
+            _wn = _secmod.token_strength("Ab3" * 6)          # 18 chars
+            _un = _secmod.token_strength("")
+            check("token strength: template / short -> fail",
+                  _wk["state"] == "fail" and _wk["i18n"]
+                  == "sck.d.token.template"
+                  and _sh["state"] == "fail"
+                  and _sh["i18n"] == "sck.d.token.fail",
+                  f"{_wk} {_sh}")
+            check("token strength: long/random -> ok, mid -> warn, "
+                  "empty -> unknown",
+                  _st["state"] == "ok" and _wn["state"] == "warn"
+                  and _un["state"] == "unknown",
+                  f"{_st['state']} {_wn['state']} {_un['state']}")
+            check("token strength never echoes the value",
+                  all(v not in json.dumps(r) for v, r in
+                      (("changeme", _wk), ("aB3kZq7w", _sh),
+                       ("x" * 40, _st))),
+                  "sentinel in strength payload")
+            # listening probe: canned ss output through the runner seam
+            _cans = {
+                ("ss",): (0, "State Recv-Q Send-Q Local Address:Port\n"
+                             "LISTEN 0 128 127.0.0.1:19167 0.0.0.0:*\n"
+                             "LISTEN 0 128 0.0.0.0:8080 0.0.0.0:*\n"),
+            }
+            _secmod.set_runner_for_tests(
+                lambda argv, timeout=0: _Res(*_cans[(argv[0],)])
+                if (argv[0],) in _cans else None)
+            _lp = _secmod._check_listening(19167)
+            check("listening probe: loopback console + other wildcard -> "
+                  "warn with the port named",
+                  _lp["state"] == "warn" and _lp["args"].get("others") == 1
+                  and "8080" in _lp["args"].get("ports", ""),
+                  str(_lp))
+            _secmod.set_runner_for_tests(
+                lambda argv, timeout=0: _Res(
+                    0, "State Recv-Q Send-Q Local Address:Port\n"
+                       "LISTEN 0 128 0.0.0.0:19167 0.0.0.0:*\n"))
+            _lp2 = _secmod._check_listening(19167)
+            check("listening probe: exposed console port -> fail",
+                  _lp2["state"] == "fail", str(_lp2))
+            _secmod.set_runner_for_tests(
+                lambda argv, timeout=0: None)   # nothing readable
+            _saved_proc = _secmod.PROC_NET_DIR
+            _secmod.PROC_NET_DIR = Path("/nonexistent/probe/net")
+            try:
+                _lp3 = _secmod._check_listening(19167)
+            finally:
+                _secmod.PROC_NET_DIR = _saved_proc
+            check("listening probe: unavailable -> honest unknown",
+                  _lp3["state"] == "unknown", str(_lp3))
+            # firewall chain: active ufw wins; all-unreadable -> unknown
+            def _fw_res(argv, timeout=0):
+                if argv[0] == "ufw":
+                    return _Res(0, "Status: active\n")
+                return None
+            _secmod.set_runner_for_tests(_fw_res)
+            _fp = _secmod._check_firewall()
+            check("firewall probe: active backend -> ok (read-only chain)",
+                  _fp["state"] == "ok" and _fp["args"].get("backend")
+                  == "ufw", str(_fp))
+            _secmod.set_runner_for_tests(
+                lambda argv, timeout=0: None)
+            _fp2 = _secmod._check_firewall()
+            check("firewall probe: nothing readable -> unknown",
+                  _fp2["state"] == "unknown", str(_fp2))
+            # sentinel / age / perms against a temp credential file
+            with _tmpsec.TemporaryDirectory() as _td:
+                _tf = Path(_td) / "secrets.env"
+                _tf.write_text("WEB_TOKEN=changeme\n"
+                               "MODEL_API_KEY=real-looking-key-9f3a\n")
+                _ex = Path(_td) / "secrets.env.example"
+                _ex.write_text("WEB_TOKEN=\nMODEL_API_KEY=\n")
+                _sp = _secmod._check_sentinel(_tf, _ex)
+                check("sentinel probe: template value -> fail naming the "
+                      "slot, never the value",
+                      _sp["state"] == "fail"
+                      and "WEB_TOKEN" in _sp["args"].get("slots", "")
+                      and "changeme" not in json.dumps(_sp), str(_sp))
+                _tf.write_text("WEB_TOKEN=strong-random-token-42\n")
+                _sp2 = _secmod._check_sentinel(_tf, _ex)
+                check("sentinel probe: chosen value -> ok",
+                      _sp2["state"] == "ok", str(_sp2))
+                _now = time.time()
+                _old = _now - 200 * 86400
+                os.utime(_tf, (_old, _old))
+                _ap = _secmod._check_age(_tf, _now)
+                check("age probe: >180 days -> warn with the day count",
+                      _ap["state"] == "warn"
+                      and _ap["args"].get("days") == 200, str(_ap))
+                os.utime(_tf, (_now - 3600, _now - 3600))
+                _ap2 = _secmod._check_age(_tf, _now)
+                check("age probe: fresh file -> ok",
+                      _ap2["state"] == "ok", str(_ap2))
+                _ap3 = _secmod._check_age(_tf, _now - 86400 * 2)
+                check("age probe: future mtime -> honest unknown",
+                      _ap3["state"] == "unknown"
+                      and _ap3["i18n"] == "sck.d.age.future", str(_ap3))
+                os.chmod(_tf, 0o644)
+                # /tmp is a unix-permission fs here -> group/other readable
+                # must FAIL (the honest verdict; 9p mounts report unknown)
+                _pp = _secmod._check_perms(_tf)
+                check("perms probe: 0644 on a unix fs -> fail",
+                      _pp["state"] == "fail"
+                      and _pp["args"].get("mode") == "0644", str(_pp))
+                os.chmod(_tf, 0o600)
+                _pp2 = _secmod._check_perms(_tf)
+                check("perms probe: 0600 -> ok",
+                      _pp2["state"] == "ok", str(_pp2))
+            check("fs classifier: 9p/drvfs not enforceable, fuse "
+                  "unverifiable, ext4 unix",
+                  _secmod._fs_class("9p") == "not_enforceable"
+                  and _secmod._fs_class("drvfs") == "not_enforceable"
+                  and _secmod._fs_class("fuse.sshfs") == "unverifiable"
+                  and _secmod._fs_class("ext4") == "unix"
+                  and _secmod._fs_class(None) == "unknown",
+                  "classifier")
+            # fail-soft: a raising seam degrades the ROW, never the report
+            def _boom(argv, timeout=0):
+                raise RuntimeError("probe exploded")
+            _secmod.set_runner_for_tests(_boom)
+            with _tmpsec.TemporaryDirectory() as _td2:
+                _rep = _secmod.run_checks(
+                    secrets_path=Path(_td2) / "secrets.env",
+                    example_path=Path(_td2) / "example",
+                    console_port=19167)
+            check("run_checks never raises (raising seam -> unknown rows)",
+                  isinstance(_rep, dict) and len(_rep["checks"]) == 6
+                  and _rep["summary"]["unknown"] >= 2
+                  and _rep["verdict"] in ("unknown", "warn", "fail"),
+                  str(_rep)[:200])
+            _line = _secmod.startup_line(_rep)
+            check("startup line carries states only (no value, no path)",
+                  _line.startswith("security self-check: verdict=")
+                  and "[" in _line and "/" not in _line
+                  and "exploded" not in _line, _line[:160])
+        finally:
+            _secmod.set_runner_for_tests(_saved_runner)
         # self-metered usage panel (works with zero rows — honest zeros)
         s, mine = get("/api/usage/self")
         check("GET /api/usage/self shape",
