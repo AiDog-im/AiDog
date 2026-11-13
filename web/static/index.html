@@ -241,6 +241,22 @@
             </div>
           </div>
         </div>
+        <!-- car D (novice onboarding): the adoption ladder as a first-class
+             object — the L0–L4 doctrine (each level adds ONE concept; a
+             user parked at ANY level is a success) + the five ritual
+             moments, computed from LOCAL state only (GET /api/journey — no
+             new telemetry). The key line: L0 is a REAL start — the
+             watchdog mode needs no brain, no key, no terminal. -->
+        <div class="card span-2" id="journeyCard" hidden>
+          <h2><span data-i18n="jrn.sec">Your journey</span></h2>
+          <div id="jrnStages" class="jrn-stages"></div>
+          <div class="stat-note" id="jrnNext" style="margin-top:6px;"></div>
+          <div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);">
+            <div class="stat-note" style="margin-top:0;"
+                 data-i18n="jrn.moments">Five moments we celebrate together</div>
+            <div id="jrnMoments"></div>
+          </div>
+        </div>
         <div class="card span-2" id="authCard">
           <h2><span data-i18n="auth.title">Your authority</span>
               <span class="auth-stamp" data-i18n="auth.stamp">Preview · no live service</span></h2>
@@ -564,12 +580,16 @@
         <button class="ext-tab is-active" type="button" role="tab" data-tab="finance"
                 id="extTabFinance" aria-controls="extPanelFinance"
                 aria-selected="true" data-i18n="ext.tab.finance">Finance</button>
-        <button class="ext-tab" type="button" role="tab" data-tab="home"
-                id="extTabHome" aria-controls="extPanelHome"
-                aria-selected="false" data-i18n="ext.tab.home">Home</button>
-        <button class="ext-tab" type="button" role="tab" data-tab="vehicle"
-                id="extTabVehicle" aria-controls="extPanelVehicle"
-                aria-selected="false" data-i18n="ext.tab.vehicle">Vehicle</button>
+        <!-- car D (#10): the fixed Home/Vehicle stubs are GONE — categories
+             appear only when the owner adds them (user tabs render here). -->
+        <span id="extUserTabs"></span>
+      </div>
+      <!-- car D (#10): one click adds a named category (e.g. "智能饮食") —
+           the board is curated by the owner, never by a fixed menu. -->
+      <div class="ext-add">
+        <button class="btn" id="extAddCat" type="button"
+                data-i18n="ext.addCat">+ ADD CATEGORY</button>
+        <span class="save-state" id="extMsg" role="status"></span>
       </div>
       <!-- Car 4 (D6) call site 1: intent routing. The operator types a
            request and presses ROUTE — never automatic — and the answer is
@@ -703,31 +723,16 @@
            collected by the SNIFF board, so these tabs only point at it
            (same setView() switch as any nav item) and never duplicate the
            collection logic. -->
-      <div class="ext-panel" data-tabpanel="home" id="extPanelHome"
-           role="tabpanel" aria-labelledby="extTabHome" tabindex="0" hidden>
-        <div class="ov-grid">
-          <section class="card span-4">
-            <h2><span data-i18n="ext.home.title">SMART HOME</span></h2>
-            <p class="auth-lead" data-i18n="ext.home.body">Home-domain sources are already collected by SNIFF - Home Assistant bridges, sensors and web sources. This tab is a thin launcher: the SENSE board holds the sources, the rules and the sweeps.</p>
-            <div class="ctl-actions">
-              <button class="btn primary" id="extHomeGo" type="button"
-                      data-i18n="ext.home.go">OPEN THE SNIFF BOARD</button>
-            </div>
-          </section>
-        </div>
-      </div>
-      <div class="ext-panel" data-tabpanel="vehicle" id="extPanelVehicle"
-           role="tabpanel" aria-labelledby="extTabVehicle" tabindex="0" hidden>
-        <div class="ov-grid">
-          <section class="card span-4">
-            <h2><span data-i18n="ext.vehicle.title">SMART VEHICLE</span></h2>
-            <p class="auth-lead" data-i18n="ext.vehicle.body">Vehicle-domain sources are already collected by SNIFF - MCP bridges, telematics feeds and web sources. This tab is a thin launcher: open the SENSE board to inspect them.</p>
-            <div class="ctl-actions">
-              <button class="btn primary" id="extVehicleGo" type="button"
-                      data-i18n="ext.vehicle.go">OPEN THE SNIFF BOARD</button>
-            </div>
-          </section>
-        </div>
+      <!-- car D (#10): the fixed Home/Vehicle panels are GONE — their
+           content became inert PRESET EXAMPLES below; every user category
+           renders its own panel here (guidance + the SENSE deep-link +
+           remove), driven entirely by settings.extensions.categories. -->
+      <div id="extUserPanels"></div>
+      <!-- car D (#10): preset examples — inert until the owner adopts one
+           (nothing runs until real sources exist on the SENSE board). -->
+      <div class="ext-presets" id="extPresetArea" hidden>
+        <div class="stat-note" data-i18n="ext.presets">Preset examples — inert until you add them</div>
+        <div id="extPresetList" class="ov-grid"></div>
       </div>
     </section>
 
