@@ -270,17 +270,35 @@ def run_service_check(**setvals: str) -> tuple[int, str]:
     return p.returncode, p.stdout + p.stderr
 
 
-def own_line_values(path: Path) -> dict[str, str]:
-    """KEY=value map of an own-line .env file (values stay in memory only —
-    never printed, per credential discipline). Missing file -> {}."""
-    try:
-        txt = path.read_text(encoding="utf-8")
-    except OSError:
-        return {}
+def own_line_map(txt: str) -> dict[str, str]:
+    """KEY=value map of own-line .env text (values stay in memory only —
+    never printed, per credential discipline)."""
     out: dict[str, str] = {}
     for m in re.finditer(r"(?m)^([A-Za-z_][A-Za-z0-9_]*)=(\S*)$", txt):
         out[m.group(1)] = m.group(2)
     return out
+
+
+def own_line_values(path: Path) -> dict[str, str]:
+    """KEY=value map of an own-line .env file. Missing file -> {}."""
+    try:
+        txt = path.read_text(encoding="utf-8")
+    except OSError:
+        return {}
+    return own_line_map(txt)
+
+
+def repo_slot_values() -> dict[str, str]:
+    """KEY=value map of the REPO secrets store (C7 leak checks, C8 readiness)
+    through the one shared reader (E2 wiring): an encrypted store decrypts
+    in MEMORY, forget() first so a writer in another process never serves a
+    stale snapshot; a plaintext store returns the exact historical bytes;
+    a locked store returns "" (fail-closed honest absence, never a fallback)."""
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from mycore import secrets_store as _ss   # lazy: offline legs stay light
+    _ss.forget()
+    return own_line_map(_ss.secrets_text(REPO / "secrets.env"))
 
 
 def tree_has(root: Path, token: str) -> bool:
@@ -618,7 +636,7 @@ def test_profile_cli(root: Path) -> None:
     check("C7: profile secrets = empty own-line template only",
           set(slots) == expected and not any(slots.values()),
           str(sorted(slots)))
-    repo_slots = own_line_values(REPO / "secrets.env")
+    repo_slots = repo_slot_values()
     filled = {k: v for k, v in repo_slots.items() if v}
     txt = (p / "secrets.env").read_text(encoding="utf-8")
     # console fix car (2026-11-06): the CODE-GENERATED header comment carries
@@ -676,7 +694,7 @@ def test_run_service() -> None:
         import shutil
         shutil.rmtree(fixture, ignore_errors=True)
 
-    slots = own_line_values(REPO / "secrets.env")
+    slots = repo_slot_values()
     ready = bool(slots.get("AIDOG_TG_ALLOWED_USERS")) \
         and bool(slots.get("MYCORE_TG_TOKEN"))
     rc3, out3 = run_service_check()

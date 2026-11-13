@@ -1388,7 +1388,9 @@ function renderStatus() {
     boot.textContent = t("head.boot", "BOOT") + " " + hh + " · UP " + upH + "h" +
       String(upM).padStart(2, "0") + "m";
     if ((sys.reboots || []).length) {
-      boot.style.color = "var(--amber)"; boot.style.borderColor = "rgba(194,116,10,.6)";
+      // relayout P3: semantic class, not an inline colour (inline would
+      // outrank the chip stylesheet and leave a slate dot under amber text)
+      boot.classList.add("st-warn");
       boot.title = t("head.rebootSeen", "reboot detected (see stream)");
     }
   }
@@ -2309,8 +2311,32 @@ function renderSelf(doc) {
   head.hidden = false; grid.hidden = false; note.hidden = false;
   const d = (doc.display && typeof doc.display === "object") ? doc.display : null;
   const rate = d && Number(d.rate_cny_per_unit) > 0 ? Number(d.rate_cny_per_unit) : 0;
-  const chip = (k, label, v) => `<div><div class="k">${escapeHtml(t(k, label))}</div>` +
-    `<div class="v">${escapeHtml(v)}</div></div>`;
+  /* relayout P3 (audit item 7): every KPI carries context. The self meter
+     ships a real 7-day series (by_day), so its tiles earn a sparkline — a
+     pure SVG shape with no words, hence no locale key (owner direction
+     2026-11-09: sparkline + dedupe, zero new keys). Cost and month totals
+     have no series and stay bare rather than borrowing another metric's
+     shape — an honest absence beats a misleading line. */
+  const dayKeys = (doc.by_day && typeof doc.by_day === "object")
+    ? Object.keys(doc.by_day).sort() : [];
+  const spark = (field) => {
+    if (dayKeys.length < 2) return "";
+    const vals = dayKeys.map(k => Number((doc.by_day[k] || {})[field]) || 0);
+    const w = 60, h = 15;
+    const max = Math.max.apply(null, vals), min = Math.min.apply(null, vals);
+    const span = (max - min) || 1;
+    const pts = vals.map((v, i) => {
+      const x = (i / (vals.length - 1)) * (w - 2) + 1;
+      const y = h - 1.5 - ((v - min) / span) * (h - 3);
+      return x.toFixed(1) + "," + y.toFixed(1);
+    }).join(" ");
+    return `<svg class="spark" viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" ` +
+      `aria-hidden="true" focusable="false"><polyline points="${pts}" fill="none" ` +
+      `stroke="currentColor" stroke-width="1.5" stroke-linecap="round" ` +
+      `stroke-linejoin="round"/></svg>`;
+  };
+  const chip = (k, label, v, sp) => `<div><div class="k">${escapeHtml(t(k, label))}</div>` +
+    `<div class="v">${escapeHtml(v)}</div>` + (sp || "") + `</div>`;
   const num = n => Number(n || 0).toLocaleString("en-US");
   const fmtCost = (cnyVal) => {
     if (cnyVal == null) return "—";
@@ -2331,11 +2357,11 @@ function renderSelf(doc) {
   // the same local meter; an unpriced table keeps the honest dash.
   const m = (doc.month && typeof doc.month === "object") ? doc.month : null;
   grid.innerHTML =
-    chip("usage.selfReq", "REQUESTS 7D", num(doc.requests)) +
-    chip("usage.selfOk", "OK", num(doc.ok)) +
-    chip("usage.selfFail", "FAIL", num(doc.fail)) +
-    chip("usage.selfIn", "IN TOKENS", num(doc.in_tokens)) +
-    chip("usage.selfOut", "OUT TOKENS", num(doc.out_tokens)) +
+    chip("usage.selfReq", "REQUESTS 7D", num(doc.requests), spark("requests")) +
+    chip("usage.selfOk", "OK", num(doc.ok), spark("ok")) +
+    chip("usage.selfFail", "FAIL", num(doc.fail), spark("fail")) +
+    chip("usage.selfIn", "IN TOKENS", num(doc.in_tokens), spark("in_tokens")) +
+    chip("usage.selfOut", "OUT TOKENS", num(doc.out_tokens), spark("out_tokens")) +
     chip("usage.selfCost", "COST 7D", costTxt) +
     (m ? chip("usage.selfMonthReq", "REQUESTS THIS MONTH", num(m.requests)) : "") +
     (m ? chip("usage.selfMonthCost", "COST THIS MONTH",
@@ -2445,49 +2471,35 @@ function renderUsage() {
     unitEl.textContent = (d.code === "CNY" ? t("usage.unitCny", "CNY TODAY")
                                            : t("usage.unit", "{c} TODAY").replace("{c}", d.code));
   };
-  const st = (k, v) => `<div><div class="k">${escapeHtml(t(k[0], k[1]))}</div><div class="v">${escapeHtml(v)}</div></div>`;
-  /* Wave 3 (X4): the eight-key `pool` block of /api/usage (metrics source),
-     seven of which the card never showed. Reserved label keys with English
-     fallback (pack entries added by the 0.5.53 i18n lane — see
-     renderMycoreFacts). Each
-     chip hides itself when its value is null/absent; no `pool` object at all
-     = no pool chips (honest shape-hide, never an invented 0). The ACTIVE
-     KEYS chip travels here too, so the classic row keeps its fourth chip and
-     the card never shows it twice. */
-  const chip = (key, label, raw) => {
-    if (raw === null || raw === undefined || raw === "") return "";
-    if (typeof raw === "number" && !isFinite(raw)) return "";
-    return st([key, label], typeof raw === "number"
-      ? raw.toLocaleString("en-US") : String(raw));
-  };
-  const poolChips = () => {
-    const p = usageData.pool;
-    if (!p || typeof p !== "object") return "";
-    return chip("usage.pool", "ACTIVE KEYS", p.keys_active) +
-      chip("usage.queue", "QUEUE DEPTH", p.queue_depth) +
-      chip("usage.accounts", "ACCOUNTS", p.accounts_total) +
-      chip("usage.reqTotal", "REQUESTS TOTAL", p.requests_total) +
-      chip("usage.inTok", "INPUT TOKENS", p.input_tokens) +
-      chip("usage.outTok", "OUTPUT TOKENS", p.output_tokens) +
-      chip("usage.healthMin", "HEALTH MIN", p.health_min) +
-      chip("usage.healthAvg", "HEALTH AVG", p.health_avg);
-  };
+  /* relayout P3 (audit item 7 — "same value twice with no context"): a KPI
+     tile may carry a THIRD line, its context. Here the context is a number
+     or an SVG shape, never a sentence, so it needs no locale key (owner
+     direction 2026-11-09: sparkline + dedupe, zero new keys). */
+  const st = (k, v, c) => `<div><div class="k">${escapeHtml(t(k[0], k[1]))}</div>` +
+    `<div class="v">${escapeHtml(v)}</div>` +
+    (c ? `<div class="c">${escapeHtml(c)}</div>` : "") + `</div>`;
   if (!today) {
     document.getElementById("costVal").textContent = "—";
     setUnit();
-    // no daily log today — the pool is an independent source, so its chips
-    // still render (X4); the note keeps saying the *usage* source is down.
-    document.getElementById("usageStats").innerHTML = poolChips();
+    // no daily log today — the pool counters live in the technical
+    // disclosure now (renderOvTech), so they still paint from here; the
+    // note keeps saying the *usage* source is down.
+    document.getElementById("usageStats").innerHTML = "";
     document.getElementById("usageNote").textContent = t("usage.off", "usage source unavailable");
+    renderOvTech();
     return;
   }
   document.getElementById("costVal").textContent = fmtCost(today.cost);
   setUnit();
+  // the classic row keeps its three today-scoped tiles; the all-time pool
+  // counters moved to #ovTechGrid (renderOvTech), so "REQUESTS today" no
+  // longer sits beside "REQUESTS TOTAL" with no window to check it by.
+  const errPct = today.requests
+    ? Math.round(today.errors / today.requests * 100) : 0;
   document.getElementById("usageStats").innerHTML =
     st(["usage.req", "REQUESTS"], String(today.requests)) +
-    st(["usage.err", "ERRORS"], `${today.errors} (${today.requests ? Math.round(today.errors / today.requests * 100) : 0}%)`) +
-    st(["usage.avg", "AVG LATENCY"], (today.avg_ms / 1000).toFixed(1) + "s") +
-    poolChips();
+    st(["usage.err", "ERRORS"], String(today.errors), `${errPct}%`) +
+    st(["usage.avg", "AVG LATENCY"], (today.avg_ms / 1000).toFixed(1) + "s");
   const numOf = (cny) => {   // vs7 puts the symbol separately via {s}
     const v = cny / d.rate;
     return v >= 100 ? Math.round(v).toLocaleString()
@@ -2500,6 +2512,7 @@ function renderUsage() {
        : t("usage.noRef", "no 7-day baseline yet")) +
     (price.available ? "" : " · " + t("usage.noPrice", "pricing unavailable")) +
     (d.fxOff ? " · " + t("usage.fxOff", "rate unavailable — source CNY shown") : "");
+  renderOvTech();            // relayout P3: pool counters live here now
 }
 
 /* ---------------------------------------------------------------- events -- */
@@ -2670,6 +2683,30 @@ function renderOvTech() {
       String(su.model.endpoint) + " · " +
       (su.model.reachable ? t("act.st.reachable", "reachable ✓")
                           : t("act.st.unreachable", "unreachable ✗")));
+  }
+  /* relayout P3 (audit item 7): the all-time `pool` counters moved here out
+     of the Usage KPI grid. "REQUESTS today" beside "REQUESTS TOTAL" was the
+     same number twice with no window to sanity-check it against; behind one
+     progressive-disclosure row they read as what they are — technical and
+     all-time. Same X4 contract: a missing value drops its row, it never
+     prints an invented 0. */
+  const p = usageData && usageData.pool && typeof usageData.pool === "object"
+    ? usageData.pool : null;
+  if (p) {
+    const pnum = n => typeof n === "number" ? n.toLocaleString("en-US") : String(n);
+    const prow = (key, label, raw) => {
+      if (raw === null || raw === undefined || raw === "") return;
+      if (typeof raw === "number" && !isFinite(raw)) return;
+      cell(t(key, label), pnum(raw));
+    };
+    prow("usage.pool", "ACTIVE KEYS", p.keys_active);
+    prow("usage.queue", "QUEUE DEPTH", p.queue_depth);
+    prow("usage.accounts", "ACCOUNTS", p.accounts_total);
+    prow("usage.reqTotal", "REQUESTS TOTAL", p.requests_total);
+    prow("usage.inTok", "INPUT TOKENS", p.input_tokens);
+    prow("usage.outTok", "OUTPUT TOKENS", p.output_tokens);
+    prow("usage.healthMin", "HEALTH MIN", p.health_min);
+    prow("usage.healthAvg", "HEALTH AVG", p.health_avg);
   }
   box.innerHTML = rows.join("");
 }
@@ -7075,11 +7112,13 @@ const ACT_INTERNAL = {
 };
 
 function actChip(text, tone) {
-  const col = tone === "ok" ? "var(--ok)"
-    : tone === "bad" ? "var(--red)"
-    : tone === "warn" ? "var(--amber)" : "var(--muted)";
-  return `<span class="chat-badge" style="color:${col};border-color:${col};">` +
-    `${escapeHtml(text)}</span>`;
+  // relayout P3: the chip speaks the shared four-state vocabulary through a
+  // class — an inline colour would outrank the chip stylesheet and keep
+  // speaking the old green dialect (design §3, one status set).
+  const cls = tone === "ok" ? "st-ok"
+    : tone === "bad" ? "st-err"
+    : tone === "warn" ? "st-warn" : "st-off";
+  return `<span class="chat-badge ${cls}">${escapeHtml(text)}</span>`;
 }
 
 function actTone(state) {
@@ -7125,8 +7164,10 @@ function renderSetup() {
   if (badge) {
     badge.textContent = ready ? t("act.ready", "READY ✓")
       : t("act.notReady", "NOT READY");
-    badge.style.color = ready ? "var(--ok)" : "var(--amber)";
-    badge.style.borderColor = ready ? "var(--ok)" : "var(--amber)";
+    // relayout P3: the badge speaks the shared four-state vocabulary — an
+    // inline colour would outrank the chip stylesheet and keep it green.
+    badge.classList.toggle("st-ok", ready);
+    badge.classList.toggle("st-warn", !ready);
   }
   // fresh-run welcome: this IS the first-boot onboarding (3 steps + the CLI)
   const start = document.getElementById("actStart");
@@ -9910,6 +9951,14 @@ function setView(name, fromUser) {
   });
   const head = document.querySelector("#view-" + name + " .view-head h2");
   if (head) document.title = "I'm AiDog — " + head.textContent;
+  // relayout car (A version): the topbar is the page header — mirror the
+  // active view's title/sub so there is exactly one H1 locus per screen
+  // (the in-view .view-head stays: tests and deep links read it)
+  const sub = document.querySelector("#view-" + name + " .view-sub");
+  const pt = document.getElementById("pageTitle");
+  const ps = document.getElementById("pageSub");
+  if (pt && head) pt.textContent = head.textContent;
+  if (ps && sub) ps.textContent = sub.textContent;
   if (fromUser) {
     const p = new URLSearchParams(location.search);
     p.set("view", name);
@@ -10694,9 +10743,13 @@ let setTier = (() => {
 
 function applyTier() {
   const tools = document.getElementById("setTools");
+  const wrap = document.getElementById("setWrap");
   document.querySelectorAll(".set-tier-btn").forEach(b =>
     b.classList.toggle("is-active", b.dataset.tier === setTier));
   if (tools) tools.classList.toggle("is-guided", setTier === "guided");
+  // relayout P2: Guided hides the section list, so the two-pane rail would be
+  // left holding a lone search box — collapse .set-wrap back to one column.
+  if (wrap) wrap.classList.toggle("is-guided", setTier === "guided");
   if (setTier === "guided" && setGroup !== "all") {
     setGroup = "all";                    // chips are hidden in Guided
     document.querySelectorAll(".set-chip").forEach(b =>
@@ -10710,26 +10763,28 @@ function setApplyFilter() {
   const searchEl = document.getElementById("setSearch");
   if (!grid || !searchEl) return;
   const q = (searchEl.value || "").trim().toLowerCase();
+  // relayout P2: the rail rows show how many cards each group would reveal
+  // under the CURRENT tier + query (numbers only — zero new locale keys).
+  const counts = { all: 0, general: 0, model: 0, services: 0, creds: 0 };
   grid.querySelectorAll(":scope > .card").forEach(card => {
     // UX round 2 (B2): a card may belong to SEVERAL groups (space separated
     // data-setgroup) — the Backup card is "general creds" so a user browsing
     // Credentials & channels still finds it instead of watching it vanish.
     const groups = (card.dataset.setgroup || "general").split(/\s+/).filter(Boolean);
-    const groupOk = groups.includes("always") || setGroup === "all"
-      || groups.includes(setGroup);
     // round C (P3): the tier decides whether the card exists at all — Guided
     // shows GUIDED_CARDS only, Advanced (default) shows every card.
     const tierOk = setTier === "advanced" || GUIDED_CARDS.includes(card.id);
     // reset any child-level marks from the previous pass first
     card.querySelectorAll(".is-filtered").forEach(el =>
       el.classList.remove("is-filtered"));
-    let show = tierOk && groupOk;
-    if (show && q) {
+    // Search runs for EVERY card, not only the selected group, so the rail
+    // counts stay honest while a query is typed. Marks only survive when the
+    // card ends up shown — same end state as before (group+search+tier).
+    let searchOk = true;
+    if (q) {
       const h2 = card.querySelector("h2");
       const title = ((h2 && h2.textContent) || "").toLowerCase();
-      if (title.includes(q)) {
-        show = true;                    // title hit: the whole card stays
-      } else {
+      if (!title.includes(q)) {
         let hits = 0;
         [...card.children].forEach(ch => {
           if (ch.tagName === "H2") return;
@@ -10740,12 +10795,30 @@ function setApplyFilter() {
           if (hay.includes(q)) { hits += 1; return; }
           ch.classList.add("is-filtered");
         });
-        show = hits > 0;                // nothing matched: the card goes too
+        searchOk = hits > 0;          // nothing matched: the card goes too
       }
     }
+    const groupOk = groups.includes("always") || setGroup === "all"
+      || groups.includes(setGroup);
+    const show = tierOk && groupOk && searchOk;
     if (!show) card.querySelectorAll(".is-filtered").forEach(el =>
       el.classList.remove("is-filtered"));
     card.classList.toggle("is-filtered", !show);
+    if (tierOk && searchOk) {
+      counts.all += 1;
+      const owned = groups.includes("always")
+        ? ["general", "model", "services", "creds"] : groups;
+      owned.forEach(g => {
+        if (Object.prototype.hasOwnProperty.call(counts, g)) counts[g] += 1;
+      });
+    }
+  });
+  document.querySelectorAll(".set-chip").forEach(chip => {
+    const key = chip.dataset.setfilter || "all";
+    const n = Object.prototype.hasOwnProperty.call(counts, key) ? counts[key] : 0;
+    const el = chip.querySelector(".set-chip-n");
+    if (el) el.textContent = String(n);
+    chip.classList.toggle("is-empty", n === 0);
   });
 }
 
