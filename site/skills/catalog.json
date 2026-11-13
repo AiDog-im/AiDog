@@ -26,6 +26,18 @@
       "install_status": "catalog"
     },
     {
+      "slug": "outbound-proxy",
+      "name": "outbound-proxy",
+      "category": "automation-ops",
+      "description": "Use when aidog's own http_fetch requests must leave through a proxy you host yourself — configuring the outbound_proxy settings block, testing the endpoint, or diagnosing refused/timeout/DNS failures. Not for proxying every app on the machine, borrowing someone else's endpoint, or reverse-engineering any client.",
+      "version": "1.0.0",
+      "requires": [
+        "run_bash",
+        "http_fetch"
+      ],
+      "install_status": "bundled"
+    },
+    {
       "slug": "site-ops",
       "name": "site-ops",
       "category": "automation-ops",

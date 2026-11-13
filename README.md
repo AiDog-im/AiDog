@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2150%2F2150-brightgreen?style=flat-square" alt="core tests 2150/2150">
+  <img src="https://img.shields.io/badge/core_tests-2189%2F2189-brightgreen?style=flat-square" alt="core tests 2189/2189">
   <img src="https://img.shields.io/badge/console_smoke-509%2F509-brightgreen?style=flat-square" alt="console smoke 509/509">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
@@ -56,7 +56,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **39 modules ≈ 23.2k LOC, 2,150 tests**, and zero upstream
+  stop reasons, **39 modules ≈ 23.4k LOC, 2,189 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -92,7 +92,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 | 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 39 modules, 2,150 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
-| 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 30/30 |
+| 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 37/37 |
 | ⏰ | **Natural-language cron** | `/cron ship the report tomorrow 9am` → parsed, validated, scheduled — fail-closed until you enable it |
 | 🤝 | **Subagents & execute_code** | ≤3 isolated parallel delegates with fresh context; ≤8-step folded code runs with checkpointed writes |
 | 🔌 | **MCP client** | stdio + HTTP servers, tool allow/deny filtering, credential slots, progress streaming |
@@ -198,16 +198,16 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2150/2150** |
+| `mycore` core suite | **2189/2189** |
 | Console smoke (live HTTP) | **509/509** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
-| Skill router | **30/30** |
+| Skill router | **37/37** |
 | Memory persistence | **58/58** |
 | Setup wizard | **99/99** |
 | Profile isolation (offline, subprocess cross-check) | **63/63** |
 | Desktop shell (`node --test`) | **15/15** |
 | `aidog doctor` | **0 FAIL · 0 WARN** (honest environment WARN only when egress is fully gone) |
 | Publish gate (deny-by-default manifest) | **READY** |
-| Real-machine E2E | profiles **18/18** · channels **12/12** · domestic channels **46/46** · pipeline **39/39** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **45/45** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** · mission-orch **63/63** · mission-pause **73/73** · skills catalog **176/176** · skills remote **58/58** · gateway UI **25/25** · ckx round-trip **28/28** · console UI probes **21/21** + **22/22** |
+| Real-machine E2E | profiles **18/18** · channels **12/12** · domestic channels **46/46** · pipeline **39/39** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **45/45** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** · mission-orch **63/63** · mission-pause **73/73** · skills catalog **187/187** · skills remote **58/58** · skills install API **65/65** · skills UI **23/23** · skills parity **68/68** · gateway UI **26/26** · ckx round-trip **28/28** · console UI probes **21/21** + **22/22** |
 
 Catalog scope: **27 registered tools** · **9 exchange venues** · **21
 real-machine E2E legs** — all green.

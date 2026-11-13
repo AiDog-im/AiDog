@@ -17,6 +17,7 @@ English output per repo i18n policy.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -251,6 +252,81 @@ def main() -> int:
     # --- profile-config discovery must fail soft (shim may be absent/changed) ---
     rc, out = run(["--json", '{"never valid as query via flag": 1}'])
     check("bad invocation still exits cleanly (0/2/3 only)", rc in (0, 2, 3), f"rc={rc}")
+
+    # --- car H §3.2: one-click install rung + the owner's off switch -------
+    import importlib.util as _ilu
+    sys.path.insert(0, str(REPO))     # `from lib import profile_paths` leg
+    try:
+        spec = _ilu.spec_from_file_location("skill_route_carh", str(ROUTER))
+        sr = _ilu.module_from_spec(spec)
+        spec.loader.exec_module(sr)
+    finally:
+        sys.path.remove(str(REPO))
+    with tempfile.TemporaryDirectory(prefix="aidog_carh_") as td:
+        tdp = Path(td)
+        inst = tdp / "installed"
+        make_fixture(inst)          # tone-audit + mail-box live "installed"
+        saved_dir = sr.INSTALLED_SKILLS_DIR
+        sr.INSTALLED_SKILLS_DIR = inst
+        try:
+            roots = sr.skill_roots(None)
+            check("car H: the data/skills rung resolves when present",
+                  inst in roots, str(roots)[:200])
+            check("car H: installed rung sits before the shipped overlay",
+                  inst in roots and sr.DEFAULT_SKILLS_DIR in roots
+                  and roots.index(inst) < roots.index(sr.DEFAULT_SKILLS_DIR),
+                  str(roots)[:200])
+            names = [s["name"] for s in sr.load_skills(roots)]
+            check("car H: installed skills are routable",
+                  "tone-audit" in names and "mail-box" in names, str(names))
+
+            # off-switch legs run WITH the rung still patched, so they
+            # observe the fixture at all (a filter over an absent dir would
+            # pass vacuously — the unfiltered leg below is the guard).
+            sr.set_settings_for_tests({"skills": {"disabled": ["tone-audit"]}})
+            try:
+                names = [s["name"] for s in sr.load_skills(sr.skill_roots(None))]
+                check("car H: a switched-off skill never routes (seam)",
+                      "tone-audit" not in names and "mail-box" in names,
+                      str(names))
+            finally:
+                sr.set_settings_for_tests(None)
+            sr.set_settings_for_tests({"skills": {"disabled": "oops"}})
+            try:
+                check("car H: a corrupt disabled value fails soft (nothing off)",
+                      sr.disabled_skills() == set())
+            finally:
+                sr.set_settings_for_tests(None)
+        finally:
+            sr.INSTALLED_SKILLS_DIR = saved_dir
+
+    # --- car H: the PRODUCTION settings read (subprocess, profile-isolated) -
+    with tempfile.TemporaryDirectory(prefix="aidog_carh_prof_") as td:
+        tdp = Path(td)
+        prof = tdp / "probe"
+        prof.mkdir()
+        settings = prof / "settings.json"
+        settings.write_text(json.dumps({"skills": {"disabled": ["tone-audit"]}}),
+                            encoding="utf-8")
+        fx = tdp / "fx"
+        make_fixture(fx)
+        env = dict(os.environ, AIDOG_PROFILE="probe", AIDOG_PROFILES_DIR=td)
+        query = "tone audit for public posts"
+        p = subprocess.run([sys.executable, str(ROUTER), "--json",
+                            "--dirs", str(fx), query],
+                           capture_output=True, text=True, timeout=30, env=env)
+        doc = json.loads(p.stdout)
+        names = [h["name"] for h in doc.get("hits", [])]
+        check("car H: profile settings.skills.disabled filters the real router",
+              "tone-audit" not in names, str(names))
+        settings.write_text("{}", encoding="utf-8")
+        p = subprocess.run([sys.executable, str(ROUTER), "--json",
+                            "--dirs", str(fx), query],
+                           capture_output=True, text=True, timeout=30, env=env)
+        doc = json.loads(p.stdout)
+        names = [h["name"] for h in doc.get("hits", [])]
+        check("car H: clearing the list restores routing",
+              "tone-audit" in names, str(names))
 
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
