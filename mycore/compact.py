@@ -133,6 +133,60 @@ def _fold_turn(msg: dict, idx: int = 0) -> dict:
     return {"role": SUMMARY_ROLE, "content": body + "]"}
 
 
+def _fold_orphans(result: list[dict]) -> tuple[list[dict], int]:
+    """Restore assistant(tool_calls) <-> tool pairing after folding.
+
+    Owner incident 2026-11-07: folding an assistant row that carried
+    tool_calls while its tool responses survive (or the reverse) leaves an
+    orphan `tool` row, and strict gateways reject the whole payload with
+    HTTP400 — "messages with role 'tool' must be a response to a preceeding
+    message with 'tool_calls'". Walks the rows while tracking the pending
+    announcement: tool rows consume it (a batch of tools after one
+    assistant is legal, answered or not), any other row — or the end of
+    the list — means the announcement went unanswered, and a tool row with
+    no live announcement means its assistant was folded away. Either
+    broken side is folded into a marker (content stays visible as marker
+    text), so the payload stays valid. Validity outranks the keep_tail
+    preference here (a protected orphan would break every future call);
+    user rows are never touched, so the live-question rule stands.
+    Returns (rows, folded_count).
+    """
+    out: list[dict] = []
+    folded = 0
+    pending = -1            # index in `out` of an assistant awaiting tools
+    answered = False        # its tool batch has been seen
+    for m in result:
+        if not isinstance(m, dict):
+            out.append(m)
+            continue
+        role = m.get("role")
+        if role == "tool":
+            if pending >= 0:
+                out.append(m)                    # part of the announced batch
+                answered = True
+                continue
+            out.append(_fold_turn(m, len(out)))  # orphan response -> marker
+            folded += 1
+            continue
+        if role == "assistant" and m.get("tool_calls"):
+            if pending >= 0 and not answered:
+                out[pending] = _fold_turn(out[pending], pending)
+                folded += 1                      # previous announcement empty
+            out.append(m)
+            pending = len(out) - 1
+            answered = False
+            continue
+        if pending >= 0 and not answered:
+            out[pending] = _fold_turn(out[pending], pending)
+            folded += 1                          # announcement never answered
+        pending = -1
+        out.append(m)
+    if pending >= 0 and not answered:
+        out[pending] = _fold_turn(out[pending], pending)
+        folded += 1
+    return out, folded
+
+
 def _is_marker(m: object) -> bool:
     """True when m is a compaction marker produced by this module."""
     return (isinstance(m, dict) and m.get("role") == SUMMARY_ROLE
@@ -196,6 +250,15 @@ def compact(messages: list[dict], budget_chars: int,
             break                    # only system/newest remain — honest stop
         result[target] = _fold_turn(result[target], target)
         folded += 1
+
+    # Pair repair (owner incident 2026-11-07): the fold loop above can stop
+    # between an assistant(tool_calls) and its tool responses (budget met
+    # or the responses sit inside the protected tail), and the orphan that
+    # results makes strict gateways answer HTTP400 for every later call.
+    # Fold the unpaired side into a marker too — content preserved, pairing
+    # restored — before the marker consolidation below.
+    result, repaired = _fold_orphans(result)
+    folded += repaired
 
     # Consolidation: the markers themselves are content and can outgrow the
     # budget. Merge foldable markers once into a single line (never nested,

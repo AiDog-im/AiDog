@@ -4243,25 +4243,38 @@ def main() -> int:
     _mc_now = (settings_now.get("mycore") or {}) if isinstance(settings_now, dict) else {}
     _tmo = _mc_now.get("timeout")
     _mxt = _mc_now.get("max_tokens")
-    check("GET settings mycore.timeout/max_tokens shape (absent or in range)",
+    _rdd = _mc_now.get("run_deadline")
+    check("GET settings mycore.timeout/max_tokens/run_deadline shape",
           s == 200 and (_tmo is None
                         or (type(_tmo) is int and 5 <= _tmo <= 600))
           and (_mxt is None
-               or (type(_mxt) is int and 128 <= _mxt <= 65536)),
-          f"got {s} timeout={_tmo!r} max_tokens={_mxt!r}")
+               or (type(_mxt) is int and 128 <= _mxt <= 65536))
+          and (_rdd is None
+               or (type(_rdd) is int and 0 <= _rdd <= 86400)),
+          f"got {s} timeout={_tmo!r} max_tokens={_mxt!r} run_deadline={_rdd!r}")
     if token:
         for _bt, _bm in ((4, 127), (601, 65537), (0, 0), (-1, -1),
                          ("30", "30"), (True, True), (3.5, 3.5)):
             s1, b1 = post("/api/settings", {"mycore": {"timeout": _bt}}, token)
             s2, b2 = post("/api/settings", {"mycore": {"max_tokens": _bm}}, token)
-            check(f"settings mycore.timeout {_bt!r} / max_tokens {_bm!r} -> 400",
+            # L3 (owner2026-11-07): run_deadline folded into the SAME
+            # iteration (0..86400) — count unchanged by car discipline.
+            _rd = _bt if isinstance(_bt, (str, float, bool)) \
+                or (type(_bt) is int and _bt < 0) else -1
+            s3, b3 = post("/api/settings", {"mycore": {"run_deadline": _rd}}, token)
+            check(f"settings mycore.timeout {_bt!r} / max_tokens {_bm!r}"
+                  f" / run_deadline {_rd!r} -> 400",
                   s1 == 400 and isinstance(b1, dict)
                   and any("mycore.timeout" in str(d)
                           for d in b1.get("details", []))
                   and s2 == 400 and isinstance(b2, dict)
                   and any("mycore.max_tokens" in str(d)
-                          for d in b2.get("details", [])),
-                  f"got {s1}/{s2} {str(b1)[:80]} {str(b2)[:80]}")
+                          for d in b2.get("details", []))
+                  and s3 == 400 and isinstance(b3, dict)
+                  and any("mycore.run_deadline" in str(d)
+                          for d in b3.get("details", [])),
+                  f"got {s1}/{s2}/{s3} {str(b1)[:60]} {str(b2)[:60]} "
+                  f"{str(b3)[:60]}")
 
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
