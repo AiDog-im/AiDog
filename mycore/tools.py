@@ -1340,7 +1340,9 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                 "required": ["path", "old_text", "new_text"]},
                lambda path, old_text, new_text: _edit_file(path, old_text, new_text, roots, state_dir))
     r.register("run_bash", f"Run a shell command (<= {BASH_TIMEOUT}s). "
-               "Runs on the configured terminal backend (settings mycore.shell; default local).",
+               "Runs on the configured terminal backend (settings mycore.shell; default local). "
+               "For multi-step network scripts prefer execute_code (python, no "
+               "shell quoting); run_bash suits single commands.",
                {"type": "object", "properties": {
                    "command": _STR, "timeout": _INT}, "required": ["command"]},
                lambda command, timeout=BASH_TIMEOUT: _run_bash(command, timeout, roots))
@@ -1353,7 +1355,9 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                {"type": "object", "properties": {"pattern": _STR, "path": _STR},
                 "required": ["pattern"]},
                lambda pattern, path=".": _glob(pattern, path, roots))
-    r.register("http_fetch", "GET a URL and return its text (truncated).",
+    r.register("http_fetch", "GET a URL and return its text (truncated). "
+               "GET-only — for POST/PUT or any write, use run_bash (curl) "
+               "or execute_code (urllib/requests): both reach the network.",
                {"type": "object", "properties": {"url": _STR, "timeout": _INT,
                                                  "max_chars": _INT},
                 "required": ["url"]},
@@ -1417,7 +1421,9 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                "nested execute_code/delegate); `code` = Python source run "
                "once in a child process with helpers read/grep/glob/write/"
                "edit/run/fetch — allowed-roots enforced, write helpers take "
-               "checkpoints, timeout <= 120s, output capped.",
+               "checkpoints, timeout <= 120s, output capped. Preferred entry "
+               "point for multi-step network scripts (immune to shell "
+               "quoting).",
                {"type": "object", "properties": {
                    "steps": {"type": "array",
                              "items": {"type": "object", "properties": {

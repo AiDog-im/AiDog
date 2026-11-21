@@ -31,6 +31,27 @@ REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 
+DEFAULT_RUN_DEADLINE = 1800     # L3 (owner2026-11-07): turn ceiling, seconds
+
+
+def resolve_run_deadline() -> int | None:
+    """L3 long-task rule (owner 2026-11-07; prior art's separate run
+    deadline): the whole TURN is bounded even while single calls wait out
+    long silences (L1). settings `mycore.run_deadline`: int0..86400 —
+    absent -> DEFAULT_RUN_DEADLINE,0 -> None (off), invalid -> default (a
+    broken knob never silently disables the bound)."""
+    try:
+        stored = json.loads(pp.settings_path(REPO).read_text())
+        mc = stored.get("mycore") if isinstance(stored, dict) else None
+        raw = mc.get("run_deadline") if isinstance(mc, dict) else None
+        if isinstance(raw, int) and not isinstance(raw, bool) \
+                and 0 <= raw <= 86400:
+            return raw or None
+    except Exception:  # noqa: BLE001 — unreadable settings keep the bound
+        pass
+    return DEFAULT_RUN_DEADLINE
+
+
 def resolve_model_config() -> ModelConfig:
     """Endpoint precedence (owner 2026-10-18 user-configurable decision):
     env MYCORE_* > CONSOLE settings (web/settings.json mycore block) > defaults.
