@@ -137,6 +137,7 @@ from . import hooks as hooks_mod
 from . import ledger as ledger_mod
 from . import leash
 from . import mission as mission_mod
+from . import pipeline as pipeline_mod
 from . import scheduler
 from . import sniff
 from .assembly import (build_system_stack, resolve_capability_path,
@@ -648,6 +649,7 @@ class ChatService:
         self._mission_check = 0.0       # last mission tick evaluation (clock)
         self._chan_check = 0.0          # last channel inbound poll (clock)
         self._sniff_check = 0.0         # last SENSE sweep/delivery evaluation
+        self._pipe_check = 0.0          # last acquisition-pipeline pass (clock)
         self._ledger_check = 0.0        # last daily usage-report evaluation (D2)
         self._hold_state: dict[str, str] = {}   # car 7: gate log dedupe (leg -> code)
         self._tw: _Typewriter | None = None      # backlog: THIS turn's TG preview
@@ -798,6 +800,7 @@ class ChatService:
                 self._maybe_fire_cron()        # scheduler leg (no-op with no due jobs)
                 self._maybe_tick_missions()    # mission leg (0.5.44; no-op without an active mission)
                 self._maybe_sniff()            # SENSE leg (SNIFF car; no-op when off/paused)
+                self._maybe_pipeline()         # acquisition pipeline leg (no-op when off)
                 self._maybe_ledger()           # D2 ledger leg (no-op when off/already sent)
                 self._maybe_release_check(once=once)  # car G: daily release notice (skipped in --once tooling)
                 self._maybe_poll_channels()    # channel leg (throttled, fail-soft)
@@ -2660,6 +2663,73 @@ class ChatService:
         # the SAME route (even when the reply itself was empty).
         self._drain_channel_files(chan, route, target)
 
+    # ------------------------------------------------- acquisition pipeline ---
+    def _maybe_pipeline(self) -> None:
+        """Acquisition-pipeline leg (pipeline car): at most once per
+        `pipeline.interval_min` while the block is enabled. It sources,
+        qualifies and drafts ONLY — ``pipeline.auto_tick`` takes no channel
+        parameter, so this leg cannot send by construction; a send needs the
+        owner's per-message click in the console. Fail-soft: any failure is one
+        PIPELINE_ERR line and the loop continues (the other legs' contract)."""
+        try:
+            doc_settings = self._settings_doc()
+        except Exception as e:        # noqa: BLE001 — never break the loop
+            self.log.write("PIPELINE_ERR", "phase=settings",
+                           f"err={type(e).__name__}")
+            return
+        block = pipeline_mod.normalize(doc_settings)
+        if not block["enabled"]:
+            return
+        nowt = self._now()
+        if nowt - self._pipe_check < block["interval_min"] * 60:
+            return
+        self._pipe_check = nowt
+        try:
+            # ONE read-modify-write under the shared mutation lock: the console
+            # (another process) may be sending right now, and a stale save here
+            # could overwrite a `sent` status — which would breach the daily cap
+            # on the next send (auditor P2-1, cross-process layer).
+            with pipeline_mod.mutation_lock():
+                doc = pipeline_mod.load()
+                report = pipeline_mod.auto_tick(doc, doc_settings, now=nowt)
+                pipeline_mod.save(doc)
+        except Exception as e:        # noqa: BLE001 — one line, loop survives
+            self.log.write("PIPELINE_ERR", f"err={type(e).__name__}")
+            return
+        if report.get("sourced") or report.get("qualified") \
+                or report.get("drafted"):
+            self.log.write("PIPELINE_TICK", f"sourced={report.get('sourced')}",
+                           f"qualified={report.get('qualified')}",
+                           f"drafted={report.get('drafted')}")
+
+    def _observe_pipeline_reply(self, route: str, inbound) -> None:
+        """Pipeline car: an inbound message from a KNOWN lead is classified for
+        the owner's review BEFORE the channel allowlist gate — recording a
+        triage row is a local state write, never a reply, so it does not touch
+        the fail-closed allowlist contract that governs model answers. Unknown
+        senders are not tracked at all. Never sends, never answers."""
+        if route != "email":
+            return
+        try:
+            doc_settings = self._settings_doc()
+            if not pipeline_mod.normalize(doc_settings)["enabled"]:
+                return
+            text = str(getattr(inbound, "text", "") or "")
+            subject = text.splitlines()[0] if text else ""
+            with pipeline_mod.mutation_lock():   # same RMW discipline as the tick
+                doc = pipeline_mod.load()
+                row = pipeline_mod.observe_inbound(
+                    doc, getattr(inbound, "sender", ""), subject, text,
+                    now=self._now())
+                if row is not None:
+                    pipeline_mod.save(doc)
+            if row is not None:
+                self.log.write("PIPELINE_REPLY", f"cls={row['cls']}",
+                               f"lead={row['lead_id']}")
+        except Exception as e:        # noqa: BLE001 — one line, loop survives
+            self.log.write("PIPELINE_ERR", "phase=reply",
+                           f"err={type(e).__name__}")
+
     def _maybe_poll_channels(self) -> None:
         """Channel inbound leg: throttled to CHANNEL_POLL_SEC; poll every
         route once, gate each message on its allowlist (fail-closed), answer
@@ -2688,6 +2758,7 @@ class ChatService:
                 continue
             allow = self._channel_allow(block.get(route))
             for inbound in items:
+                self._observe_pipeline_reply(route, inbound)
                 try:
                     self._handle_channel_inbound(route, chan, inbound, allow)
                 except Exception as e:  # noqa: BLE001 — one bad message, one line

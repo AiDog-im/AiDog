@@ -19436,6 +19436,610 @@ def test_macos_report() -> None:
         srv.shutdown()
 
 
+def test_pipeline() -> None:
+    """Pipeline car (acquiring customers automatically, owner concept): the six
+    stages are pure functions over ONE document, every send gate is re-checked
+    in ONE place, the compliance fields (postal address + List-Unsubscribe +
+    Reply-To) are enforced rather than promised, the suppression list wins, the
+    PII bounds hold, and the absent capabilities stay absent (no model tool, no
+    auto-send, no scraping, no network from the module itself)."""
+    import contextlib
+    import io
+    from mycore import channels as ch
+    from mycore import pipeline as pl
+
+    tmp = Path(tempfile.mkdtemp(prefix="pipeline_"))
+
+    # ---------------- A. settings: fail-closed normalization ---------------
+    blk = pl.normalize({})
+    check("pipeline: absent block -> kill switch OFF + documented defaults",
+          blk["enabled"] is False and blk["auto_source"] is False
+          and blk["interval_min"] == 60 and blk["daily_cap"] == 5
+          and blk["physical_address"] == "", str(blk))
+    blk = pl.normalize({"pipeline": {"enabled": True, "daily_cap": 500,
+                                     "interval_min": 1,
+                                     "from_name": "  C  "}})
+    check("pipeline: out-of-range caps fall back to the default, never to "
+          "unlimited",
+          blk["enabled"] is True and blk["daily_cap"] == 5
+          and blk["interval_min"] == 60 and blk["from_name"] == "C", str(blk))
+    check("pipeline: a non-boolean kill switch reads as OFF (fail closed)",
+          pl.normalize({"pipeline": {"enabled": "yes"}})["enabled"] is False)
+
+    # ---------------- B. stage 1: leads -------------------------------------
+    doc = pl.empty()
+    lead = pl.add_lead(doc, name="Ann", email="Ann@Example.com ",
+                       org="ACME", signal="asked about self-hosting")
+    check("pipeline: add_lead normalizes the address and starts as `new`",
+          lead["email"] == "ann@example.com" and lead["status"] == "new"
+          and lead["id"] == "L1" and lead["score"] is None, str(lead))
+    check("pipeline: the add is an event (the view's live feed)",
+          doc["events"][-1]["stage"] == "source"
+          and doc["events"][-1]["lead"] == "L1")
+    refused = []
+    for bad in ("nope", "a@b", "a@b.", "@b.com", "a b@c.com"):
+        try:
+            pl.add_lead(doc, name="x", email=bad)
+        except pl.PipelineError as e:
+            refused.append(str(e))
+    check("pipeline: invalid addresses refused with a reason, never stored",
+          len(refused) == 5 and len(doc["leads"]) == 1, str(refused))
+    dup = ""
+    try:
+        pl.add_lead(doc, name="dup", email="ann@example.com")
+    except pl.PipelineError as e:
+        dup = str(e)
+    check("pipeline: duplicate address refused (case-insensitive)",
+          "already exists" in dup, dup)
+    pl.suppress(doc, "optout@example.com", note="asked us to stop")
+    blocked = ""
+    try:
+        pl.add_lead(doc, name="x", email="optout@example.com")
+    except pl.PipelineError as e:
+        blocked = str(e)
+    check("pipeline: a suppressed address can never enter as a lead",
+          "suppression" in blocked, blocked)
+
+    # ---------------- C. bulk import ---------------------------------------
+    rep = pl.import_leads(
+        doc,
+        "Bob <bob@example.com> | BobCo | asked for the docs\n"
+        "carol@example.com\n"
+        "this line has no address\n",
+        now=1)
+    check("pipeline: import parses `name <addr> | org | signal` and reports "
+          "the bad line instead of dropping it",
+          rep["added"] == 2
+          and rep["errors"] == ["line without an email address"]
+          and any(l["email"] == "carol@example.com" and l["name"] == ""
+                  for l in doc["leads"]), str(rep))
+
+    # ---------------- D. own-forum sourcing (D5) ---------------------------
+    threads = [{"author": "dave", "title": "How do I back up my memory?"},
+               {"author": "erin", "title": ""},
+               "junk"]
+    rep = pl.source_discussions(doc, fetch=lambda limit: threads, now=2)
+    check("pipeline: our own forum threads become leads with NO invented "
+          "address",
+          rep["added"] == 1 and rep["available"] is True,
+          str(rep))
+    dave = next(l for l in doc["leads"] if l["name"] == "dave")
+    check("pipeline: a forum lead keeps the thread title as its signal and an "
+          "empty address",
+          dave["source"] == "discussions" and dave["email"] == ""
+          and dave["signal"] == "How do I back up my memory?", str(dave))
+    again = pl.source_discussions(doc, fetch=lambda limit: threads, now=3)
+    check("pipeline: re-sourcing is idempotent (no duplicate signals)",
+          again["added"] == 0, str(again))
+
+    def boom(limit):
+        raise RuntimeError("network down")
+
+    rep = pl.source_discussions(doc, fetch=boom, now=4)
+    check("pipeline: a failed forum read is an honest unavailable note, never "
+          "an exception",
+          rep["available"] is False and "RuntimeError" in rep["note"],
+          str(rep))
+
+    # ---------------- E. stage 2: qualification ----------------------------
+    score, reason = pl.score_lead({"source": "manual", "email": "a@b.co",
+                                   "signal": "x" * 20, "org": "ACME"})
+    check("pipeline: the contactability score is its own arithmetic",
+          score == 80 and "source manual +40" in reason
+          and "address +15" in reason and "signal +15" in reason
+          and "org +10" in reason, f"{score} {reason}")
+    forum_score, _ = pl.score_lead({"source": "discussions",
+                                    "signal": "x" * 25})
+    check("pipeline: a forum signal alone does not reach the qualify bar",
+          forum_score == 40 < pl.QUALIFY_MIN, str(forum_score))
+    newly = pl.qualify_all(doc, now=5)
+    check("pipeline: qualify_all scores `new` leads and marks them",
+          newly == 3
+          and all(l["status"] in ("qualified", "skipped")
+                  for l in doc["leads"]), str([(l["name"], l["status"])
+                                               for l in doc["leads"]]))
+    check("pipeline: a below-bar lead is `skipped`, never silently deleted",
+          next(l for l in doc["leads"] if l["name"] == "dave")["status"]
+          == "skipped")
+
+    # ---------------- F. stage 3: drafting --------------------------------
+    made = pl.draft_ready(doc, {"pipeline": {"enabled": True, "daily_cap": 5}},
+                          now=6)
+    check("pipeline: drafting covers exactly the qualified leads with an "
+          "address",
+          made == 3, str(made))
+    check("pipeline: a draft carries a subject, a body and the template brain "
+          "label",
+          all(d["subject"] and d["body"] and d["brain"] == "template"
+              for d in doc["drafts"]), str(doc["drafts"][:1]))
+    check("pipeline: drafting twice makes nothing new (idempotent)",
+          pl.draft_ready(doc, {"pipeline": {"enabled": True}},
+                         now=7) == 0)
+    check("pipeline: the body always ends with the opt-out line",
+          pl.DEFAULT_OPT_OUT in doc["drafts"][0]["body"])
+    budget_doc = pl.empty()
+    for i in range(4):
+        pl.add_lead(budget_doc, name=f"P{i}", email=f"p{i}@example.com",
+                    org="X", signal="s" * 20, now=10)
+    pl.qualify_all(budget_doc, now=11)
+    check("pipeline: drafting is bounded by the daily cap (never a backlog the "
+          "cap forbids sending)",
+          pl.draft_ready(budget_doc,
+                         {"pipeline": {"enabled": True, "daily_cap": 2}},
+                         now=12) == 2)
+
+    # ---------------- G. owner decisions ----------------------------------
+    d1, d2, d3 = (d["id"] for d in doc["drafts"])
+    pl.edit_draft(doc, d1, subject="A shorter subject", body="Owner wording.",
+                  now=13)
+    check("pipeline: the owner may edit a pending draft",
+          doc["drafts"][0]["subject"] == "A shorter subject"
+          and doc["drafts"][0]["edited"] is True)
+    for bad in ({"subject": ""}, {"body": "   "}):
+        try:
+            pl.edit_draft(doc, d1, now=14, **bad)
+            check(f"pipeline: empty edit refused {bad}", False)
+        except pl.PipelineError:
+            check(f"pipeline: empty edit refused {list(bad)[0]}", True)
+    pl.approve(doc, d1, now=15)
+    check("pipeline: approval is a state change, not a send",
+          doc["drafts"][0]["status"] == "approved"
+          and doc["drafts"][0]["sent_at"] == 0.0)
+    try:
+        pl.edit_draft(doc, d1, subject="x", now=16)
+        check("pipeline: an approved draft is frozen", False)
+    except pl.PipelineError as e:
+        check("pipeline: an approved draft is frozen", "pending" in str(e))
+    pl.reject(doc, d2, reason="not this one", now=17)
+    check("pipeline: rejecting a draft parks its lead instead of retrying it",
+          doc["drafts"][1]["status"] == "rejected"
+          and next(l for l in doc["leads"]
+                   if l["id"] == doc["drafts"][1]["lead_id"])["status"]
+          == "skipped")
+
+    # ---------------- H. stage 5: the ONE send path -----------------------
+    class FakeChan:
+        name = "email"
+
+        def __init__(self, enabled=True, configured=(True, ""), deliver=True):
+            self.enabled = enabled
+            self._conf = configured
+            self._deliver = deliver
+            self.sent = []
+
+        def configured(self):
+            return self._conf
+
+        def send_message(self, target, text, subject="", headers=None):
+            self.sent.append({"target": target, "text": text,
+                              "subject": subject, "headers": headers or {}})
+            return self._deliver
+
+    settings_off = {"pipeline": {"enabled": False}}
+    settings_on = {"pipeline": {"enabled": True, "daily_cap": 5,
+                                "physical_address": "1 Example Street",
+                                "from_name": "C"},
+                   "channels": {"email": {"from": "me@example.com"}}}
+    chan = FakeChan()
+    r = pl.send_approved(doc, d1, settings_off, chan, now=20)
+    check("pipeline: the kill switch blocks a send even for an approved draft",
+          r["ok"] is False and "kill switch" in r["reason"] and chan.sent == [],
+          str(r["reason"]))
+    r = pl.send_approved(doc, d3, settings_on, chan, now=20)
+    check("pipeline: an unapproved draft cannot be sent",
+          r["ok"] is False and "not approved" in r["reason"], str(r["reason"]))
+    no_addr = {"pipeline": {"enabled": True, "physical_address": "",
+                            "daily_cap": 5}}
+    r = pl.send_approved(doc, d1, no_addr, chan, now=21)
+    check("pipeline: a missing postal address refuses the send (CAN-SPAM)",
+          r["ok"] is False and "postal address" in r["reason"], str(r["reason"]))
+    r = pl.send_approved(doc, d1, settings_on, None, now=21)
+    check("pipeline: no route -> an honest reason, not an exception",
+          r["ok"] is False and "unavailable" in r["reason"], str(r["reason"]))
+    r = pl.send_approved(doc, d1, settings_on, FakeChan(enabled=False), now=21)
+    check("pipeline: a disabled email route refuses the send",
+          r["ok"] is False and "disabled" in r["reason"], str(r["reason"]))
+    r = pl.send_approved(doc, d1, settings_on,
+                         FakeChan(configured=(False, "missing X slot")), now=21)
+    check("pipeline: an unconfigured route names its gap and refuses",
+          r["ok"] is False and "missing X slot" in r["reason"], str(r["reason"]))
+    capped = {"pipeline": {"enabled": True, "daily_cap": 1,
+                           "physical_address": "1 Example Street"},
+              "channels": {"email": {"from": "me@example.com"}}}
+    r = pl.send_approved(doc, d1, capped, chan, now=22)
+    check("pipeline: a send is delivered once every gate passes",
+          r["ok"] is True and r["sent"] is True and len(chan.sent) == 1,
+          str(r["reason"]))
+    sent = chan.sent[0]
+    check("pipeline: the delivered message carries the owner's subject",
+          sent["subject"] == "A shorter subject", sent["subject"])
+    check("pipeline: every message carries List-Unsubscribe + Reply-To",
+          sent["headers"].get("List-Unsubscribe", "").startswith(
+              "<mailto:me@example.com")
+          and sent["headers"].get("Reply-To") == "me@example.com",
+          str(sent["headers"]))
+    check("pipeline: the postal address is in the delivered body",
+          "1 Example Street" in sent["text"])
+    check("pipeline: a delivered draft marks its lead `contacted`",
+          next(l for l in doc["leads"]
+               if l["id"] == doc["drafts"][0]["lead_id"])["status"]
+          == "contacted")
+    pl.approve(doc, d3, now=22)
+    r = pl.send_approved(doc, d3, capped, chan, now=23)
+    check("pipeline: the daily cap refuses the second send of the day",
+          r["ok"] is False and "cap" in r["reason"], str(r["reason"]))
+    failing = FakeChan(deliver=False)
+    doc["drafts"][2]["status"] = "approved"
+    r = pl.send_approved(doc, doc["drafts"][2]["id"],
+                         {"pipeline": {"enabled": True, "daily_cap": 5,
+                                       "physical_address": "1 Example"}},
+                         failing, now=24)
+    check("pipeline: a route refusal lands as `failed` with a reason, never as "
+          "sent",
+          r["ok"] is False and doc["drafts"][2]["status"] == "failed"
+          and doc["drafts"][2]["error"], str(r))
+
+    # ---------------- I. stage 6: reply triage ----------------------------
+    check("pipeline: opt-out wins even inside a buying question",
+          pl.classify_reply("Stop writing to me. Also, how much is it?")
+          == "opt_out")
+    check("pipeline: pricing questions classify as interested",
+          pl.classify_reply("How much does it cost?") == "interested")
+    check("pipeline: a plain question classifies as question",
+          pl.classify_reply("Does it run on Windows?") == "question")
+    check("pipeline: anything else is `other` (no invented intent)",
+          pl.classify_reply("thanks") == "other")
+    check("pipeline: a Chinese opt-out is recognized",
+          pl.classify_reply("\u8bf7\u9000\u8ba2\uff0c\u8c22\u8c22")
+          == "opt_out")
+    tdoc = pl.empty()
+    tlead = pl.add_lead(tdoc, name="Tess", email="tess@example.com",
+                        org="T", signal="s" * 20, now=30)
+    pl.qualify_all(tdoc, now=31)
+    pl.draft_ready(tdoc, {"pipeline": {"enabled": True, "daily_cap": 5}},
+                   now=32)
+    check("pipeline: an unknown sender is not tracked at all",
+          pl.observe_inbound(tdoc, "stranger@example.com", "hi", "hi",
+                             now=33) is None
+          and tdoc["replies"] == [])
+    row = pl.observe_inbound(tdoc, "TESS@example.com", "Re: hello",
+                             "Sounds good, tell me more", now=34)
+    check("pipeline: a known lead's reply is recorded with its class",
+          row is not None and row["cls"] == "interested"
+          and row["lead_id"] == tlead["id"]
+          and tdoc["leads"][0]["status"] == "replied", str(row))
+    check("pipeline: the reply keeps only a bounded excerpt (no mailbox copy)",
+          len(row["excerpt"]) <= pl.NOTE_MAX
+          and len(row["subject"]) <= pl.NOTE_MAX, str(row))
+    before = len(tdoc["suppressed"])
+    pl.observe_inbound(tdoc, "tess@example.com", "Re: hello",
+                       "unsubscribe please", now=35)
+    check("pipeline: an inbound opt-out suppresses and rejects pending mail",
+          len(tdoc["suppressed"]) == before + 1
+          and tdoc["leads"][0]["status"] == "suppressed"
+          and tdoc["drafts"][0]["status"] == "rejected",
+          str(tdoc["drafts"][0]))
+    tdoc["drafts"][0]["status"] = "approved"      # hand-edited / stale queue
+    r = pl.send_approved(tdoc, tdoc["drafts"][0]["id"],
+                         {"pipeline": {"enabled": True,
+                                       "physical_address": "1 X"}},
+                         FakeChan(), now=36)
+    check("pipeline: a suppressed recipient can never be mailed again",
+          r["ok"] is False and "suppression" in r["reason"], str(r["reason"]))
+    import inspect as _inspect
+    obs_src = _inspect.getsource(pl.observe_inbound)
+    check("pipeline: observe_inbound never sends (no send call in its source)",
+          "send_approved" not in obs_src and ".send(" not in obs_src
+          and "send_message" not in obs_src, obs_src[:200])
+
+    # ---------------- J. the read model -----------------------------------
+    view = pl.collect({"pipeline": {"enabled": True, "daily_cap": 5}}, doc)
+    check("pipeline: the view counts come from records, not from prose",
+          view["counts"]["leads"] == len(doc["leads"])
+          and view["counts"]["sent"] == 1
+          and pl.sends_today(doc, 22) == 1
+          and pl.sends_today(doc, 22 + 86400) == 0
+          and view["stages"] == list(pl.STAGES), str(view["counts"]))
+    check("pipeline: the view reports the kill switch and the compliance fact",
+          view["enabled"] is True and view["physical_address_set"] is False
+          and view["qualify_min"] == pl.QUALIFY_MIN)
+    check("pipeline: the event feed is newest-first and bounded",
+          len(view["events"]) <= pl.EVENTS_PAGE
+          and view["events"][0]["ts"] == doc["events"][-1]["ts"]
+          and view["events"][-1]["ts"] == doc["events"][-len(view["events"])]["ts"])
+    empty_view = pl.collect({}, pl.empty())
+    check("pipeline: an empty pipeline reads as zeros, never as invented "
+          "activity",
+          empty_view["counts"]["leads"] == 0 and empty_view["leads"] == []
+          and empty_view["enabled"] is False)
+
+    # ---------------- K. persistence + resumability ------------------------
+    path = tmp / "pipeline.json"
+    pl.save(doc, path)
+    again = pl.load(path)
+    check("pipeline: the document round-trips (one file = the whole queue)",
+          len(again["leads"]) == len(doc["leads"])
+          and again["seq"] == doc["seq"]
+          and len(again["drafts"]) == len(doc["drafts"]), str(again["seq"]))
+    path.write_text("{not json", encoding="utf-8")
+    check("pipeline: corrupt state reads as an empty pipeline, never a crash",
+          pl.load(path)["leads"] == [])
+    check("pipeline: a missing state file is an empty pipeline",
+          pl.load(tmp / "nope.json")["leads"] == [])
+    shrunk = pl.load(Path(tmp / "seq.json")) if False else None
+    seq_doc = pl.empty()
+    seq_doc["seq"]["leads"] = 1
+    seq_doc["leads"] = [{"id": "L1"}, {"id": "L2"}, {"id": "L3"}]
+    pl.save(seq_doc, tmp / "seq.json")
+    check("pipeline: a corrupted id counter can never hand out a duplicate id",
+          pl.load(tmp / "seq.json")["seq"]["leads"] == 3 and shrunk is None)
+
+    # ---------------- L. the automatic pass never sends -------------------
+    import inspect
+    sig = inspect.signature(pl.auto_tick)
+    check("pipeline: auto_tick has no channel parameter (it structurally "
+          "cannot send)",
+          "channel" not in sig.parameters, str(list(sig.parameters)))
+    adoc = pl.empty()
+    pl.add_lead(adoc, name="Auto", email="auto@example.com", org="A",
+                signal="s" * 20, now=40)
+    tick = pl.auto_tick(adoc, {"pipeline": {"enabled": True}}, now=41)
+    check("pipeline: an enabled tick qualifies and drafts, and sends nothing",
+          tick["ok"] is True and tick["qualified"] == 1
+          and tick["drafted"] == 1 and tick["sent"] == 0, str(tick))
+    tick = pl.auto_tick(pl.empty(), {}, now=42)
+    check("pipeline: a disabled tick does nothing at all",
+          tick["ok"] is False and tick["reason"] == "disabled", str(tick))
+
+    # ---------------- M. the absent capabilities stay absent --------------
+    src = (REPO / "mycore" / "pipeline.py").read_text(encoding="utf-8")
+    check("pipeline: the module opens no socket of its own (the channel "
+          "route owns the wire)",
+          "smtplib" not in src and "urllib" not in src
+          and "socket" not in src)
+    check("pipeline: no scraping / purchased-list machinery exists",
+          "import requests" not in src and "import bs4" not in src
+          and "selenium" not in src)
+    names = build_registry().names()
+    check("pipeline: the model holds no pipeline tool (no model send path)",
+          not [n for n in names if "pipeline" in n or "outreach" in n],
+          str([n for n in names if "pipeline" in n]))
+
+    # ---------------- N. channel seam: subject + compliance headers -------
+    class FakeSMTP:
+        def __init__(self, host, port, ssl_on, timeout):
+            self.sent = []
+            self.raw = ""
+
+        def starttls(self):
+            pass
+
+        def login(self, user, password):
+            pass
+
+        def sendmail(self, frm, to, raw):
+            self.raw = raw
+            self.sent.append((frm, to))
+
+        def quit(self):
+            pass
+
+    box = []
+    repo = Path(tempfile.mkdtemp(prefix="pipeline_ch_"))
+    (repo / "data" / "mycore_service").mkdir(parents=True)
+    slots = "".join(f"{slot}={val}\n" for slot, val in (
+        ("CHANNEL_SMTP_USER", "u1@example.com"),
+        ("CHANNEL_SMTP_PASS", "pw-SECRET"),
+        ("CHANNEL_IMAP_USER", "u1@example.com"),
+        ("CHANNEL_IMAP_PASS", "pw-SECRET"),
+        ("CHANNEL_SLACK_TOKEN", "xoxb-test")))
+    (repo / "secrets.env").write_text(slots, encoding="utf-8")
+
+    def smtp_factory(host, port, ssl_on, timeout):
+        inst = FakeSMTP(host, port, ssl_on, timeout)
+        box.append(inst)
+        return inst
+
+    echan = ch.EmailChannel(repo=repo,
+                            cfg={"enabled": True, "from": "me@example.com",
+                                 "smtp_host": "smtp.example.test",
+                                 "smtp_port": 587, "smtp_ssl": False,
+                                 "imap_host": "imap.example.test",
+                                 "imap_port": 993},
+                            smtp_factory=smtp_factory)
+    ok = echan.send_message("you@example.com", "body text",
+                            subject="Hello from I'm AiDog",
+                            headers={"List-Unsubscribe":
+                                     "<mailto:me@example.com?subject=unsubscribe>",
+                                     "Reply-To": "me@example.com"})
+    raw = box[-1].raw if box else ""
+    check("pipeline: the email route carries the subject on the wire",
+          ok is True and "Subject: Hello from I'm AiDog" in raw, raw[:200])
+    check("pipeline: the compliance headers reach the wire",
+          "List-Unsubscribe: <mailto:me@example.com?subject=unsubscribe>" in raw
+          and "Reply-To: me@example.com" in raw, raw[:400])
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        bad = echan.send_message("you@example.com", "body",
+                                 subject="s",
+                                 headers={"X-Test": "a\r\nBcc: evil@example.com"})
+    check("pipeline: a CRLF header injection is refused, not sanitized",
+          bad is False and "invalid header value" in buf.getvalue(),
+          buf.getvalue()[:200])
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        bad = echan.send_message("you@example.com", "body", subject="s",
+                                 headers={"Bad Name": "v"})
+    check("pipeline: an invalid header name is refused",
+          bad is False and "invalid header name" in buf.getvalue(),
+          buf.getvalue()[:200])
+    buf = io.StringIO()
+    with contextlib.redirect_stderr(buf):
+        slack = ch.SlackChannel(repo=repo,
+                                cfg={"enabled": True,
+                                     "channel_ids": ["C1"]},
+                                transport=lambda *a, **k: "{}")
+        res = slack.send_message("chan", "text", subject="hello")
+    check("pipeline: a route without an envelope refuses a subject instead of "
+          "dropping it",
+          res is False and "cannot carry" in buf.getvalue(),
+          buf.getvalue()[:200])
+    plain = echan.send_message("you@example.com", "second body")
+    check("pipeline: a plain send_message keeps send()'s old behavior",
+          plain is True and "Subject: AiDog" in box[-1].raw)
+
+    # ---------------- O. audit fixes (2026-11-17 round) -------------------
+    # P2-2: a sparse/corrupted id counter must never re-issue an existing id
+    sparse = pl.empty()
+    sparse["seq"]["leads"] = 1
+    sparse["leads"] = [{"id": "L1"}, {"id": "L3"}]
+    pl.save(sparse, tmp / "sparse.json")
+    reloaded = pl.load(tmp / "sparse.json")
+    check("pipeline: sparse ids repair the counter past the HIGHEST suffix",
+          reloaded["seq"]["leads"] == 3 and pl._next_id(reloaded, "leads") == "L4",
+          str(reloaded["seq"]))
+
+    # P2-3: an oversized but syntactically valid file is capped ON LOAD
+    fat = pl.empty()
+    fat["leads"] = [{"id": f"L{i}", "email": f"l{i}@example.com"}
+                    for i in range(pl.MAX_LEADS + 50)]
+    fat["replies"] = [{"id": f"R{i}", "ts": float(i)}
+                      for i in range(pl.MAX_REPLIES + 25)]
+    fat["events"] = [{"ts": float(i), "stage": "source", "lead": "", "note": "x"}
+                     for i in range(pl.EVENT_CAP + 10)]
+    pl.save(fat, tmp / "fat.json")
+    lean = pl.load(tmp / "fat.json")
+    check("pipeline: oversized lists truncate to the documented caps on load",
+          len(lean["leads"]) == pl.MAX_LEADS
+          and len(lean["replies"]) == pl.MAX_REPLIES
+          and len(lean["events"]) == pl.EVENT_CAP
+          and lean["replies"][-1]["id"] == f"R{pl.MAX_REPLIES + 24}",
+          str({k: len(lean[k]) for k in ("leads", "replies", "events")}))
+
+    # P2-4: an owner edit cannot delete the opt-out line — send re-asserts it
+    odoc = pl.empty()
+    olead = pl.add_lead(odoc, name="Opt", email="opt@example.com",
+                        org="O", signal="s" * 20, now=50)
+    pl.qualify_all(odoc, now=51)
+    pl.draft_ready(odoc, {"pipeline": {"enabled": True, "daily_cap": 5}},
+                   now=52)
+    odoc["drafts"][0]["body"] = "Edited body with no opt-out line."
+    pl.approve(odoc, odoc["drafts"][0]["id"], now=53)
+    ochan = FakeChan()
+    r = pl.send_approved(odoc, odoc["drafts"][0]["id"],
+                         {"pipeline": {"enabled": True, "daily_cap": 5,
+                                       "physical_address": "1 Example St"},
+                          "channels": {"email": {"from": "me@example.com"}}},
+                         ochan, now=54)
+    check("pipeline: send re-asserts the opt-out line an owner edit removed",
+          r["ok"] is True and pl.DEFAULT_OPT_OUT in ochan.sent[0]["text"]
+          and "1 Example St" in ochan.sent[0]["text"], str(r))
+    # ...and the OWNER's own opt-out override is the line that comes back
+    odoc2 = pl.empty()
+    pl.add_lead(odoc2, name="Two", email="two@example.com",
+                org="O", signal="s" * 20, now=55)
+    pl.qualify_all(odoc2, now=56)
+    pl.draft_ready(odoc2, {"pipeline": {"enabled": True, "daily_cap": 5}},
+                   now=57)
+    odoc2["drafts"][0]["body"] = "Body without any opt-out."
+    pl.approve(odoc2, odoc2["drafts"][0]["id"], now=58)
+    r2 = pl.send_approved(odoc2, odoc2["drafts"][0]["id"],
+                          {"pipeline": {"enabled": True, "daily_cap": 5,
+                                        "physical_address": "1 Example St",
+                                        "opt_out_note": "Reply STOP to end this."}},
+                          ochan, now=59)
+    check("pipeline: send re-asserts the OWNER's opt-out override too",
+          r2["ok"] is True
+          and "Reply STOP to end this." in ochan.sent[-1]["text"],
+          str(r2))
+
+    # P2-1: the mutation lock serializes read-modify-write — two threads at a
+    # cap of 1 must produce exactly ONE send (the server and the service leg
+    # both hold this lock around load -> gate -> save).
+    import threading as _threading
+    race_path = tmp / "race.json"
+    rdoc = pl.empty()
+    for i in range(2):
+        lead = pl.add_lead(rdoc, name=f"C{i}", email=f"c{i}@example.com",
+                           org="X", signal="s" * 20, now=60)
+        pl.qualify_all(rdoc, now=61)
+        pl.draft_ready(rdoc, {"pipeline": {"enabled": True, "daily_cap": 5}},
+                       now=62)
+        pl.approve(rdoc, rdoc["drafts"][-1]["id"], now=63)
+    pl.save(rdoc, race_path)
+    sent_ids, results = [], []
+    rlock = _threading.Lock()
+
+    class SlowChan(FakeChan):
+        def send_message(self, target, text, subject="", headers=None):
+            import time as _time
+            _time.sleep(0.05)          # widen the race window on purpose
+            ok = super().send_message(target, text, subject, headers)
+            with rlock:
+                sent_ids.append(target)
+            return ok
+
+    rchan = SlowChan()
+    rsettings = {"pipeline": {"enabled": True, "daily_cap": 1,
+                              "physical_address": "1 Example"},
+                 "channels": {"email": {"from": "me@example.com"}}}
+
+    def _race(draft_id):
+        with pl.mutation_lock(tmp):
+            doc = pl.load(race_path)
+            verdict = pl.send_approved(doc, draft_id, rsettings, rchan, now=64)
+            pl.save(doc, race_path)
+        with rlock:
+            results.append(verdict["ok"])
+
+    threads = [_threading.Thread(target=_race, args=(d["id"],))
+               for d in pl.load(race_path)["drafts"]]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=10)
+    check("pipeline: the mutation lock lets exactly ONE send past a cap of 1",
+          len(results) == 2 and sum(1 for x in results if x) == 1
+          and len(sent_ids) == 1, str({"results": results, "sent": sent_ids}))
+    check("pipeline: the concurrent loser still sees a coherent document",
+          pl.sends_today(pl.load(race_path), 64) == 1,
+          str(pl.load(race_path)["counts"] if "counts" in pl.load(race_path)
+              else [d["status"] for d in pl.load(race_path)["drafts"]]))
+    check("pipeline: mutation_lock is a real lock (thread layer always on)",
+          isinstance(pl.MUTATION_LOCK, type(_threading.Lock())))
+
+    # P2-1 (suppression bound): a full table evicts the oldest with an event
+    sdoc = pl.empty()
+    sdoc["suppressed"] = [{"email": f"s{i}@example.com", "note": "", "ts": float(i)}
+                          for i in range(pl.SUPPRESSED_MAX)]
+    pl.suppress(sdoc, "fresh@example.com", note="new", now=70)
+    check("pipeline: a full suppression list evicts the oldest entry, loudly",
+          len(sdoc["suppressed"]) == pl.SUPPRESSED_MAX
+          and sdoc["suppressed"][-1]["email"] == "fresh@example.com"
+          and any("evicted" in e.get("note", "") for e in sdoc["events"]),
+          str(sdoc["suppressed"][:2]))
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -19521,6 +20125,7 @@ def main() -> int:
         test_user_fixes,
         test_usage_range,
         test_macos_report,
+        test_pipeline,
     ]
     rows = []
     for fn in suites:

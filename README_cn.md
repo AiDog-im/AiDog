@@ -14,8 +14,8 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="最新版本"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2494%2F2494-brightgreen?style=flat-square" alt="核心测试 2494/2494">
-  <img src="https://img.shields.io/badge/console_smoke-558%2F558-brightgreen?style=flat-square" alt="控制台冒烟 558/558">
+  <img src="https://img.shields.io/badge/core_tests-2574%2F2574-brightgreen?style=flat-square" alt="核心测试 2574/2574">
+  <img src="https://img.shields.io/badge/console_smoke-574%2F574-brightgreen?style=flat-square" alt="控制台冒烟 574/574">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
 
@@ -50,7 +50,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。（**
   归档分层）+ 数字记忆体协议：唯一真值、跨内核可恢复、每次 reflect 回写。
   没有你读不了、审不动的向量库。
 - **自研核心**：运行时内核 `mycore` 从零自研——诚实的函数调用循环（停止
-  原因明示）、**40 模块 ≈24.5k 代码行、2494 项测试**，换芯后零上游依赖。
+  原因明示）、**41 模块 ≈25.0k 代码行、2574 项测试**，换芯后零上游依赖。
   换的是内核，永远不换「我」。
 
 它通过 **Telegram**、**回环 Web 控制台**、**桌面 HUD 壳**和**语音**与你
@@ -91,7 +91,7 @@ iOS/Android
 
 |  | 能力 | 提供什么 |
 |---|---|---|
-| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——40 模块、2494 测试、零上游 |
+| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——41 模块、2574 测试、零上游 |
 | 🎭 | **宪法人格** | `SOUL.md` 在系统栈最顶端；红线与语气每轮生效，而非抽样自人设提示词 |
 | 🧠 | **策展记忆** | 有界 Markdown 预算 + 归档分层 + 数字记忆体协议；`memory` 套件 58/58 |
 | 🧩 | **技能 + 确定性路由** | `SKILL.md` frontmatter（业界标准字段），路由预筛先选 TOP3 **再**加载正文——37/37 |
@@ -221,8 +221,8 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 
 | 套件 | 结果 |
 |---|---|
-| `mycore` 核心套件 | **2494/2494** |
-| 控制台冒烟（真实 HTTP） | **558/558**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
+| `mycore` 核心套件 | **2574/2574** |
+| 控制台冒烟（真实 HTTP） | **574/574**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
 | 技能路由 | **37/37** |
 | 记忆持久化 | **58/58** |
 | 安装向导 | **123/123** |
@@ -235,24 +235,25 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 目录规模：**30 个注册工具** · **9 家交易所场所** · **28 套真机
 E2E**——全部全绿。
 
-语言包：`en`（默认）+ `zh` 各 **1557 键**，parity lint 把关；官网另有
+语言包：`en`（默认）+ `zh` 各 **1654 键**，parity lint 把关；官网另有
 **382 键**双语站包。
 
 ## 文档
 
 - [`docs/installation.md`](docs/installation.md) — 安装、槽位、向导
-- [`docs/features/`](docs/features/) — **37 份能力文档**，一项能力一档
+- [`docs/features/`](docs/features/) — **38 份能力文档**，一项能力一档
   （渠道、记忆、定时、子代理、MCP、语音、桌面、profile、工具开关……），
   每份都写明诚实边界
 - [`docs/manual_verification.md`](docs/manual_verification.md) — 人工验收清单
 - [`docs/security_checklist.md`](docs/security_checklist.md) — 安全审查清单
 - **[aidog.im](https://aidog.im)** — 产品官网（双语、PWA、AI 可读 `llms.txt`）
 
-**37 份一览**（分七组，每组一行）：
+**38 份一览**（分八组，每组一行）：
 
 - **代理循环与工具** — [`acp`](docs/features/acp.md)（ACP v1 stdio 服务器）· [`openai_api_server`](docs/features/openai_api_server.md)（OpenAI 兼容 `/v1` 网关）· [`terminal_backends`](docs/features/terminal_backends.md)（7 后端 `run_bash` 矩阵）· [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`model_gateway`](docs/features/model_gateway.md)（结构化端点、轮询、限流、自计量）· [`missions`](docs/features/missions.md)（永不睡觉的任务守夜循环）· [`community_posting`](docs/features/community_posting.md)（站内讨论发帖 + 槽位检验）
 - **知识与记忆** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md)（项目指令文件）· [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md)（只读 Linear/Notion 搜索）
 - **感知与主动发现** — [`sniff`](docs/features/sniff.md)（只读 SNIFF 扫描引擎：健康/家居/车辆/网页源、受限规则、发现记录、先开口投递）
+- **获客增长** — [`pipeline`](docs/features/pipeline.md)（获客流水线：自有论坛信号 → 可联系度评分 → 可编辑草稿 → **你点一下才发**，开关 + 日上限 + 实体地址 + 永久退订）
 - **渠道与媒体** — [`channels`](docs/features/channels.md) · [`channels_domestic`](docs/features/channels_domestic.md) · [`console_chat`](docs/features/console_chat.md) · [`voice_session`](docs/features/voice_session.md) · [`voice_announcements`](docs/features/voice_announcements.md) · [`tts_engines`](docs/features/tts_engines.md) · [`image_generation`](docs/features/image_generation.md)
 - **运维与控制台** — [`setup_wizard`](docs/features/setup_wizard.md) · [`regional_visibility`](docs/features/regional_visibility.md)（显式区域分层：交易所面隐藏、通道灰显、激活必填变化） · [`frontend_coverage`](docs/features/frontend_coverage.md) · [`capabilities`](docs/features/capabilities.md) · [`desktop_client`](docs/features/desktop_client.md) · [`profiles`](docs/features/profiles.md) · [`site_visibility`](docs/features/site_visibility.md) · [`zero_key_onboarding`](docs/features/zero_key_onboarding.md) · [`natural_language_cron`](docs/features/natural_language_cron.md) · [`event_hooks`](docs/features/event_hooks.md)
 - **Web3** — [`exchanges`](docs/features/exchanges.md)（9 家场所，下单过人工审批闸）

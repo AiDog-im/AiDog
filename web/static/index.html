@@ -112,6 +112,20 @@
         <span class="nav-drop" aria-hidden="true"></span>
       </button>
 
+      <!-- pipeline car (owner concept: acquiring customers automatically): the
+           six-stage acquisition surface. It reads only our own /api/pipeline
+           and every send is the owner's own click — the model holds no tool
+           for this pipeline at all. -->
+      <button class="nav-item" type="button" data-view="pipeline">
+        <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
+          stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="3.4" cy="8" r="1.7"/>
+          <circle cx="12.6" cy="8" r="1.7"/>
+          <path d="M5.2 8h5.6"/></svg></span>
+        <span class="nav-label" data-i18n="view.pipeline.title">Pipeline</span>
+        <span class="nav-drop" aria-hidden="true"></span>
+      </button>
+
       <div class="nav-group" data-i18n="nav.group.browse">Browse</div>
       <button class="nav-item" type="button" data-view="stream">
         <span class="nav-ico" aria-hidden="true"><svg viewBox="0 0 16 16" fill="none"
@@ -635,6 +649,162 @@
         <h2><span data-i18n="sec.gallery">Skill Armory</span><span class="gal-count" id="galCount"></span></h2>
         <div class="stat-note" data-i18n="skl.mountedNote">mounted = routable by the deterministic router; switch one off to keep it installed but never loaded. Installed (one-click) skills can be removed; the shipped five are permanent.</div>
         <div class="gal-grid" id="galGrid"></div>
+      </section>
+    </section>
+
+    <!-- PIPELINE (pipeline car): the acquisition pipeline — source → qualify →
+         draft → approve → send → track. Everything renders from GET
+         /api/pipeline (our own state + the email route's readiness); a draft
+         only ever leaves on an explicit APPROVE/SEND click behind the Bearer
+         gate, and the kill switch, the daily cap, the postal address and the
+         suppression list are re-checked by mycore.pipeline on the server. -->
+    <section class="view" id="view-pipeline" data-view="pipeline">
+      <div class="view-head">
+        <div class="view-titles">
+          <h2 data-i18n="view.pipeline.title">Pipeline</h2>
+          <p class="view-sub" data-i18n="view.pipeline.sub">Source, qualify, draft, approve, send, track — every send waits for your click</p>
+        </div>
+        <div class="view-actions">
+          <button class="btn" id="pipeRun" type="button"
+                  data-i18n="pipe.run">RUN NOW</button>
+          <button class="btn" id="pipeKill" type="button" aria-pressed="false"
+                  data-i18n="pipe.killOn">TURN ON</button>
+        </div>
+      </div>
+      <div class="stat-note" id="pipeMsg" role="status"></div>
+      <div class="stat-note pipe-off" id="pipeOff" hidden
+           data-i18n="pipe.offNote">the pipeline is off — nothing is sourced, nothing is drafted, nothing is sent</div>
+
+      <!-- three-step onboarding: open while nothing is recorded, one line once
+           the pipeline has rows (the SENSE board's precedent) -->
+      <div class="sniff-howto is-open" id="pipeHowto">
+        <button class="sniff-howto-head" id="pipeHowtoHead" type="button"
+                aria-expanded="true">
+          <span class="sniff-howto-title" data-i18n="pipe.howto.title">HOW IT WORKS</span>
+          <span class="sniff-howto-line" data-i18n="pipe.howto.line">turn it on → add leads (or read your forum) → approve what you would send yourself</span>
+          <span class="sniff-howto-caret" aria-hidden="true"></span>
+        </button>
+        <ol class="sniff-howto-steps">
+          <li data-i18n="pipe.howto.s1">1 · SOURCES — add a lead by hand, paste a list, or read your own public forum threads (no scraping, no purchased lists)</li>
+          <li data-i18n="pipe.howto.s2">2 · QUALIFY &amp; DRAFT — a contactability score (address + signal + source, shown with its arithmetic) and one editable draft per lead</li>
+          <li data-i18n="pipe.howto.s3">3 · APPROVE &amp; SEND — nothing leaves without your click; the kill switch, the daily cap, the postal address and the opt-out list are checked again on the server</li>
+        </ol>
+      </div>
+
+      <section class="card">
+        <h2><span data-i18n="sec.pipeStages">STAGES</span></h2>
+        <div class="pipe-stages" id="pipeStages"></div>
+        <div class="stat-note" id="pipeGate" hidden></div>
+      </section>
+
+      <div class="evo-cols">
+        <section class="card">
+          <h2><span data-i18n="sec.pipeLeads">LEADS</span>
+              <span class="chat-badge" id="pipeLeadCount">–</span></h2>
+          <div id="pipeLeads"></div>
+          <div class="pipe-form" id="pipeLeadForm" hidden>
+            <div class="ctl-row">
+              <label for="pipeName" data-i18n="pipe.name">Name</label>
+              <input type="text" id="pipeName" maxlength="120" autocomplete="off">
+            </div>
+            <div class="ctl-row">
+              <label for="pipeEmail" data-i18n="pipe.email">Email</label>
+              <input type="text" id="pipeEmail" maxlength="160" autocomplete="off"
+                     data-i18n-ph="pipe.emailPh" placeholder="name@example.com">
+            </div>
+            <div class="ctl-row">
+              <label for="pipeOrg" data-i18n="pipe.org">Org</label>
+              <input type="text" id="pipeOrg" maxlength="120" autocomplete="off">
+            </div>
+            <div class="ctl-row">
+              <label for="pipeSignal" data-i18n="pipe.signal">Why (signal)</label>
+              <input type="text" id="pipeSignal" maxlength="400" autocomplete="off"
+                     data-i18n-ph="pipe.signalPh" placeholder="asked about self-hosting in our forum">
+            </div>
+            <div class="ctl-actions">
+              <button class="btn primary" id="pipeLeadAdd" type="button"
+                      data-i18n="pipe.add">ADD</button>
+              <button class="btn" id="pipeLeadCancel" type="button"
+                      data-i18n="pipe.cancel">Cancel</button>
+            </div>
+          </div>
+          <div class="pipe-form" id="pipeImportForm" hidden>
+            <div class="ctl-row">
+              <label for="pipeImportText" data-i18n="pipe.importLabel">Paste</label>
+              <textarea id="pipeImportText" rows="4" maxlength="4000"
+                        data-i18n-ph="pipe.importPh" placeholder="Ann &lt;ann@example.com&gt; | ACME | asked about pricing"></textarea>
+            </div>
+            <div class="stat-note" data-i18n="pipe.importHint">one lead per line: name &lt;email&gt; | org | why. Invalid lines are reported, never dropped silently.</div>
+            <div class="ctl-actions">
+              <button class="btn primary" id="pipeImportAdd" type="button"
+                      data-i18n="pipe.importBtn">IMPORT</button>
+              <button class="btn" id="pipeImportCancel" type="button"
+                      data-i18n="pipe.cancel">Cancel</button>
+            </div>
+          </div>
+          <div class="ctl-actions" id="pipeLeadActions">
+            <button class="btn" id="pipeLeadNew" type="button"
+                    data-i18n="pipe.addLead">+ ADD LEAD</button>
+            <button class="btn" id="pipeImportNew" type="button"
+                    data-i18n="pipe.importOpen">+ IMPORT LIST</button>
+            <button class="btn" id="pipeSource" type="button"
+                    data-i18n="pipe.forum">READ MY FORUM</button>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2><span data-i18n="sec.pipeQueue">APPROVAL QUEUE</span>
+              <span class="chat-badge" id="pipeDraftCount">–</span></h2>
+          <div id="pipeDrafts"></div>
+        </section>
+      </div>
+
+      <div class="evo-cols">
+        <section class="card">
+          <h2><span data-i18n="sec.pipeReplies">REPLIES</span>
+              <span class="chat-badge" id="pipeReplyCount">–</span></h2>
+          <div id="pipeReplies"></div>
+        </section>
+        <section class="card">
+          <h2 data-i18n="sec.pipeEvents">LIVE FEED</h2>
+          <div id="pipeEvents"></div>
+        </section>
+      </div>
+
+      <section class="card">
+        <h2><span data-i18n="sec.pipeControls">CONTROLS</span>
+            <span class="save-state" id="pipeCtlMsg" role="status"></span></h2>
+        <div class="ctl-row">
+          <label for="pipeEnabled" data-i18n="pipe.enabled">Pipeline on</label>
+          <input type="checkbox" id="pipeEnabled">
+        </div>
+        <div class="ctl-row">
+          <label for="pipeAuto" data-i18n="pipe.auto">Read my forum automatically</label>
+          <input type="checkbox" id="pipeAuto">
+        </div>
+        <div class="ctl-row">
+          <label for="pipeInterval" data-i18n="pipe.interval">Interval (minutes)</label>
+          <input type="number" id="pipeInterval" min="5" max="1440" step="1">
+        </div>
+        <div class="ctl-row">
+          <label for="pipeCap" data-i18n="pipe.cap">Daily send cap</label>
+          <input type="number" id="pipeCap" min="1" max="50" step="1">
+        </div>
+        <div class="ctl-row">
+          <label for="pipeFromName" data-i18n="pipe.fromName">Signature</label>
+          <input type="text" id="pipeFromName" maxlength="120" autocomplete="off">
+        </div>
+        <div class="ctl-row">
+          <label for="pipeAddress" data-i18n="pipe.address">Postal address</label>
+          <input type="text" id="pipeAddress" maxlength="200" autocomplete="off"
+                 data-i18n-ph="pipe.addressPh" placeholder="required before the first send">
+        </div>
+        <div class="ctl-row">
+          <label for="pipeOptOut" data-i18n="pipe.optOut">Opt-out line</label>
+          <input type="text" id="pipeOptOut" maxlength="240" autocomplete="off"
+                 data-i18n-ph="pipe.optOutPh" placeholder="leave empty for the standard line">
+        </div>
+        <div class="stat-note" data-i18n="pipe.note">outbound messages carry a real subject, Reply-To and List-Unsubscribe; the postal address is required (CAN-SPAM) and an opt-out suppresses the address permanently.</div>
       </section>
     </section>
 

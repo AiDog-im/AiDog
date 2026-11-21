@@ -116,6 +116,12 @@ DISCORD_CONTENT_CAP = 2000    # Discord message text limit
 REQUEST_TIMEOUT = 30.0        # seconds per HTTP call
 STATE_ENV = "AIDOG_MC_STATE"  # mirrors mycore.service.STATE_ENV
 EMAIL_SUBJECT = "AiDog"
+# Pipeline car: an outreach message carries its own subject plus compliance
+# headers (List-Unsubscribe / Reply-To). Names and values are validated before
+# anything reaches the wire — a CRLF in a value is a protocol defect.
+EMAIL_HEADER_RE = re.compile(r"^[A-Za-z0-9-]{1,40}$")
+EMAIL_HEADER_MAX = 320
+EMAIL_HEADER_SUBJECT_MAX = 140
 DINGTALK_TEXT_CAP = 20000      # DingTalk text message cap (chars)
 WECHAT_TEXT_CAP = 1024         # WeChat customer-service cap (BYTES, utf-8 safe)
 WHATSAPP_TEXT_CAP = 4096       # WhatsApp text body cap (characters)
@@ -514,22 +520,31 @@ class Channel:
         return out
 
     # ------------------------------------------------------------ surface ---
+    def _outbound_gate(self, target: str, text: str) -> str:
+        """The (enabled, configured, text, target) gate shared by send() and
+        send_message(): the honest refusal reason, or "" when the send may
+        proceed. Kept in one place so no send path can skip a gate."""
+        if not self.enabled:
+            return "route disabled in settings"
+        ok, reason = self.configured()
+        if not ok:
+            return f"not configured: {reason}"
+        if not isinstance(text, str) or not text.strip():
+            return "text is required"
+        tgt = target.strip() if isinstance(target, str) else ""
+        if not tgt:
+            return "target is required"
+        return ""
+
     def send(self, target: str, text: str) -> bool:
         """Outbound. Returns True on accepted delivery, False on an honest
         failure (already logged, sanitized). Never raises, never echoes a
         credential."""
         try:
-            if not self.enabled:
-                raise ChannelError("route disabled in settings")
-            ok, reason = self.configured()
-            if not ok:
-                raise ChannelError(f"not configured: {reason}")
-            if not isinstance(text, str) or not text.strip():
-                raise ChannelError("text is required")
-            tgt = target.strip() if isinstance(target, str) else ""
-            if not tgt:
-                raise ChannelError("target is required")
-            self._send(tgt, text)
+            reason = self._outbound_gate(target, text)
+            if reason:
+                raise ChannelError(reason)
+            self._send(target.strip(), text)
             return True
         except ChannelError as e:
             self._log("SEND_FAIL", str(e))
@@ -537,6 +552,35 @@ class Channel:
         except Exception as e:          # noqa: BLE001 — sanitize unknowns too
             self._log("SEND_FAIL", f"unexpected: {type(e).__name__}")
             return False
+
+    def send_message(self, target: str, text: str, subject: str = "",
+                     headers: dict | None = None) -> bool:
+        """Outbound with an optional subject / extra headers (pipeline car:
+        an outreach message needs a real subject and its compliance headers).
+        Same gates, same sanitizing contract as send(). A route that cannot
+        carry a subject or a header REFUSES the request — it never silently
+        drops one (a dropped List-Unsubscribe is a compliance defect)."""
+        try:
+            reason = self._outbound_gate(target, text)
+            if reason:
+                raise ChannelError(reason)
+            self._send_message(target.strip(), text, subject=subject,
+                               headers=headers or {})
+            return True
+        except ChannelError as e:
+            self._log("SEND_FAIL", str(e))
+            return False
+        except Exception as e:          # noqa: BLE001 — sanitize unknowns too
+            self._log("SEND_FAIL", f"unexpected: {type(e).__name__}")
+            return False
+
+    def _send_message(self, target: str, text: str, subject: str = "",
+                      headers: dict | None = None) -> None:
+        """Subject/header-aware transport. The base refuses anything it cannot
+        carry (channels with a real message envelope override this)."""
+        if subject or headers:
+            raise ChannelError("this route cannot carry a subject or headers")
+        self._send(target, text)
 
     def poll(self) -> list[Inbound]:
         """Single incremental inbound fetch. Never raises: outbound-only
@@ -777,7 +821,25 @@ class EmailChannel(Channel):
             return False, "missing channels.email.from setting"
         return True, ""
 
-    def _send(self, target: str, text: str) -> None:
+    def _send_message(self, target: str, text: str, subject: str = "",
+                      headers: dict | None = None) -> None:
+        """Email is the one route with a real envelope, so it carries the
+        subject and the extra headers (pipeline car: List-Unsubscribe /
+        Reply-To). Header names and values are validated here — an injected
+        CRLF is a protocol defect, refused, never sanitized into the wire."""
+        clean: dict[str, str] = {}
+        for name, value in (headers or {}).items():
+            hname = str(name)
+            hval = str(value)
+            if not EMAIL_HEADER_RE.match(hname):
+                raise ChannelError("invalid header name")
+            if len(hval) > EMAIL_HEADER_MAX or "\r" in hval or "\n" in hval:
+                raise ChannelError(f"invalid header value ({hname})")
+            clean[hname] = hval
+        self._send(target, text, subject=subject, headers=clean)
+
+    def _send(self, target: str, text: str, subject: str = "",
+              headers: dict | None = None) -> None:
         host = str(self.cfg.get("smtp_host") or "").strip()
         port = _port(self.cfg.get("smtp_port"), 587)
         ssl_on = bool(self.cfg.get("smtp_ssl"))
@@ -787,7 +849,10 @@ class EmailChannel(Channel):
         msg = EmailMessage()
         msg["From"] = from_addr
         msg["To"] = target
-        msg["Subject"] = EMAIL_SUBJECT
+        msg["Subject"] = (subject or "").strip()[:EMAIL_HEADER_SUBJECT_MAX] \
+            or EMAIL_SUBJECT
+        for hname, hval in (headers or {}).items():
+            msg[hname] = hval
         msg.set_content(text)
         srv = self._smtp_factory(host, port, ssl_on, self.timeout)
         try:
