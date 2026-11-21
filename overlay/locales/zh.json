@@ -447,6 +447,7 @@
  "ex.thr.hint": "两项上限均为 0 —— 没有任何自动审批；每个计划都要在这里等你决定",
  "ex.thr.needCaps": "阈值数据不可用——当前构建没有 web3 能力块",
  "ex.plans": "订单审批",
+ "ex.activity.above": "今天的下单活动高于你近期的基线（{c} 笔、${s} 美元，基线 {bc} 笔 / ${bs} 美元）——如果不是你自己下的，请查看下方订单。",
  "ex.plans.count": "{p} 待审批 · {a} 已批准",
  "ex.plans.loading": "正在加载计划…",
  "ex.plans.empty": "没有待处理的计划 —— 计划由 exchange_prepare_order 生成；这里不会自己执行任何东西",

@@ -532,14 +532,70 @@ def _shell_spec() -> str:
     return ""
 
 
+def _dangerous_shell_patterns() -> list[tuple[str, str]]:
+    """The high-risk command shapes `run_bash` refuses (C3 L2).
+
+    This is NOT a sandbox and NOT a shell filter: `run_bash` keeps its
+    declared trust boundary (the 2026-10-31 ruling — we never pretend bash
+    is constrained). What this list does is refuse the small set of shapes
+    that pipe a downloaded script straight into a privileged interpreter or
+    wipe a system path, and point them at the human.
+
+    Every entry is (regex, why). The patterns are deliberately narrow so the
+    false-positive surface stays small; a command that merely LOOKS like a
+    risky one but does not match these shapes still runs."""
+    return [
+        (r"(?is)\b(?:curl|wget|fetch)\b[^|\n]*\|\s*(?:sudo\s+)?(?:ba|z|k|)sh\b",
+         "downloads a script and pipes it straight into a shell"),
+        (r"(?is)\b(?:curl|wget)\b[^|\n]*\|\s*sudo\b",
+         "pipes a download into a privileged shell"),
+        (r"(?is)\bsudo\s+rm\s+(?:-[a-z]*\s+)*-?[a-z]*r[a-z]*f[a-z]*\b",
+         "recursive force delete under sudo"),
+        (r"(?is)\brm\s+(?:-[a-z]*\s+)*-?[a-z]*r[a-z]*f[a-z]*\b\s+(?:/|/\*|~|\$HOME)\s*$",
+         "recursive force delete of a root or home path"),
+        (r"(?is)(?:^|\s)(?:>>|>|\btee\s+-a?\s+)\s*/etc/[a-z0-9_./-]+",
+         "writes into /etc"),
+        (r"(?is)\bmkfs(?:\.\w+)?\b|\bdd\s+[^\n]*of=/dev/",
+         "formats a device"),
+        (r"(?is)\bchmod\s+(?:-[a-z]+\s+)*777\s+/\s*$",
+         "world-writable root"),
+        (r"(?is)\b(?:shutdown|reboot|halt|poweroff)\b",
+         "shuts the machine down"),
+        (r"(?is)\bhistory\s+-c\b|\btruncate\s+-s\s*0\s*/var/log",
+         "erases shell history or system logs"),
+    ]
+
+
+def _dangerous_shell_reason(command: str) -> str:
+    """The refusal reason for a high-risk command shape ('' = not refused)."""
+    for pattern, why in _dangerous_shell_patterns():
+        try:
+            if re.search(pattern, command):
+                return why
+        except re.error:  # pragma: no cover — the table is ours
+            continue
+    return ""
+
+
 def _run_bash(command: str, timeout: int = BASH_TIMEOUT,
               roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS) -> str:
     """Run one shell command on the configured terminal backend (settings
-    mycore.shell; default local, repo root). Output capped; honest on failure."""
+    mycore.shell; default local, repo root). Output capped; honest on failure.
+
+    C3 L2: a high-risk shape is refused fail-closed with an honest reason
+    and a pointer to the human. The refusal is NOT a sandbox — `run_bash`
+    stays outside the approval gates (the 2026-10-31 ruling), and this
+    narrow pattern list does not change that."""
     if not isinstance(command, str) or not command.strip():
         raise ToolError("command must be a non-empty string")
     if isinstance(timeout, bool) or not isinstance(timeout, int) or not 1 <= timeout <= BASH_TIMEOUT:
         raise ToolError(f"timeout must be an integer in 1..{BASH_TIMEOUT}")
+    reason = _dangerous_shell_reason(command)
+    if reason:
+        raise ToolError(
+            f"refused: this command {reason}. run_bash is not a sandbox — "
+            "run it yourself in a terminal if you are sure, or narrow the "
+            "command.")
     from . import terminal  # local import: tools stays import-light (browser pattern)
     try:
         backend = terminal.parse(_shell_spec())

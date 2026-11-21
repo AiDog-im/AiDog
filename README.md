@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2748%2F2748-brightgreen?style=flat-square" alt="core tests 2748/2748">
+  <img src="https://img.shields.io/badge/core_tests-2768%2F2768-brightgreen?style=flat-square" alt="core tests 2768/2768">
   <img src="https://img.shields.io/badge/console_smoke-607%2F607-brightgreen?style=flat-square" alt="console smoke 607/607">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
@@ -58,7 +58,7 @@ run locally, and its console listens on `127.0.0.1` only.) It is built around th
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **49 modules ≈ 30.5k LOC, 2,748 tests**, and zero upstream
+  stop reasons, **50 modules ≈ 30.8k LOC, 2,768 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -107,7 +107,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 49 modules, 2,748 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 50 modules, 2,768 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 37/37 |
@@ -242,7 +242,7 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2748/2748** |
+| `mycore` core suite | **2768/2768** |
 | Console smoke (live HTTP) | **607/607** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |
@@ -256,7 +256,7 @@ Every release is cut only after these run green on a clean tree:
 Catalog scope: **30 registered tools** · **9 exchange venues** · **28
 real-machine E2E suites** — all green.
 
-Locale packs: `en` (default) + `zh`, **1763 keys** each, parity lint in CI;
+Locale packs: `en` (default) + `zh`, **1764 keys** each, parity lint in CI;
 the marketing site ships its own **382-key** bilingual pack.
 
 ## Documentation

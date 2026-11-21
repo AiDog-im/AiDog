@@ -1113,6 +1113,7 @@ async function extQuoteFetch() {
    rendered VERBATIM as data through escapeHtml(); only labels come from the
    locale packs. Nothing is ever invented: an empty queue says so. */
 let exPlans = null;        // array of plan objects | null (never loaded)
+let exActivity = null;     // audit #11 c2: the local activity baseline fact
 let exPlansErr = null;     // honest failure string from the list GET (verbatim)
 let exPlansBusy = false;   // list fetch in flight
 const exDeciding = {};     // plan id -> action while its POST is in flight
@@ -1181,6 +1182,8 @@ async function exPlansLoad() {
     const body = await res.json().catch(() => null);
     if (res.ok && body && Array.isArray(body.plans)) {
       exPlans = body.plans.filter(p => p && typeof p === "object");
+      exActivity = (body.activity && typeof body.activity === "object")
+        ? body.activity : null;
       exPlansErr = null;
     } else {
       exPlansErr = exErrText(res, body);   // keep any last good list visible
@@ -1331,6 +1334,22 @@ function renderExThreshold() {
 }
 
 function renderExPlans() {
+  const act = document.getElementById("exActivity");
+  if (act) {
+    const a = exActivity;
+    if (a && a.above === true) {
+      act.hidden = false;
+      act.textContent = t("ex.activity.above",
+        "Today is above your recent order activity ({c} orders, ${s} USD vs a baseline of {bc} / ${bs} USD) — check the orders below if this was not you.")
+        .replace("{c}", String(a.today?.count ?? 0))
+        .replace("{s}", String(a.today?.spent_usd ?? 0))
+        .replace("{bc}", String(a.baseline?.count ?? 0))
+        .replace("{bs}", String(a.baseline?.spent_usd ?? 0));
+    } else {
+      act.hidden = true;
+      act.textContent = "";
+    }
+  }
   const w = exW3();
   const cnt = document.getElementById("exPlansCount");
   if (cnt) {

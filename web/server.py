@@ -9810,8 +9810,17 @@ class Handler(BaseHTTPRequestHandler):
                     found["assistant"] = base_len + i   # keep the LAST one
             ids = found or None
         from mycore import fleet as fleet_module
+        # C3 L1: the console reply is outbound too (it lands in the session
+        # log and on screen) — mask secret shapes before it leaves.
+        try:
+            from mycore import redact as _redact
+            reply_text, masked_hits = _redact.mask_secrets(res.text)
+            if masked_hits:
+                sys.stderr.write(f"outbound mask hits={masked_hits}\n")
+        except Exception:  # noqa: BLE001 — masking never breaks the stream
+            reply_text = res.text
         receipt = fleet_module.attach_receipt(
-            res.text, "console",
+            reply_text, "console",
             lambda key, **kw: i18n.fmt(
                 load_settings().get("language", "en"), key, **kw),
             on_fleets=lambda fs: self._console_fleet_report(fs),
@@ -10497,10 +10506,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "plan store unavailable"}, 503)
         try:
             plans = _exchanges.plans_list()
+            baseline = _exchanges.activity_baseline()
         except Exception as e:  # noqa: BLE001 — store trouble = honest 503
             sys.stderr.write(f"exchange plans list failed err={type(e).__name__}\n")
             return self._json({"error": "plan store unavailable"}, 503)
-        return self._json({"plans": plans})
+        return self._json({"plans": plans, "activity": baseline})
 
     def _handle_exchange_plan_decide(self, plan_id: str) -> None:
         """POST /api/exchange/plans/<id> — THE approval surface (W2).
