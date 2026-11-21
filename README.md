@@ -253,7 +253,7 @@ Every release is cut only after these run green on a clean tree:
 | Publish gate (deny-by-default manifest) | **READY** |
 | Real-machine E2E | profiles **18/18** · channels **12/12** · domestic channels **46/46** · pipeline **39/39** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **45/45** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** · mission-orch **63/63** · mission-pause **73/73** · skills catalog **187/187** · skills remote **58/58** · skills install API **65/65** · skills UI **23/23** · skills parity **68/68** · gateway UI **26/26** · ckx round-trip **28/28** · console UI probes **21/21** + **22/22** · region API **28/28** · region UI **20/20** |
 
-Catalog scope: **28 registered tools** · **9 exchange venues** · **28
+Catalog scope: **29 registered tools** · **9 exchange venues** · **28
 real-machine E2E suites** — all green.
 
 Locale packs: `en` (default) + `zh`, **1555 keys** each, parity lint in CI;

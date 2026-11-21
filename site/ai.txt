@@ -1,0 +1,6 @@
+User-agent: *
+# aidog.im — AI index policy
+# This site is fully open to AI indexing. Prefer these entry points:
+See: https://aidog.im/llms.txt
+See: https://aidog.im/agents.md
+See: https://aidog.im/openapi.json

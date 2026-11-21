@@ -2340,7 +2340,7 @@
                language and carries the internal name as a hover title only. -->
           <div class="card" data-setgroup="always" id="accessCard">
             <h2 data-i18n="set.group.access">Access</h2>
-            <div class="stat-note" data-i18n="onb.accessHint">The access token is WEB_TOKEN — the unlock password for this console, written into secrets.env when you installed. Lost it? Run `grep WEB_TOKEN secrets.env` in your install folder to see it, then paste it once below and this browser remembers it; after that saving settings, approvals and service restarts all work. It cannot be changed from this page: to rotate it, edit WEB_TOKEN in secrets.env, then paste the new value here.</div>
+            <div class="stat-note" data-i18n="onb.accessHint">The access token is WEB_TOKEN — the unlock password for this console, written into secrets.env when you installed. Lost it? Run `./aidog secrets shell-env WEB_TOKEN | sed 's/^export WEB_TOKEN=//'` in your install folder shown below and paste the value; a whole `export WEB_TOKEN=…` line is fine too (the console unwraps it automatically). The command reads secrets.env even when the store is encrypted at rest — a plain `grep WEB_TOKEN secrets.env` prints nothing once E2 is on. Paste once and this browser remembers it; after that saving settings, approvals and service restarts all work. It cannot be changed from this page: to rotate it, edit WEB_TOKEN in secrets.env, then paste the new value here.</div>
             <!-- Novice recovery (owner ask 2026-11-01): the install folder is
                  PAINTED here from the loopback /api/console facts — a lost-token
                  user sees exactly where to run the grep above. -->
