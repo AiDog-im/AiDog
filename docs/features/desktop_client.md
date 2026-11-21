@@ -127,7 +127,7 @@ verified-at-implementation (tray menu + HUD window).
 The HUD is served same-origin by the console and reads
 `/static/i18n/{lang}.json` (localStorage `aidog_lang`, `en` fallback,
 `data-i18n` pattern like `app.js`). Car E added **8 `hud.*` keys** in both
-`en` and `zh` — packs are now **1544/1544** (the cumulative key ledger
+`en` and `zh` — packs are now **1555/1555** (the cumulative key ledger
 lives in `tmp/e2e_car_e.py` `LOCALE_KEYS`; 1224 at car D, 1156 at the
 0.5.56 restyle stage 2, 795 at the 0.5.53 i18n completion). Without the bridge
 (`!window.aidogShell`) the HUD shows an "unsupported" hint and hides its

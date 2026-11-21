@@ -77,12 +77,17 @@ webm-opus (browser MediaRecorder).
 
 A `voice`/`audio` attachment with no usable text enters the pipeline as
 **just another input method** — same command dispatch, same session-key
-rule, same single reply:
+rule, same single reply. Since 0.5.86 a round **`video_note`** rides the
+same path end to end — its mp4 carries an audio track and the decoder picks
+the audio stream, so `stt.py` needed no change:
 
 1. duration check against metadata first: > **60 s** → honest locale line
    `voice.stt.tooLong` (nothing downloaded);
-2. `getFile` → `file_size` check: > **5 MB** → `voice.stt.failed`
-   ("file too large"), rejected **before** downloading;
+2. `getFile` → size check: > **5 MB** → `voice.stt.failed`
+   ("file too large"), rejected **before** downloading. Both field names
+   count — `getFile`'s `file_size` and the update blob's `byte_size` (what
+   a video note carries) — and with no size reported anywhere the check
+   steps aside rather than inventing a number;
 3. binary download (its own bytes seam — the text transport decodes UTF-8
    and cannot carry audio; bounded at 5 MB + 1);
 4. `stt.transcribe(...)` → empty transcript → `voice.stt.empty`;

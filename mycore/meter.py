@@ -37,6 +37,9 @@ RETENTION_DAYS = 90          # daily files kept (pruned on activate)
 MAX_ROW_CHARS = 2048         # hard cap per JSONL row
 READ_DAYS = 7                # aggregation window for GET /api/usage/self
 READ_MAX_BYTES = 512 * 1024  # per-file read cap (largest file -> truncated)
+# C2 B-1: an explicit range read can never ask for more days than the log
+# keeps — the clamp is the retention window itself, reported honestly.
+RANGE_MAX_DAYS = RETENTION_DAYS
 
 _lock = threading.Lock()
 _dir: Path | None = None     # None = inactive (the default)
@@ -171,7 +174,9 @@ def read(days: int = READ_DAYS) -> dict:
     `cached_ratio` (car 5-D7 item 3) is the provider-reported prompt-cache hit
     rate = cached / in_tokens over the window, rounded to 4 decimals, or None
     when nothing reported an input count — a measured fact, never a target and
-    never a promise; we still send no cache directive of our own."""
+    never a promise; we still send no cache directive of our own.
+    An arbitrary UTC range (C2 B-1) is `read_range()` — this relative-days
+    face keeps its historical behaviour exactly."""
     with _lock:
         d = _dir
     if d is None:
@@ -179,6 +184,50 @@ def read(days: int = READ_DAYS) -> dict:
     today = datetime.now(timezone.utc)
     wanted = [(today - timedelta(days=i)).strftime("%Y-%m-%d")
               for i in range(days)]
+    return _aggregate(d, wanted)
+
+
+def read_range(start: str, end: str) -> dict:
+    """Aggregate ONE UTC-day range, `start`..`end` inclusive (YYYY-MM-DD).
+
+    Same shape as read(), so every consumer (panel, cost, export) works on
+    either face. Contract:
+      * inactive meter -> {available:false, reason:"inactive"}
+      * a date strptime cannot parse -> {available:false, reason:"bad_date"}
+      * start after end -> {available:false, reason:"empty_range"}
+      * a span wider than RANGE_MAX_DAYS clamps `start` to the retention
+        window and sets `clamped:true` — the answer is never silently wider
+        than the log can back.
+    Both failures are answered honestly instead of guessing a default; the
+    HTTP layer maps them to 400."""
+    with _lock:
+        d = _dir
+    if d is None:
+        return {"available": False, "reason": "inactive"}
+    try:
+        s = datetime.strptime(str(start), "%Y-%m-%d").date()
+        e = datetime.strptime(str(end), "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return {"available": False, "reason": "bad_date"}
+    if s > e:
+        return {"available": False, "reason": "empty_range"}
+    span = (e - s).days + 1
+    clamped = span > RANGE_MAX_DAYS
+    if clamped:
+        s = e - timedelta(days=RANGE_MAX_DAYS - 1)
+        span = RANGE_MAX_DAYS
+    # descending (newest first) so _aggregate's `days` reversal yields the
+    # same oldest-first list read() has always returned
+    wanted = [(e - timedelta(days=i)).strftime("%Y-%m-%d")
+              for i in range(span)]
+    agg = _aggregate(d, wanted)
+    agg["clamped"] = clamped
+    return agg
+
+
+def _aggregate(d: Path, wanted: list[str]) -> dict:
+    """Shared body of read()/read_range(): read the `wanted` daily files
+    (day names, newest first) and fold them into the panel dict."""
     all_rows: list[dict] = []
     truncated = False
     found = 0
