@@ -4085,6 +4085,144 @@ def main() -> int:
     check("prod secrets.env untouched by the community lane",
           _bytes_end2 == _prod_bytes, f"changed={_bytes_end2 != _prod_bytes}")
 
+    # --- wrap-up audit #14 (v0.5.74): hardening regression walls for the
+    # four shipped fixes — W1-1 Host allow-list, W1-2 static containment,
+    # W2-01 settings URL userinfo refusal, W4-02 health nonce challenge. ---
+    import hashlib as _hl
+    import hmac as _hm
+    import http.client as _hc
+    _hp = urllib.parse.urlsplit(BASE)
+
+    def _host_probe(host_hdr) -> tuple[int, str]:
+        """Raw GET /api/health with EXACT control of the Host header
+        (skip_host keeps http.client from auto-filling it)."""
+        _c = _hc.HTTPConnection(_hp.hostname or "127.0.0.1",
+                                _hp.port or 80, timeout=8)
+        try:
+            _c.putrequest("GET", "/api/health", skip_host=True)
+            if host_hdr is not None:
+                _c.putheader("Host", host_hdr)
+            _c.endheaders()
+            _r = _c.getresponse()
+            _b = _r.read()
+            return _r.status, _b.decode("utf-8", "replace")
+        except OSError:
+            return 0, ""
+        finally:
+            _c.close()
+
+    def _raw_get(path: str) -> int:
+        _c = _hc.HTTPConnection(_hp.hostname or "127.0.0.1",
+                                _hp.port or 80, timeout=8)
+        try:
+            _c.request("GET", path)
+            _r = _c.getresponse()
+            _r.read()
+            return _r.status
+        except OSError:
+            return 0
+        finally:
+            _c.close()
+
+    # W1-1: DNS-rebinding guard — a PRESENT but unrecognised Host is 403;
+    # no Host at all (HTTP/1.0-style client) and every loopback form are
+    # 200 (hostname only, port ignored, case-insensitive).
+    s_evil, b_evil = _host_probe("evil.example:19167")
+    check("W1-1 Host evil.example -> 403 forbidden",
+          s_evil == 403 and "forbidden host" in b_evil, f"got {s_evil}")
+    s_no, _ = _host_probe(None)
+    check("W1-1 no Host header -> 200 (legacy client)", s_no == 200,
+          f"got {s_no}")
+    s_ok, _ = _host_probe("127.0.0.1:19167")
+    check("W1-1 Host 127.0.0.1 -> 200", s_ok == 200, f"got {s_ok}")
+    s_case, _ = _host_probe("LocalHost:19167")
+    check("W1-1 Host LocalHost (case) -> 200", s_case == 200,
+          f"got {s_case}")
+
+    # W1-2: component-wise static containment — ../ never escapes STATIC,
+    # a real asset still serves (positive control).
+    s_esc = _raw_get("/static/../server.py")
+    check("W1-2 GET /static/../server.py -> 404 (no escape)",
+          s_esc == 404, f"got {s_esc}")
+    s_pos = _raw_get("/static/manifest.webmanifest")
+    check("W1-2 GET /static/manifest.webmanifest -> 200 (control)",
+          s_pos == 200, f"got {s_pos}")
+
+    # W2-01: every persisted URL field refuses embedded credentials — the
+    # six server-side surfaces the audit enumerated (all 400 BEFORE any
+    # write, so settings stay byte-identical).
+    if token:
+        _ui_cases = (
+            ({"mycore": {"base_url": "http://user:pass@example.com/v1"}},
+             "mycore.base_url must not embed credentials"),
+            ({"mycore": {"decision": {"enabled": True,
+                                      "url": "http://user:pass@example.com/v1"}}},
+             "url must not embed credentials"),
+            ({"channels": {"webhook": {"url": "http://user:pass@example.com/hook"}}},
+             "channels.webhook.url must not embed credentials"),
+            ({"media": {"image_base_url": "http://user:pass@example.com/v1"}},
+             "media.image_base_url must not embed credentials"),
+            ({"ledger": {"endpoint": "http://user:pass@example.com/"}},
+             "ledger.endpoint must not embed credentials"),
+            ({"usage": {"metrics_url": "http://user:pass@127.0.0.1:9/m"}},
+             "usage.metrics_url must not embed credentials"),
+        )
+        for _doc, _want in _ui_cases:
+            s, body = post("/api/settings", _doc, token)
+            check(f"W2-01 settings userinfo refused: {_want[:44]}",
+                  s == 400 and isinstance(body, dict)
+                  and any(_want in str(d) for d in body.get("details", [])),
+                  f"got {s} {str(body)[:150]}")
+
+    # W4-02: optional health challenge — nonce -> HMAC(WEB_TOKEN, nonce)
+    # sig (the desktop shell verifies it); no / malformed nonce -> the
+    # legacy body with no sig key at all.
+    _nonce = "0123456789abcdef0123456789abcdef"
+    s, doc = get(f"/api/health?nonce={_nonce}")
+    _exp = (_hm.new(token.encode("utf-8"), _nonce.encode("utf-8"),
+                    _hl.sha256).hexdigest() if token else "")
+    check("W4-02 health?nonce -> sig == HMAC(WEB_TOKEN, nonce)",
+          s == 200 and isinstance(doc, dict) and bool(_exp)
+          and doc.get("sig") == _exp and len(str(doc.get("sig", ""))) == 64,
+          f"got {s} sig={str(doc.get('sig'))[:16] if isinstance(doc, dict) else doc}")
+    s, doc = get("/api/health")
+    check("W4-02 health (no nonce) -> no sig key",
+          s == 200 and isinstance(doc, dict) and "sig" not in doc
+          and doc.get("status") == "ok", f"got {s} {str(doc)[:90]}")
+    s, doc = get("/api/health?nonce=xyz")
+    check("W4-02 health (bad nonce) -> no sig key",
+          s == 200 and isinstance(doc, dict) and "sig" not in doc,
+          f"got {s} {str(doc)[:90]}")
+
+    # W5a-01: a structurally broken authority (unclosed IPv6 bracket) must
+    # FAIL the shape/userinfo checks on every persisted URL field — never
+    # escape as an unhandled ValueError (500 / dropped connection) and
+    # never store userinfo. Also covers media.tts_base_url (W5b note): the
+    # SAME branch as image_base_url, asserted explicitly.
+    if token:
+        _bad_auth = "http://user:pass@[::1"
+        for _doc, _want in (
+                ({"mycore": {"base_url": _bad_auth}},
+                 "mycore.base_url must be an http(s) URL with a host"),
+                ({"mycore": {"decision": {"enabled": True, "url": _bad_auth}}},
+                 "url must not embed credentials"),
+                ({"channels": {"webhook": {"url": _bad_auth}}},
+                 "channels.webhook.url must be an http(s) URL"),
+                ({"media": {"image_base_url": _bad_auth}},
+                 "media.image_base_url must be an http(s) URL"),
+                ({"media": {"tts_base_url": "http://user:pass@example.com/v1"}},
+                 "media.tts_base_url must not embed credentials"),
+                ({"ledger": {"endpoint": _bad_auth}},
+                 "ledger.endpoint must not embed credentials"),
+                ({"usage": {"metrics_url": _bad_auth}},
+                 "usage.metrics_url must be an http loopback URL"),
+        ):
+            s, body = post("/api/settings", _doc, token)
+            check(f"W5a-01 malformed authority refused: {_want[:46]}",
+                  s == 400 and isinstance(body, dict)
+                  and any(_want in str(d) for d in body.get("details", [])),
+                  f"got {s} {str(body)[:150]}")
+
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))

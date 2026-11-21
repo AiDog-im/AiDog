@@ -958,10 +958,7 @@ def write_env_slot(name: str, value: str) -> bool:
         sep = b"" if (not raw or raw.endswith(b"\n")) else b"\n"
         updated = raw + sep + name.encode("ascii") + b"=" + new_val + b"\n"
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-    tmp.write_bytes(updated)
-    os.chmod(tmp, 0o600)
-    os.replace(tmp, path)
+    _atomic_write(path, updated, chmod=0o600)
     return True
 
 
@@ -1145,10 +1142,7 @@ def backup_apply_memory(doc: dict) -> dict:
             continue
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            tmp = path.with_name(f".{path.name}.tmp-{os.getpid()}")
-            tmp.write_bytes(data)
-            os.chmod(tmp, 0o644)
-            os.replace(tmp, path)
+            _atomic_write(path, data, chmod=0o644)
         except OSError as e:  # noqa: BLE001 — type name only
             failed.append({"name": name,
                            "reason": f"persist failed: {type(e).__name__}"})
@@ -1390,6 +1384,22 @@ def _is_loopback_http(url: str) -> bool:
     except ValueError:
         return False
     return parts.scheme == "http" and parts.hostname in ("127.0.0.1", "localhost", "::1")
+
+
+def _url_has_userinfo(url: str) -> bool:
+    """True when an http(s) URL embeds userinfo (user:pass@host). Settings
+    must never hold credentials (the settings-get invariant — outbound_
+    validate already refuses userinfo for the proxy block): every OTHER
+    persisted URL field refuses it the same way (wrap-up audit W2-01).
+    Unparseable input is REFUSED too (W5a-01): a structurally broken
+    authority (e.g. an unclosed IPv6 bracket) makes urlsplit raise, and the
+    shape checks ahead of this helper do not guarantee parseability —
+    returning False there would wave a credential-bearing string through."""
+    try:
+        parts = urllib.parse.urlsplit(url)
+    except ValueError:
+        return True
+    return parts.username is not None or parts.password is not None
 
 
 def _validate_model_pricing(val) -> str:
@@ -1703,6 +1713,9 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         elif field == "url" and value and not re.match(
                                 r"^https?://[^/\s?#]+", value):
                             bad = "url must be an http(s) base URL"
+                        elif field == "url" and value and _url_has_userinfo(value):
+                            bad = ("url must not embed credentials "
+                                   "(use a secrets slot)")
                         elif field != "url" and value and not MYCORE_MODEL_RE.match(value):
                             bad = f"{field} must be a model id"
                         else:
@@ -1788,9 +1801,19 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     errors.append(f"mycore.{key} must be a non-empty string of at most 256 chars")
                     continue
                 if key == "base_url":
-                    parts = urllib.parse.urlparse(val)
+                    try:
+                        parts = urllib.parse.urlparse(val)
+                    except ValueError:
+                        # W5a-01: a structurally broken authority fails the
+                        # shape check here — it never escapes as a 500
+                        errors.append("mycore.base_url must be an http(s) URL with a host")
+                        continue
                     if parts.scheme not in ("http", "https") or not parts.hostname:
                         errors.append("mycore.base_url must be an http(s) URL with a host")
+                        continue
+                    if parts.username or parts.password:
+                        errors.append("mycore.base_url must not embed credentials "
+                                      "(use the MODEL_API_KEY slot)")
                         continue
                 if key == "model" and not MYCORE_MODEL_RE.match(val):
                     errors.append("mycore.model must match [A-Za-z0-9._:/-] (1..100 chars)")
@@ -1837,6 +1860,9 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     continue
                 if key == "metrics_url" and val and not _is_loopback_http(val):
                     errors.append("usage.metrics_url must be an http loopback URL (127.0.0.1/localhost)")
+                    continue
+                if key == "metrics_url" and val and _url_has_userinfo(val):
+                    errors.append("usage.metrics_url must not embed credentials")
                     continue
                 if key in ("pricing_config", "log_dir") and val and not val.startswith("/"):
                     errors.append(f"usage.{key} must be an absolute path")
@@ -1901,10 +1927,19 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                                           "64 chars")
                             continue
                         if key == "url" and val:
-                            parts = urllib.parse.urlparse(val)
+                            try:
+                                parts = urllib.parse.urlparse(val)
+                            except ValueError:  # W5a-01: shape, not a 500
+                                errors.append(f"channels.{name}.url must be an http(s) URL "
+                                              "(empty = off)")
+                                continue
                             if parts.scheme not in ("http", "https") or not parts.hostname:
                                 errors.append(f"channels.{name}.url must be an http(s) URL "
                                               "(empty = off)")
+                                continue
+                            if parts.username or parts.password:
+                                errors.append(f"channels.{name}.url must not "
+                                              "embed credentials")
                                 continue
                         clean_sub[key] = val
                 if clean_sub:
@@ -1929,10 +1964,18 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                                       "of at most 256 chars (empty = off)")
                         continue
                     if val:
-                        parts = urllib.parse.urlparse(val)
+                        try:
+                            parts = urllib.parse.urlparse(val)
+                        except ValueError:  # W5a-01: shape, not a 500
+                            errors.append(f"media.{key} must be an http(s) URL with a "
+                                          "host (empty = off)")
+                            continue
                         if parts.scheme not in ("http", "https") or not parts.hostname:
                             errors.append(f"media.{key} must be an http(s) URL with a "
                                           "host (empty = off)")
+                            continue
+                        if parts.username or parts.password:
+                            errors.append(f"media.{key} must not embed credentials")
                             continue
                     clean_med[key] = val
                 elif key == "tts_model" or key == "image_model":
@@ -2025,6 +2068,9 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     val = val.strip()
                     if val and not val.startswith(("https://", "http://")):
                         errors.append("ledger.endpoint must be empty or an http(s) URL")
+                        continue
+                    if val and _url_has_userinfo(val):
+                        errors.append("ledger.endpoint must not embed credentials")
                         continue
                     clean_led["endpoint"] = val
             if len(clean_led) == len(led) and len(errors) == before_led:
@@ -2170,9 +2216,40 @@ def load_settings() -> dict:
 
 
 def atomic_write_json(path: Path, doc: dict) -> None:
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n")
-    os.replace(tmp, path)
+    _atomic_write(path, (json.dumps(doc, ensure_ascii=False, indent=2)
+                         + "\n").encode("utf-8"))
+
+
+def _atomic_write(path: Path, data: bytes, chmod: int | None = None) -> None:
+    """Atomically write `data` to `path` via a sibling temp file.
+
+    Wrap-up audit W2-02: the old fixed `.tmp` names were predictable — a
+    local attacker who pre-planted a symlink at that name got the console's
+    own write to follow it (arbitrary-file clobber). The temp name now
+    carries os.urandom entropy AND is created O_CREAT|O_EXCL (a planted
+    entry is EEXIST, never followed; O_NOFOLLOW is belt on platforms that
+    have it). `chmod`, when given, is applied to the temp file before the
+    replace — mirroring the historical per-site permission contracts
+    (secrets 0600 / memory files 0644); absent, the umask default applies
+    exactly like the old write_text/write_bytes did."""
+    tmp = path.with_name(f".{path.name}.{os.getpid()}.{os.urandom(4).hex()}.tmp")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    # W5a-01 hardening: when a final mode is given, CREATE the temp file
+    # with it (mode & ~umask) — never briefly readable at the umask default
+    # before the post-write chmod (the secrets 0600 contract).
+    fd = os.open(tmp, flags, 0o666 if chmod is None else chmod)
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        if chmod is not None:
+            os.chmod(tmp, chmod)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 # ----------------------------------------------------------- reboot watch ---
@@ -4382,12 +4459,14 @@ def resume_chat_session(sid: str) -> tuple[int, dict]:
         return 500, {"error": "resume failed", "details": [detail]}
 
     # 1. copy the target next to the active file — nothing committed yet
+    # (wrap-up audit W2-02: the temp name carries entropy so a pre-planted
+    # symlink at a predictable name can never be followed)
     stamp = int(time.time())
-    tmp = root / f"{CHAT_SESSION_NAME}.resume-{stamp}.jsonl.tmp"
+    tmp = root / f"{CHAT_SESSION_NAME}.resume-{stamp}.{os.urandom(4).hex()}.jsonl.tmp"
     n = 0
     while tmp.exists():
         n += 1
-        tmp = root / f"{CHAT_SESSION_NAME}.resume-{stamp}.{n}.jsonl.tmp"
+        tmp = root / f"{CHAT_SESSION_NAME}.resume-{stamp}.{os.urandom(4).hex()}.{n}.jsonl.tmp"
     try:
         shutil.copy2(str(target), str(tmp))
     except OSError as e:
@@ -6414,12 +6493,50 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "not found"}, 404)
         return self._json(i18n.pack(code))
 
+    def _host_ok(self) -> bool:
+        """DNS-rebinding guard (wrap-up audit W1-1): the console trusts
+        loopback clients, so a request must carry a LOOPBACK Host header —
+        or none at all (HTTP/1.0-style clients; browsers always send one, so
+        a rebind page can never omit it). A rebind arrives as
+        `Host: attacker.example:19167` and is refused before any route runs.
+        Hostname only — the port is ignored (the client's URL already chose
+        which loopback port to dial). Fail-closed: a PRESENT but unrecognised
+        host is a 403."""
+        host = self.headers.get("Host")
+        if host is None:
+            return True
+        name = host.strip()
+        if name.startswith("["):                    # [::1]:19167
+            name = name[1:].split("]", 1)[0]
+        elif name.count(":") == 1:                  # name:port (not bare IPv6)
+            name = name.rsplit(":", 1)[0]
+        return name.lower() in ("127.0.0.1", "localhost", "::1")
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return self._json({"error": "forbidden host"}, 403)
         path = self.path.split("?", 1)[0]
         if path in ("/", "/index.html"):
             return self._send(200, (STATIC / "index.html").read_bytes(), "text/html; charset=utf-8")
         if path == "/api/health":
-            return self._json({"status": "ok", "version": VERSION, "ts": time.time()})
+            payload = {"status": "ok", "version": VERSION, "ts": time.time()}
+            # Wrap-up audit W4-02: an OPTIONAL challenge (`?nonce=<hex>`) makes
+            # the health answer prove knowledge of WEB_TOKEN — the desktop
+            # shell verifies it before loading the console origin (a hostile
+            # local listener that stole the port cannot forge the sig without
+            # the token, and a replay dies on the fresh nonce). No nonce ->
+            # byte-identical legacy response for every existing probe.
+            nonce = ""
+            if "?" in self.path:
+                nonce = (urllib.parse.parse_qs(
+                    self.path.split("?", 1)[1]).get("nonce") or [""])[0]
+            if re.fullmatch(r"[0-9a-f]{16,64}", nonce or ""):
+                _tok = read_env_slot("WEB_TOKEN")
+                if _tok:
+                    payload["sig"] = hmac.new(
+                        _tok.encode("utf-8"), nonce.encode("utf-8"),
+                        hashlib.sha256).hexdigest()
+            return self._json(payload)
         if path == "/api/status":
             return self._json(collect_status())
         if path == "/api/control":
@@ -6560,12 +6677,17 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             rel = path[len("/static/"):]
             target = (STATIC / rel).resolve()
-            if str(target).startswith(str(STATIC.resolve())) and target.is_file():
+            # Component-wise containment (wrap-up audit W1-2): the old string
+            # prefix test also matched a SIBLING whose name starts with
+            # "static" (web/staticX/...). is_relative_to compares components.
+            if target.is_relative_to(STATIC.resolve()) and target.is_file():
                 return self._send(200, target.read_bytes(), MIME.get(target.suffix, "text/plain; charset=utf-8"))
             return self._json({"error": "not found"}, 404)
         return self._json({"error": "not found"}, 404)
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._host_ok():
+            return self._json({"error": "forbidden host"}, 403)
         path = self.path.split("?", 1)[0]
         if path == "/api/settings":
             return self._handle_settings_write()
@@ -7126,11 +7248,9 @@ class Handler(BaseHTTPRequestHandler):
         cmd_path = MYCORE_WD_STATE.parent / (
             MYCORE_WD_STATE.stem + ".cmd.json")
         try:
-            tmp = cmd_path.with_suffix(".tmp")
-            tmp.write_text(json.dumps({"action": "retry", "target": target,
-                                       "ts": round(time.time(), 3)}),
-                           encoding="utf-8")
-            os.replace(tmp, cmd_path)
+            _atomic_write(cmd_path, json.dumps({"action": "retry", "target": target,
+                                                "ts": round(time.time(), 3)}
+                                               ).encode("utf-8"))
         except OSError as e:  # noqa: BLE001
             return self._json({"error": f"queue failed: {type(e).__name__}"},
                               500)
@@ -9398,9 +9518,7 @@ class Handler(BaseHTTPRequestHandler):
         if errors:
             return self._json({"error": "validation failed", "details": errors}, 400)
         try:
-            tmp = WEB_DIR / "port.local.tmp"
-            tmp.write_text(f"{port}\n", encoding="utf-8")
-            tmp.replace(WEB_DIR / "port.local")
+            _atomic_write(WEB_DIR / "port.local", f"{port}\n".encode("utf-8"))
         except OSError as e:  # noqa: BLE001
             return self._json({"error": f"persist failed: {type(e).__name__}"}, 500)
         sys.stderr.write(f"console port pinned={port} (restart required)\n")

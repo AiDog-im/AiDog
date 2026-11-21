@@ -23,6 +23,14 @@
 # English comments per repo i18n policy.
 set -u
 
+# shq <value> — POSIX-shell-quote one argument for embedding in a tmux
+# command STRING (wrap-up audit W4-03). tmux re-parses that string with the
+# default shell, so an unquoted $REPO/$PROXY_URL with spaces or shell
+# metacharacters would word-split or execute. python3 is already a hard
+# requirement of this script (web_up below) and shlex.quote emits pure
+# POSIX single-quote style — safe for any inner shell, unlike bash printf %q.
+shq() { python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]), end="")' "$1"; }
+
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # self-deriving: no machine path
 # P5-5 phase resolver: the upstream shim marks the transition stack.
 #   transition (shim present) = current behavior: source it, run gw/wd.
@@ -69,7 +77,7 @@ fi
 if [ -n "$PROXY_DIRECT" ]; then
   PROXY_ENV="env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy"
 else
-  PROXY_ENV="env HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL http_proxy=$PROXY_URL https_proxy=$PROXY_URL NO_PROXY=$NO_PROXY_VAL no_proxy=$NO_PROXY_VAL"
+  PROXY_ENV="env HTTP_PROXY=$(shq "$PROXY_URL") HTTPS_PROXY=$(shq "$PROXY_URL") http_proxy=$(shq "$PROXY_URL") https_proxy=$(shq "$PROXY_URL") NO_PROXY=$(shq "$NO_PROXY_VAL") no_proxy=$(shq "$NO_PROXY_VAL")"
 fi
 
 inject_proxy() {
@@ -115,14 +123,18 @@ start_gw() {
     # First tmux command after a hard reboot can fail on a stale socket
     # (observed 2026-10-17: gateway session silently missing at boot) — verify
     # the session appeared and retry once before letting status report FAIL.
-    if ! tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $GWLOG 2>&1"; then
+    # AIDOG_KERNEL_CMD stays word-split on purpose: it is a multi-word
+    # command from the owner's machine-local shim (same trust as this very
+    # script) and quoting it as one word would break it. Everything PATH-like
+    # goes through shq (wrap-up audit W4-03).
+    if ! tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $(shq "$GWLOG") 2>&1"; then
       log "aidog_gw: tmux new failed (attempt 1), retrying"
       sleep 1
-      tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $GWLOG 2>&1" || \
+      tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $(shq "$GWLOG") 2>&1" || \
         log "aidog_gw: tmux new failed (attempt 2)"
     elif ! session_exists aidog_gw; then
       sleep 1
-      session_exists aidog_gw || tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $GWLOG 2>&1" || \
+      session_exists aidog_gw || tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $(shq "$GWLOG") 2>&1" || \
         log "aidog_gw: session missing after start, retry failed"
     fi
     log "aidog_gw: started"
@@ -134,7 +146,7 @@ start_wd() {
   if session_exists aidog_wd || [ -n "$(our_pgrep "$WD_PATTERN")" ]; then
     log "aidog_wd: already running"
   else
-    tmux new -d -s aidog_wd "$PROXY_ENV bash $REPO/deploy/watchdog.sh"
+    tmux new -d -s aidog_wd "$PROXY_ENV bash $(shq "$REPO")/deploy/watchdog.sh"
     log "aidog_wd: started"
   fi
 }
@@ -143,7 +155,7 @@ start_web() {
   if session_exists aidog_web || web_up; then
     log "aidog_web: already running"
   else
-    tmux new -d -s aidog_web "cd $REPO/web && $PROXY_ENV python3 server.py > $WEB_LOG 2>&1"
+    tmux new -d -s aidog_web "cd $(shq "$REPO")/web && $PROXY_ENV python3 server.py > $(shq "$WEB_LOG") 2>&1"
     log "aidog_web: started"
   fi
 }
@@ -155,7 +167,7 @@ start_svc() {
     log "aidog_svc: already running"
   elif bash "$REPO/deploy/run_service.sh" --check; then
     mkdir -p "$REPO/data/mycore_service"
-    tmux new -d -s aidog_svc "cd $REPO && $PROXY_ENV bash deploy/run_service.sh > data/mycore_service/boot.log 2>&1"
+    tmux new -d -s aidog_svc "cd $(shq "$REPO") && $PROXY_ENV bash deploy/run_service.sh > data/mycore_service/boot.log 2>&1"
     log "aidog_svc: started"
   else
     log "aidog_svc: skipped (fail-closed: allowlist/token not provisioned — awaiting dedicated bot)"
@@ -193,7 +205,7 @@ start_mwd() {
           sleep 1; i=$((i+1))
         done
         mkdir -p "$REPO/data"
-        tmux new -d -s aidog_mwd "cd $REPO && $PROXY_ENV python3 -m mycore.watchdog --config deploy/watchdog.mycore.local --execute > data/mycore_watchdog.log 2>&1"
+        tmux new -d -s aidog_mwd "cd $(shq "$REPO") && $PROXY_ENV python3 -m mycore.watchdog --config deploy/watchdog.mycore.local --execute > data/mycore_watchdog.log 2>&1"
         log "aidog_mwd: restarted with the fresh config (--execute per owner authorization)"
         return 0
       fi
@@ -201,7 +213,7 @@ start_mwd() {
     log "aidog_mwd: already running"
   else
     mkdir -p "$REPO/data"
-    tmux new -d -s aidog_mwd "cd $REPO && $PROXY_ENV python3 -m mycore.watchdog --config deploy/watchdog.mycore.local --execute > data/mycore_watchdog.log 2>&1"
+    tmux new -d -s aidog_mwd "cd $(shq "$REPO") && $PROXY_ENV python3 -m mycore.watchdog --config deploy/watchdog.mycore.local --execute > data/mycore_watchdog.log 2>&1"
     log "aidog_mwd: started (--execute per owner authorization)"
   fi
 }

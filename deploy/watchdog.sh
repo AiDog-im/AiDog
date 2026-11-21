@@ -14,6 +14,12 @@
 # English comments per repo i18n policy.
 set -u
 
+# shq <value> — POSIX-shell-quote one argument for embedding in a tmux
+# command STRING (wrap-up audit W4-03; mirror of boot_services.sh shq):
+# tmux re-parses that string with the default shell, so unquoted dynamic
+# values would word-split or execute. python3 is a product requirement.
+shq() { python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]), end="")' "$1"; }
+
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # self-deriving: no machine path
 # Graceful retirement: post-swap there is no gateway to supervise — without
 # the upstream shim there is nothing to source (previously exit 1). Exit 0
@@ -47,7 +53,7 @@ NO_PROXY_VAL=${NO_PROXY:-${no_proxy:-localhost,127.0.0.1,::1}}
 export HTTP_PROXY="$PROXY_URL" HTTPS_PROXY="$PROXY_URL" \
        http_proxy="$PROXY_URL" https_proxy="$PROXY_URL" \
        NO_PROXY="$NO_PROXY_VAL" no_proxy="$NO_PROXY_VAL"
-PROXY_ENV="env HTTP_PROXY=$PROXY_URL HTTPS_PROXY=$PROXY_URL http_proxy=$PROXY_URL https_proxy=$PROXY_URL NO_PROXY=$NO_PROXY_VAL no_proxy=$NO_PROXY_VAL"
+PROXY_ENV="env HTTP_PROXY=$(shq "$PROXY_URL") HTTPS_PROXY=$(shq "$PROXY_URL") http_proxy=$(shq "$PROXY_URL") https_proxy=$(shq "$PROXY_URL") NO_PROXY=$(shq "$NO_PROXY_VAL") no_proxy=$(shq "$NO_PROXY_VAL")"
 
 srv_pid() { tmux display-message -p '#{pid}' 2>/dev/null; }
 
@@ -81,7 +87,10 @@ PY
 
 restart_gw() {
   tmux kill-session -t aidog_gw 2>/dev/null || true
-  tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $GWLOG 2>&1"
+  # AIDOG_KERNEL_CMD stays word-split on purpose (multi-word command from
+  # the owner's machine-local shim — same trust as this script); path-like
+  # values go through shq (wrap-up audit W4-03).
+  tmux new -d -s aidog_gw "$PROXY_ENV $AIDOG_KERNEL_CMD --force > $(shq "$GWLOG") 2>&1"
 }
 
 notify "🛰️ [watchdog] watchdog on duty · 60s patrol · daily heartbeat 09:00 (Beijing)"
