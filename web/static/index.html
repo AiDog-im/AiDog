@@ -886,6 +886,21 @@
         </div>
         <div class="stat-note" id="commSetupHint" hidden></div>
       </section>
+      <!-- car F (owner ask #18): the task-hall board — one server-filtered
+           read above the list; NEW TASK opens the composer preselected,
+           VIEW ALL narrows the list to this category. Stays hidden until
+           the first read lands (never a fake empty state). -->
+      <section class="card" id="commHall" hidden>
+        <h2><span data-i18n="comm.hall.title">TASK HALL</span>
+            <span class="chat-badge" id="hallBadge">–</span></h2>
+        <div class="stat-note" id="hallSummary" role="status"></div>
+        <div class="comm-actions">
+          <button class="btn primary" id="hallNew" type="button"
+                  data-i18n="comm.hall.new">NEW TASK</button>
+          <button class="btn" id="hallView" type="button"
+                  data-i18n="comm.hall.view">VIEW ALL</button>
+        </div>
+      </section>
       <section class="card">
         <h2><span data-i18n="sec.community">DISCUSSIONS</span>
             <span class="chat-badge" id="commBadge">–</span></h2>
@@ -925,7 +940,7 @@
           <span class="sniff-howto-caret" aria-hidden="true"></span>
         </button>
         <ol class="sniff-howto-steps">
-          <li data-i18n="sniff.howto.s1">1 · ADD SOURCE — pick a kind: home (Home Assistant url + token slot), web (URL + extract regex) or mcp (a bridge name from mycore.mcp)</li>
+          <li data-i18n="sniff.howto.s1">1 · ADD SOURCE — pick a kind: home (Home Assistant url + token slot), web (URL + extract regex), mcp (a bridge name from mycore.mcp) or discussions (this product's forum, optional category slug)</li>
           <li data-i18n="sniff.howto.s2">2 · ADD RULE — a bounded condition such as sensor.temp &gt; 30 for 10m; severity colors the finding, speak = it talks</li>
           <li data-i18n="sniff.howto.s3">3 · SWEEP NOW (or wait out the interval) — hits land in FINDINGS; speak rules reach you via quiet hours · digest cap · PAUSE</li>
         </ol>
@@ -944,6 +959,7 @@
               <option value="home">home</option>
               <option value="web">web</option>
               <option value="mcp">mcp</option>
+              <option value="discussions">discussions</option>
             </select>
           </div>
           <div class="ctl-row">
@@ -976,6 +992,15 @@
             <input type="text" id="sniffSrcServer" maxlength="32" autocomplete="off"
                    data-i18n-ph="sniff.srcServerPh" placeholder="ha-mcp">
           </div>
+          <div class="ctl-row" id="sniffDiscRow" hidden>
+            <label for="sniffSrcCat" data-i18n="sniff.srcCat">Category</label>
+            <input type="text" id="sniffSrcCat" maxlength="40" autocomplete="off"
+                   data-i18n-ph="sniff.srcCatPh" placeholder="task-hall">
+          </div>
+          <div class="stat-note" id="sniffDiscNote" data-i18n="sniff.discNote"
+               hidden>a discussions source reads this product's public
+            discussions anonymously — no token, GitHub allows 60 requests
+            per hour</div>
           <div class="stat-note" id="sniffMcpNote" data-i18n="sniff.mcpNote"
                hidden>an mcp source reads the bridge registry and session status
             only — it never calls a tool</div>

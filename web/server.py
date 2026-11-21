@@ -3044,7 +3044,10 @@ def _discussion_rows(doc: object) -> list[dict]:
     """Map GitHub Discussions REST items to the console's six-field rows.
     Nested `category`/`user` objects degrade to "", a non-list payload maps
     to [], and only an https://github.com/ html_url survives as `url` (a
-    tampered link degrades to "", which the UI renders as plain text)."""
+    tampered link degrades to "", which the UI renders as plain text).
+    Callers filter BEFORE mapping (the upstream `?category=` param is
+    ignored by GitHub — verified car F — so `collect_discussions` filters
+    raw items by `category.slug` locally)."""
     out: list[dict] = []
     items = doc if isinstance(doc, list) else []
     for it in items[:20]:
@@ -3076,9 +3079,11 @@ def _discussion_rows(doc: object) -> list[dict]:
 
 
 def _fetch_discussions() -> dict:
-    """One outbound GitHub read -> the /api/discussions payload. Every
-    failure path yields a category WORD (never a URL, never an exception
-    string, never a credential), so the payload is always safe to render."""
+    """One outbound GitHub read -> the UNFILTERED /api/discussions payload.
+    Every failure path yields a category WORD (never a URL, never an
+    exception string, never a credential), so the payload is always safe to
+    render. Filtering by category happens in collect_discussions on the
+    cached rows — one upstream fetch serves every filter."""
     stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
     url = (os.environ.get("AIDOG_DISCUSSIONS_URL") or "").strip() \
         or DISCUSSIONS_URL                 # test seam, same ladder as skills
@@ -3091,7 +3096,7 @@ def _fetch_discussions() -> dict:
         if not isinstance(doc, list):
             raise ValueError("payload is not a list")
         return {"available": True, "discussions": _discussion_rows(doc),
-                "checked_at": stamp}
+                "checked_at": stamp, "_raw": doc}
     except urllib.error.HTTPError as e:
         code = getattr(e, "code", 0)
         reason = ("not_public_yet" if code in (401, 404) else
@@ -3108,21 +3113,48 @@ def _fetch_discussions() -> dict:
             "reason": reason}
 
 
-def collect_discussions(fresh: bool = False) -> dict:
-    """GET /api/discussions — the product's GitHub Discussions (community
-    panel). Read, loopback, no auth (same contract as GET /api/mission).
-    One module fetch per DISCUSSIONS_TTL; the lock is held across the fetch
-    so concurrent callers wait out ONE upstream read instead of stacking
-    their own. `?fresh=1` (the panel's refresh button) skips the cache."""
+CAT_SLUG_MAX = 40
+
+
+def _valid_cat_slug(category: str) -> bool:
+    """GitHub's slug grammar: lowercase, digits, interior hyphens, 1..40."""
+    return bool(re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", category))
+
+
+def collect_discussions(fresh: bool = False, category: str = "") -> dict:
+    """GET /api/discussions[?category=slug] — the product's GitHub
+    Discussions (community panel). Read, loopback, no auth (same contract as
+    GET /api/mission). One module fetch per DISCUSSIONS_TTL serves every
+    category filter: the raw list is cached once and filtered locally by
+    `category.slug` (GitHub ignores the upstream `?category=` param —
+    verified car F, so local filtering is the only honest behavior). An
+    invalid slug is a 400 BEFORE any network call; `?fresh=1` (the panel's
+    refresh button) skips the cache."""
+    category = str(category or "").strip()
+    if category and not _valid_cat_slug(category):
+        return {"ok": False, "error": "validation failed",
+                "details": ["category must be a slug like task-hall"]}
     now = time.time()
     with _discussions_lock:
         cached = _discussions_cache
         if (not fresh and cached["data"] is not None
                 and now - cached["ts"] < DISCUSSIONS_TTL):
-            return cached["data"]
-        data = _fetch_discussions()
-        _discussions_cache.update(ts=time.time(), data=data)
-        return data
+            data = cached["data"]
+        else:
+            data = _fetch_discussions()
+            _discussions_cache.update(ts=time.time(), data=data)
+    if category and data.get("available"):
+        wanted = [it for it in (data.get("_raw") or [])
+                  if isinstance(it, dict)
+                  and isinstance(it.get("category"), dict)
+                  and it["category"].get("slug") == category]
+        return {"available": True,
+                "discussions": _discussion_rows(wanted),
+                "checked_at": data.get("checked_at", "")}
+    # the cached payload keeps its unmapped raw list for local filtering
+    # (stripped before it leaves this module — `_raw` never reaches a client)
+    out = {k: v for k, v in data.items() if k != "_raw"}
+    return out
 
 
 # ---------------------------------------- community writes & thread reads ---
@@ -6312,8 +6344,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/discussions":
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
                 if "?" in self.path else {}
-            return self._json(collect_discussions(
-                fresh=q.get("fresh", [""])[0] == "1"))
+            payload = collect_discussions(
+                fresh=q.get("fresh", [""])[0] == "1",
+                category=(q.get("category") or [""])[0])
+            if payload.get("ok") is False:      # local validation, not upstream
+                return self._json(payload, 400)
+            return self._json(payload)
         if path == "/api/discussions/categories":
             q = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
                 if "?" in self.path else {}

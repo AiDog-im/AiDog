@@ -8833,6 +8833,13 @@ def test_community() -> None:
     saved = {k: os.environ.get(k) for k in env_keys}
     co.reset_for_tests()
     real_transport = co._transport
+    real_secrets_path = co.pp.secrets_path
+    # car F: the production secrets.env legitimately carries the community
+    # slot now (owner-adjudicated). read_token() falls back to that file, so
+    # the "no slot" legs below must point the file seam at an empty temp
+    # file — otherwise they test the HOST's state, echo a real credential
+    # into the failure line, and (in the tool test) reach the network.
+    iso_file = Path(tempfile.mkdtemp(prefix="comm_iso_")) / "secrets.env"
     seen: dict = {"n": 0, "calls": []}
     script: dict = {"fn": None}
 
@@ -8863,11 +8870,13 @@ def test_community() -> None:
     try:
         for k in env_keys:
             os.environ.pop(k, None)
+        co.pp.secrets_path = lambda *a, **k: iso_file
         co.set_transport(fake)
 
         # --- the one slot: absent -> empty string, every write refused -----
+        _none = co.read_token()
         check("community: no slot -> read_token empty",
-              co.read_token() == "", repr(co.read_token()))
+              _none == "", f"non-empty: {len(_none)} chars (value withheld)")
         set_slot(SENTINEL)
         check("community: env slot wins and round-trips",
               co.read_token() == SENTINEL)
@@ -9112,6 +9121,7 @@ def test_community() -> None:
             else:
                 os.environ[k] = v
         co.set_transport(real_transport)
+        co.pp.secrets_path = real_secrets_path
         co.reset_for_tests()
 
 
@@ -9126,8 +9136,14 @@ def test_community_tool() -> None:
     env_keys = ("AIDOG_COMMUNITY_PAT", "AIDOG_GH_API_URL")
     saved = {k: os.environ.get(k) for k in env_keys}
     co.reset_for_tests()
+    real_secrets_path = co.pp.secrets_path
+    # car F: same host-state isolation as test_community — the file seam is
+    # pointed at an empty temp file so the no-slot dispatch stays a local
+    # ERROR (it would otherwise read the production slot and POST for real).
+    iso_file = Path(tempfile.mkdtemp(prefix="commtool_iso_")) / "secrets.env"
     tmp = Path(tempfile.mkdtemp(prefix="comm_tool_"))
     try:
+        co.pp.secrets_path = lambda *a, **k: iso_file
         reg = build_registry(allowed_roots=[str(tmp)])
         check("community tool: always registered (no slot gate at build time)",
               "community_post" in reg.names(), str(reg.names()))
@@ -9187,6 +9203,7 @@ def test_community_tool() -> None:
               SENTINEL not in (out + out2), "sentinel leaked")
     finally:
         co.reset_for_tests()
+        co.pp.secrets_path = real_secrets_path
         for k, v in saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -13183,7 +13200,7 @@ def test_sniff() -> None:
         ({"sources": "x"}, "sources must be a list"),
         ({"sources": [1]}, "must be an object"),
         ({"sources": [{"id": "a", "kind": "mqtt", "url": "http://x"}]},
-         "kind must be one of home|web|mcp"),
+         "kind must be one of home|web|mcp|discussions"),
         ({"sources": [{"id": "a", "kind": "mcp"}]},
          "server must be a bridge name"),
         ({"sources": [{"id": "a", "kind": "mcp", "server": "ha mcp"}]},
@@ -13652,6 +13669,122 @@ def test_sniff() -> None:
           and mreport["findings_new"] == 1
           and mreport["rules_matched"] == 1,
           _json.dumps(mreport)[:400])
+
+    # ---------------- E3. discussions lane (car F, task hall) -------------
+    disc_ok = {"id": "t", "kind": "discussions", "enabled": True,
+               "rate_cap_per_min": 30, "category": "task-hall"}
+    disc_doc = [
+        {"number": 9, "title": "new task",
+         "category": {"slug": "task-hall", "name": "Task Hall"}},
+        {"number": 7, "title": "other",
+         "category": {"slug": "ideas", "name": "Ideas"}},
+        {"number": 5, "title": "old task",
+         "category": {"slug": "task-hall", "name": "Task Hall"}},
+        {"number": "not-int", "title": "bad number"},
+        "junk",
+    ]
+    dcap: list[dict] = []
+
+    def disc_transport(url, headers, payload, timeout):
+        dcap.append({"url": url, "headers": headers, "payload": payload})
+        return _json.dumps(disc_doc)
+
+    reads, dstat, derr = sn._sweep_discussions(disc_ok,
+                                               transport=disc_transport)
+    check("sniff: discussions sweep filters by category slug locally",
+          dstat == sn.ST_REACHABLE and derr == ""
+          and reads == {"tasks": 2, "latest": 9}, f"{dstat} {reads} {derr}")
+    check("sniff: discussions sweep is an anonymous bodyless GET of the repo",
+          dcap[0]["payload"] == b""
+          and dcap[0]["url"].endswith(
+              "/repos/AiDog-im/AiDog/discussions?per_page=30")
+          and "Authorization" not in dcap[0]["headers"]
+          and dcap[0]["headers"]["Accept"]
+          == "application/vnd.github+json", str(dcap[0]))
+    reads, dstat2, _ = sn._sweep_discussions({**disc_ok, "category": ""},
+                                             transport=disc_transport)
+    check("sniff: an empty category reads the whole forum (junk skipped)",
+          dstat2 == sn.ST_REACHABLE
+          and reads == {"tasks": 4, "latest": 9}, str(reads))
+    reads, dstat3, derr3 = sn._sweep_discussions(
+        disc_ok, transport=lambda u, h, p, t: (_ for _ in ()).throw(
+            OSError("network unreachable")))
+    check("sniff: a dead discussions read is an honest error, no readings",
+          dstat3 == sn.ST_ERROR and reads == {}
+          and "network unreachable" in derr3
+          and len(derr3) <= sn.ERR_SNIPPET, derr3)
+    reads, dstat4, derr4 = sn._sweep_discussions(
+        disc_ok, transport=lambda u, h, p, t: "{\"not\": \"a list\"}")
+    check("sniff: a non-list discussions body is an error, not readings",
+          dstat4 == sn.ST_ERROR and reads == {}
+          and "unexpected response shape" in derr4, derr4)
+    # parse legs for the new kind (rate cap shared with home/web, no url)
+    disc_cfg = sn.parse_config({"sources": [
+        {"id": "t", "kind": "discussions", "category": "task-hall"},
+        {"id": "a", "kind": "discussions"}]})
+    check("sniff: discussions source parses with and without a category",
+          [s.get("category") for s in disc_cfg["sources"]]
+          == ["task-hall", ""]
+          and all("url" not in s for s in disc_cfg["sources"])
+          and disc_cfg["sources"][1]["rate_cap_per_min"]
+          == sn.DEFAULT_RATE_CAP,
+          _json.dumps(disc_cfg["sources"]))
+    for bad_cat in ("Task Hall", "bad_cat", "x" * 41, "-lead"):
+        try:
+            sn.parse_config({"sources": [{"id": "t", "kind": "discussions",
+                                          "category": bad_cat}]})
+            check(f"sniff: bad category {bad_cat[:12]!r} refused", False)
+        except sn.SniffError as e:
+            check(f"sniff: bad category {bad_cat[:12]!r} refused",
+                  "category must be a slug like task-hall" in str(e), str(e))
+    # the kind lane through tick: baseline -> new task fires exactly once
+    dstate = sn.default_state()
+    dfind: list[dict] = []
+    dseq = [disc_doc, disc_doc,
+            disc_doc + [{"number": 11, "title": "brand new",
+                         "category": {"slug": "task-hall"}}]]
+    dseq_i = {"n": 0}
+
+    def disc_seq(url, headers, payload, timeout):
+        doc = dseq[min(dseq_i["n"], len(dseq) - 1)]
+        dseq_i["n"] += 1
+        return _json.dumps(doc)
+
+    dblk = {"interval_s": 10,
+            "sources": [{"id": "t", "kind": "discussions",
+                         "category": "task-hall"}],
+            "rules": [{"id": "new", "source": "t",
+                       "when": "latest changed", "severity": "warn",
+                       "speak": True}]}
+    dt1 = sn.tick(3000.0, block=dblk, transport=disc_seq, state=dstate,
+                  findings=dfind, force=True)
+    dt2 = sn.tick(3400.0, block=dblk, transport=disc_seq, state=dstate,
+                  findings=dfind, force=True)
+    dt3 = sn.tick(3800.0, block=dblk, transport=disc_seq, state=dstate,
+                  findings=dfind, force=True)
+    dt4 = sn.tick(4200.0, block=dblk, transport=disc_seq, state=dstate,
+                  findings=dfind, force=True)
+    check("sniff: discussions tick — baseline, dedup, one finding, dedup",
+          dt1["findings_new"] == 0 and dt2["findings_new"] == 0
+          and dt3["findings_new"] == 1 and dt4["findings_new"] == 0
+          and len(dfind) == 1 and dfind[0]["rule"] == "new"
+          and dfind[0]["trigger"] == "latest=11",
+          _json.dumps([r["findings_new"] for r in (dt1, dt2, dt3, dt4)]))
+    check("sniff: discussions tick meters its HTTP calls (no mcp bypass)",
+          # RATE_WINDOW_S is 60s and the ticks above are 400s apart, so only
+          # the in-window call survives — then a capped re-sweep proves the
+          # meter is live (the mcp lane would bypass both checks).
+          dstate["sources"]["t"]["calls"] == [4200.0]
+          and dstate["sources"]["t"]["status"] == sn.ST_REACHABLE,
+          str(dstate["sources"]["t"]))
+    dblk_cap = dict(dblk, sources=[{"id": "t", "kind": "discussions",
+                                    "category": "task-hall",
+                                    "rate_cap_per_min": 1}])
+    dt5 = sn.tick(4250.0, block=dblk_cap, transport=disc_seq, state=dstate,
+                  findings=dfind, force=True)
+    check("sniff: discussions sweep inside the rate window is rate-capped",
+          dt5["sources"]["t"]["status"] == sn.ST_CAPPED
+          and dseq_i["n"] == 4, str(dt5["sources"]))
 
     # ---------------- F. tick (ownership, gates, findings) -----------------
     sn.state_path().unlink(missing_ok=True)
