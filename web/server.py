@@ -7602,8 +7602,11 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/fleet/plans":
             return self._json(collect_fleet_plans())
         if path.startswith("/api/fleet/plans/"):
-            return self._handle_fleet_plan_decision(
-                path[len("/api/fleet/plans/"):])
+            # a decision is a POST; a GET here would be a confusing no-op
+            return self._json(
+                {"error": "use POST to decide a plan",
+                 "details": ["POST /api/fleet/plans/<id> "
+                             "{action: approve|reject|cancel}"]}, 405)
         if path == "/api/memory":
             q = ""
             if "?" in self.path:
@@ -7731,6 +7734,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/agent/settings-plans/"):
             return self._handle_agent_settings_plan_decide(
                 path[len("/api/agent/settings-plans/"):])
+        if path.startswith("/api/fleet/plans/"):
+            return self._handle_fleet_plan_decision(
+                path[len("/api/fleet/plans/"):])
         return self._json({"error": "not found"}, 404)
 
     # ------------------------------------------ credential-slot endpoints ---
