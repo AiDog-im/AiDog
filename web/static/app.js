@@ -5239,6 +5239,100 @@ async function recAction(path, body, confirmKey, confirmFallback) {
   }
 }
 
+/* car E (security self-check, owner ask #6): the SECURITY card's read face.
+   Data comes from GET /api/security (Bearer-gated, fresh probes per call);
+   six fixed rows + an honest verdict line. Fail-soft: an unreachable server
+   or a missing token keeps the last good paint and says exactly why. The
+   response carries names, counts and states only — a value never renders
+   here (the server never sends one). */
+let secData = null;
+const SEC_STATES = ["ok", "warn", "fail", "unknown"];
+
+function secStateWord(state) {
+  const fallback = { ok: "OK", warn: "REVIEW", fail: "RISK",
+                     unknown: "UNKNOWN" }[state] || state;
+  return t("sck.st." + state, fallback);
+}
+
+function renderSecurity() {
+  const list = document.getElementById("secList");
+  const verd = document.getElementById("secVerdict");
+  if (!list) return;
+  const d = secData;
+  if (!d || typeof d !== "object" || !Array.isArray(d.checks)) {
+    list.innerHTML = "";
+    if (verd) { verd.hidden = true; verd.textContent = ""; }
+    return;
+  }
+  const rows = d.checks.map(c => {
+    const id = (c && typeof c.id === "string") ? c.id : "?";
+    const st = SEC_STATES.includes(c && c.state) ? c.state : "unknown";
+    let detail = t((c && c.i18n) || "", (c && c.detail) || "");
+    const args = (c && c.args && typeof c.args === "object") ? c.args : {};
+    Object.keys(args).forEach(k => {
+      detail = detail.split("{" + k + "}").join(String(args[k]));
+    });
+    const color = st === "fail" ? "color:var(--red);"
+      : st === "warn" ? "color:var(--amber);" : "";
+    return `<div class="ctl-row" style="margin-bottom:4px;">` +
+      `<label>${escapeHtml(t("sck.row." + id, id))}</label>` +
+      `<span class="stat-note" style="margin:0;${color}">` +
+      `<b>${escapeHtml(secStateWord(st))}</b> · ` +
+      `${escapeHtml(detail)}</span></div>`;
+  });
+  list.innerHTML = rows.join("");
+  if (verd) {
+    const s = (d.summary && typeof d.summary === "object") ? d.summary : {};
+    const v = SEC_STATES.includes(d.verdict) ? d.verdict : "unknown";
+    const n = Number(s[v]) || 0;
+    verd.hidden = false;
+    verd.textContent = t("sck.verdict." + v,
+      { ok: "all clear — {n} check(s) passed",
+        warn: "{n} item(s) to review — details above",
+        fail: "{n} finding(s) — details above",
+        unknown: "{n} check(s) could not run" }[v])
+      .split("{n}").join(String(n));
+  }
+}
+
+async function refreshSecurity(fromButton) {
+  const msg = document.getElementById("secMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = badTokenText(); }
+    return;
+  }
+  if (msg && fromButton) { msg.className = "save-state";
+    msg.textContent = "\u2026"; }
+  try {
+    const res = await fetch("/api/security", {
+      headers: { "Authorization": "Bearer " + token } });
+    if (res.status === 401) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = badTokenText(); }
+      return;
+    }
+    const doc = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = ((doc && (doc.error || doc.reason)) || "error")
+          .slice(0, 160); }
+      return;
+    }
+    secData = doc;
+    renderSecurity();
+    if (msg) { msg.className = "save-state";
+      msg.textContent = "\u2713 " + t("sck.done", "check complete"); }
+  } catch (e) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = String(e).slice(0, 80); }
+  }
+}
+
+const secRunEl = document.getElementById("secRun");
+if (secRunEl) secRunEl.addEventListener("click", () => refreshSecurity(true));
+
 /* car 7 (D11): the leash read face — tail state + budget status. Refreshed
    on the SAME cadence as the status panel plus right after every control
    action/save, so the Overview row and the Guardrails card never show a
@@ -5667,6 +5761,7 @@ function settingsRelang() {
   paintLedgerStatus();        // D2: ledger card dynamic rows follow the pack too
   renderAgentPlans();         // car C: plan rows follow the pack too
   renderRecovery();           // car K: recovery rows follow the pack too
+  renderSecurity();           // car E: security rows follow the pack too
   paintPresetMsg();           // car B: preset status line follows the pack
   discPaintMsg();              // D1: discovery status line repaints
   discPaintAdd();              // D1: ADD label repaints with the selection
@@ -9067,6 +9162,7 @@ function setView(name, fromUser) {
   if (name === "settings") {
     if (fromUser || !agentPlanData) refreshAgentPlans();
     if (fromUser || !recData) refreshRecovery();   // car K: recovery facts
+    if (fromUser || !secData) refreshSecurity();   // car E: security check
   }
   // car D: the journey card loads when Overview opens (local facts only)
   if (name === "overview" && (fromUser || !jrnData)) refreshJourney();
