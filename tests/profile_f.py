@@ -621,8 +621,16 @@ def test_profile_cli(root: Path) -> None:
     repo_slots = own_line_values(REPO / "secrets.env")
     filled = {k: v for k, v in repo_slots.items() if v}
     txt = (p / "secrets.env").read_text(encoding="utf-8")
+    # console fix car (2026-11-06): the CODE-GENERATED header comment carries
+    # the product name, which collides with a legitimate NAME slot
+    # (AIGAME_AGENT_NAME=AiDog). Strip exactly that one generated line before
+    # the substring scan — every other line (slots + any other comment) is
+    # still scanned, so a real value anywhere else still fails.
+    import re as _re
+    scan_txt = _re.sub(
+        r"(?m)^# I'm AiDog profile '[^']*' credential slots.*$", "", txt)
     leaked = [k for k, v in filled.items()
-              if len(v) >= 4 and v in txt]
+              if len(v) >= 4 and v in scan_txt]
     check("C7: profile secrets carry NONE of the repo's real slot values",
           not leaked, f"leaked keys: {leaked}")
     check("C7: create output never echoes repo secret values",

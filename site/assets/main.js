@@ -87,7 +87,7 @@
     document.documentElement.lang = (l === "zh") ? "zh-Hans" : "en";
     var label = document.getElementById("langLabel");
     if (label) label.textContent = (l === "en") ? "ZH" : "EN";  // pack value overwrites via data-i18n
-    loadDict(l).then(function (d) { applyDict(d); renderShelf(); paintStats(); });
+    loadDict(l).then(function (d) { applyDict(d); renderShelf(); paintShelfCta(); paintStats(); });
   }
 
   var langBtn = document.getElementById("langBtn");
@@ -188,6 +188,22 @@
     if (shelfEmpty) shelfEmpty.hidden = true;
   }
 
+  /* console fix car (owner 2026-11-05): the directory CTA carries the LIVE
+     catalog count — the pack holds a {n} template (never a hardcoded
+     number, which is how "twelve" went stale); with no count yet (fetch
+     pending/failed) the parenthetical is dropped so no-JS/file:// readers
+     and the honest-fallback state never see a raw {n} or a stale digit. */
+  function paintShelfCta() {
+    var el = document.querySelector('.shelf-cta [data-i18n="skills.moreCta"]');
+    if (!el) return;
+    var d = dicts[lang] || {};
+    var tpl = d["skills.moreCta"];
+    if (typeof tpl !== "string" || tpl.indexOf("{n}") < 0) return; // pack absent: keep inline
+    el.textContent = (shelfEntries && shelfEntries.length)
+      ? tpl.replace("{n}", String(shelfEntries.length))
+      : tpl.replace(/\s*[（(]\{n\}[）)]/, "");
+  }
+
   function shelfFallback() {
     if (shelfGrid) shelfGrid.hidden = true;
     if (shelfEmpty) shelfEmpty.hidden = false;
@@ -198,10 +214,11 @@
       .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
       .then(function (d) {
         shelfEntries = (d && Array.isArray(d.skills)) ? d.skills : [];
-        if (!shelfEntries.length) { shelfFallback(); return; }
+        if (!shelfEntries.length) { shelfFallback(); paintShelfCta(); return; }
         renderShelf();
+        paintShelfCta();
       })
-      .catch(shelfFallback);
+      .catch(function (e) { shelfFallback(); paintShelfCta(); });
   }
 
   /* --------------------------------------------------- fact ticker --- */
