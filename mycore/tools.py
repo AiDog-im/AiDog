@@ -70,7 +70,7 @@ RESULT_CAPS: dict[str, int] = {
     "grep": 6000, "glob": 4000, "browser_snapshot": 6000,
     "skill_route": 2000, "cron": 3000,
     # short confirmations / small payloads
-    "write_file": 4000, "edit_file": 4000,
+    "write_file": 4000, "edit_file": 4000, "send_file": 4000,
     "generate_image": 4000, "connector_search": 4000,
     "community_post": 4000, "exchange_markets": 4000,
     "exchange_portfolio": 4000, "exchange_orders": 4000,
@@ -123,7 +123,13 @@ KNOWN_TOOL_NAMES: frozenset[str] = frozenset({
     "chain_read",
     # car C (agent foundation): propose console settings on the owner's
     # behalf — writes stay impossible from the tool (owner-approved plans)
-    "settings"})
+    "settings",
+    # file transfer car (0.5.90): stage a file for delivery on the current
+    # chat turn. Registered ONLY where a delivery surface exists
+    # (build_registry deliver_files=True — the service): capability-honest
+    # registration, browser_* style, so a console/CLI model never queues a
+    # file nobody will send.
+    "send_file"})
 
 # settings key mycore.tools_off + env MYCORE_TOOLS_OFF (owner-approved design)
 TOOLS_OFF_ENV = "MYCORE_TOOLS_OFF"
@@ -398,6 +404,32 @@ def _read_file(path: str, offset: int = 0, limit: int = 200,
     window = lines[offset:offset + limit]
     out = [f"{i + 1 + offset:>6}\t{line}" for i, line in enumerate(window)]
     return "\n".join(out) if out else f"[empty: {p.name} has {len(lines)} lines]"
+
+
+def _send_file(path: str,
+               roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS,
+               state_dir: str | Path | None = None) -> str:
+    """Stage a file for delivery on the CURRENT chat turn (file transfer
+    car, 0.5.90). Same path policy as read_file (resolve_inside + the
+    credential-store refusal — the source is READ, then copied); the copy
+    lands in <state>/outbox/ and the service sends it after the reply.
+    Dry-run stages too (nothing leaves the host until the drain)."""
+    from . import filebox  # local import: keeps the module graph acyclic
+    p = resolve_inside(path, roots)
+    if _is_secret_store(p):
+        raise ToolError(SECRET_STORE_REASON)
+    if not p.is_file():
+        raise ToolError(f"not a readable file: {p.name}")
+    try:
+        dst, name = filebox.stage(p, state_dir)
+    except filebox.FileError as e:
+        raise ToolError(str(e)) from None
+    try:
+        size = p.stat().st_size
+    except OSError:
+        size = 0
+    return (f"staged {name} ({size} bytes) at {dst} — "
+            "it is sent with this turn's reply")
 
 
 def _snapshot_note(path: Path, state_dir: str | Path | None) -> str:
@@ -1455,10 +1487,32 @@ def resolve_disabled_tools(settings: dict | None = None) -> frozenset[str]:
     return frozenset(n for n in raw if isinstance(n, str))
 
 
+def _settings_extra_roots() -> tuple[str, ...]:
+    """Extra allowed roots from web/settings.json mycore.allowed_roots
+    (file transfer car, 0.5.90). Absent key, wrong shape or a non-string
+    entry = () — the DEFAULT_ALLOWED_ROOTS pair is byte-identical. Entries
+    are expanded ("~") and normalized here; resolve_inside resolves them
+    again per call (symlink-safe)."""
+    try:
+        doc = json.loads(pp.settings_path(REPO).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ()
+    mc = doc.get("mycore") if isinstance(doc, dict) else None
+    raw = mc.get("allowed_roots") if isinstance(mc, dict) else None
+    if not isinstance(raw, list):
+        return ()
+    out: list[str] = []
+    for item in raw:
+        if isinstance(item, str) and item.strip():
+            out.append(str(Path(item.strip()).expanduser()))
+    return tuple(out)
+
+
 def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                    state_dir: str | Path | None = None,
                    mcp_raw: str | None = None,
-                   disabled: frozenset[str] | set[str] | None = None) -> ToolRegistry:
+                   disabled: frozenset[str] | set[str] | None = None,
+                   deliver_files: bool = False) -> ToolRegistry:
     """The 11 core tools (design §14.3 + cron/Phase B2 + car 2 delegate/
     execute_code) plus any configured MCP tools (car 2-D5).
     `allowed_roots`
@@ -1470,9 +1524,19 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
     `disabled` = per-tool kill set (owner-approved v0.5.32): a name in this
     set is NEVER registered — absent from schema() AND dispatch() returns the
     normal `unknown tool` error. None/empty = today's registry byte-identical.
+    `deliver_files` (file transfer car, 0.5.90) registers `send_file` —
+    capability-honest registration: only the service (the one surface that
+    can hand a staged file to a route adapter) passes True, so a console,
+    CLI or ACP model never queues a file no turn will deliver. An explicit
+    `allowed_roots` argument keeps its exact roots (tests stay hermetic);
+    the DEFAULT path additionally merges settings mycore.allowed_roots
+    (extra roots beyond the repo + system-temp pair; absent = byte-identical).
     MCP is fail-soft: a bad config or an unreachable server becomes an honest
     note on registry.mcp_notes — the 11 core tools always register."""
-    roots = tuple(allowed_roots) if allowed_roots else DEFAULT_ALLOWED_ROOTS
+    if allowed_roots:
+        roots = tuple(allowed_roots)
+    else:
+        roots = DEFAULT_ALLOWED_ROOTS + _settings_extra_roots()
     r = ToolRegistry()
     r.register("read_file", "Read a text file with line numbers.",
                {"type": "object", "properties": {
@@ -1489,6 +1553,12 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                    "path": _STR, "old_text": _STR, "new_text": _STR},
                 "required": ["path", "old_text", "new_text"]},
                lambda path, old_text, new_text: _edit_file(path, old_text, new_text, roots, state_dir))
+    if deliver_files:
+        r.register("send_file", "Stage a file (inside the allowed roots) to be "
+                   "sent to the user with this turn's reply.",
+                   {"type": "object", "properties": {"path": _STR},
+                    "required": ["path"]},
+                   lambda path: _send_file(path, roots, state_dir))
     r.register("run_bash", f"Run a shell command (<= {BASH_TIMEOUT}s). "
                "Runs on the configured terminal backend (settings mycore.shell; default local). "
                "For multi-step network scripts prefer execute_code (python, no "

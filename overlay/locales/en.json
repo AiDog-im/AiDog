@@ -330,6 +330,8 @@
   "voice.vs.badgeIdle": "idle",
   "voice.vs.badgeListen": "listening",
   "voice.vs.badgeCmd": "command",
+  "file.inbound.failed": "file could not be received ({reason})",
+  "file.inbound.received": "received file {name} ({size} bytes), saved to {path}",
   "voice.stt.failed": "voice note could not be transcribed ({reason})",
   "voice.stt.empty": "heard a voice note, but no words came through — please try again",
   "voice.stt.tooLong": "voice note too long ({n}s — limit 60s)",

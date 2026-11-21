@@ -695,7 +695,7 @@ MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
                "max_tpm", "sniff", "decision", "subagent", "timeout",
-               "max_tokens", "run_deadline")
+               "max_tokens", "run_deadline", "allowed_roots")
 # Car 4 (D6): fields the mycore.decision block accepts — the key slot is NOT
 # one of them (see the DEFAULT_SETTINGS note).
 DECISION_KEYS = ("enabled", "url", "model", "router_model")
@@ -727,6 +727,11 @@ BUDGET_MIN, BUDGET_MAX = 4000, 1000000
 # branch below (import is fail-closed: an unavailable catalog refuses writes).
 TOOLS_OFF_NAME_RE = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 TOOLS_OFF_MAX = 32
+# File transfer car (0.5.90): mycore.allowed_roots = EXTRA directories the
+# file/write tools may touch beyond the built-in repo + system-temp pair.
+# Bounded (a roots list is a policy, not a shopping list); absent key = the
+# default pair byte-identical (mycore.tools._settings_extra_roots -> ()).
+ROOTS_MAX = 16
 # Supported UI languages = the discovered locale packs (overlay/locales/*);
 # fallback keeps validation sane if the packs are ever unreadable.
 LANGS = tuple(i18n.languages()) or ("en", "zh")
@@ -1778,6 +1783,38 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             "mycore.timeout must be an integer of 5..600 seconds")
                         continue
                     clean_mc[key] = val
+                    continue
+                if key == "allowed_roots":
+                    # file transfer car (0.5.90): EXTRA allowed roots for the
+                    # file/write tools beyond the built-in repo + temp pair.
+                    # Bounded list of non-empty single-line path strings,
+                    # normalized (~ expanded, made absolute); the absent key
+                    # keeps DEFAULT_ALLOWED_ROOTS byte-identical.
+                    if not isinstance(val, list) or not 1 <= len(val) <= ROOTS_MAX:
+                        errors.append(
+                            "mycore.allowed_roots must be a list of "
+                            f"1..{ROOTS_MAX} path strings")
+                        continue
+                    clean_roots: list[str] = []
+                    bad_root: str | None = None
+                    for item in val:
+                        if not isinstance(item, str) or not item.strip() \
+                                or "\x00" in item or "\n" in item or "\r" in item:
+                            bad_root = item if isinstance(item, str) else ""
+                            break
+                        try:
+                            norm = os.path.abspath(os.path.expanduser(item.strip()))
+                        except (OSError, ValueError):
+                            bad_root = item[:40]
+                            break
+                        clean_roots.append(norm)
+                    if bad_root is not None:
+                        errors.append(
+                            "mycore.allowed_roots entries must be non-empty "
+                            "single-line path strings "
+                            f"(first bad: {bad_root[:40]!r})")
+                        continue
+                    clean_mc[key] = clean_roots
                     continue
                 if key == "max_tokens":
                     # console fix car (owner 2026-11-05): per-request OUTPUT
