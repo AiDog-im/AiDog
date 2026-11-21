@@ -2216,3 +2216,73 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
   --st-dot: var(--violet);
   color: var(--violet);
 }
+
+/* ------------------------------------------ relayout car 4.1 (0.5.82) ---
+ * Overview CONTENT re-arranged on the owner-approved mockup (design 4.1):
+ * the Today KPI strip leads the grid, Services become a table, Advisory moves
+ * up beside Memory/Backup, and the read-only CHANNEL kv collapses into a
+ * disclosure at the end. Arrangement only — every id and paint path is
+ * untouched; the strip keeps the P3 context line and sparkline rows. */
+
+/* --- Today strip: the hero (cost + context) reads 2x a supporting tile -- */
+.ov-today .ov-kpi {
+  display: grid;
+  grid-template-columns: minmax(210px, 1.7fr) minmax(0, 3fr);
+  gap: 16px 26px;
+  align-items: start;
+}
+.ov-today .hero .metric-val { font-size: 44px; margin-top: 6px; }
+.ov-today .hero .stat-note { margin-top: 8px; }
+.ov-today .ov-kpi > .stat-grid {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px 20px;
+  align-content: start;
+}
+.ov-today .ov-kpi > .stat-grid .v { font-size: 17px; }
+@media (max-width: 1180px) {
+  .ov-today .ov-kpi { grid-template-columns: minmax(0, 1fr); }
+}
+@media (max-width: 760px) {
+  .ov-today .hero .metric-val { font-size: 34px; }
+  .ov-today .ov-kpi > .stat-grid {
+    grid-template-columns: repeat(auto-fit, minmax(96px, 1fr)); }
+  .ov-today .ov-kpi > .stat-grid .v { font-size: 15px; }
+}
+
+/* --- Services table (mockup grammar: 11px headers, 13px tabular body) -- */
+.tbl.svc { width: 100%; border-collapse: collapse; table-layout: fixed;
+  font-size: 13px; font-variant-numeric: tabular-nums; }
+.tbl.svc th { font-size: 11px; font-weight: 600; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--muted); text-align: left;
+  padding: 6px 8px; border-bottom: 1px solid var(--line-solid); }
+.tbl.svc td { padding: 9px 8px; border-bottom: 1px dashed var(--line);
+  vertical-align: middle; overflow-wrap: anywhere; }
+.tbl.svc tbody tr:last-child td { border-bottom: 0; }
+.tbl.svc .svc-name { width: 24%; font-weight: 600; color: var(--navy); }
+.tbl.svc .svc-state { width: 148px; white-space: nowrap; }
+.tbl.svc .svc-detail { color: var(--muted); font-family: var(--mono);
+  font-size: 12px; }
+@media (max-width: 760px) {
+  .tbl.svc .svc-name { width: 30%; }
+  .tbl.svc .svc-state { width: 116px; }
+  .tbl.svc .svc-state .chip { font-size: 11.5px; padding: 2px 8px; }
+}
+
+/* --- Runtime configuration disclosure (the demoted CHANNEL kv) --------- */
+.ov-disc > summary { cursor: pointer; list-style: none; font-size: 12px;
+  letter-spacing: .2em; text-transform: uppercase; color: var(--blue-ink);
+  font-weight: 600; display: flex; align-items: center; gap: 8px; }
+.ov-disc > summary::-webkit-details-marker { display: none; }
+/* the droplet lead-in every card title carries, then an arrow at the end */
+.ov-disc > summary::before { content: ""; width: 9px; height: 9px; flex: none;
+  background: linear-gradient(160deg, #70e4fd, #2892ff);
+  border-radius: 0 50% 50% 50%; transform: rotate(45deg);
+  box-shadow: 0 3px 7px rgba(40, 146, 255, .4); }
+.ov-disc > summary::after { content: ""; width: 0; height: 0; flex: none;
+  margin-left: auto; border-left: 5px solid currentColor;
+  border-top: 4px solid transparent; border-bottom: 4px solid transparent;
+  transition: transform .15s ease; }
+.ov-disc[open] > summary::after { transform: rotate(90deg); }
+.ov-disc > summary:focus-visible { outline: 2px solid var(--blue);
+  outline-offset: 3px; border-radius: 4px; }
+.ov-disc > .kv { margin-top: 12px; }

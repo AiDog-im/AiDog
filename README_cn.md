@@ -197,7 +197,7 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 目录规模：**28 个注册工具** · **9 家交易所场所** · **27 套真机
 E2E**——全部全绿。
 
-语言包：`en`（默认）+ `zh` 各 **1463 键**，parity lint 把关；官网另有
+语言包：`en`（默认）+ `zh` 各 **1467 键**，parity lint 把关；官网另有
 **341 键**双语站包。
 
 ## 文档
