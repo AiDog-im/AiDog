@@ -907,6 +907,11 @@ h1, h2, h3, h4, .serif {
 .footer-afr a { display: inline-flex; opacity: .9; transition: opacity .2s; }
 .footer-afr a:hover, .footer-afr a:focus-visible { opacity: 1; }
 .footer-afr img { display: block; height: 42px; width: auto; }
+/* AiBOX "Available on" badge (self-hosted SVG, aibox difficulty car) */
+.footer-aibox { display: flex; justify-content: center; margin-top: 14px; }
+.footer-aibox a { display: inline-flex; opacity: .92; transition: opacity .2s; }
+.footer-aibox a:hover, .footer-aibox a:focus-visible { opacity: 1; }
+.footer-aibox img { display: block; height: 40px; width: auto; }
 .footer-fine { display: flex; justify-content: space-between; gap: 20px;
   flex-wrap: wrap; margin-top: 22px; padding-top: 16px;
   border-top: 1px solid rgba(255, 255, 255, .1);
@@ -1142,6 +1147,33 @@ html[lang="zh-Hans"] .cert-eyebrow, html[lang="zh-Hans"] .hero-kicker {
 .hero-lead { max-width: 600px; margin-top: 22px;
   font-size: clamp(15.5px, 1.5vw, 18px); line-height: 1.62; color: var(--ink); }
 
+/* AiBOX one-click panel (aibox difficulty car) — sits above the three
+   manual steps; deliberately not .step so the e2e "exactly 3" wall holds. */
+.aibox-panel { margin-top: 30px; border: 1px solid rgba(40, 146, 255, .35);
+  background: linear-gradient(0deg, rgba(40, 146, 255, .04),
+             rgba(40, 146, 255, .04)), var(--panel);
+  padding: 22px 24px; box-shadow: var(--shadow); position: relative; }
+.aibox-panel::before { content: ""; position: absolute; left: 0; top: 0;
+  bottom: 0; width: 3px; background: var(--blue); }
+.aibox-head .badge { margin-bottom: 12px; }
+.aibox-head h4 { font-size: 19px; color: var(--navy); margin: 0 0 8px;
+  letter-spacing: -.01em; }
+.aibox-head p { margin: 0; color: var(--muted); font-size: 14.5px;
+  line-height: 1.7; max-width: 720px; }
+.aibox-mini { margin: 16px 0 0; padding: 0 0 0 20px; color: var(--text);
+  font-size: 14.5px; line-height: 1.8; }
+.aibox-mini li::marker { color: var(--blue); font-weight: 600; }
+.aibox-cta { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 16px; margin-top: 18px; }
+.aibox-note { font-family: var(--mono); font-size: 12px; color: var(--muted);
+  letter-spacing: .04em; }
+/* divider line above the manual three-step route */
+.start-divider { margin-top: 34px; font-family: var(--mono); font-size: 12.5px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+  display: flex; align-items: center; gap: 14px; }
+.start-divider::after { content: ""; flex: 1; height: 1px;
+  background: var(--line); }
+
 /* S4 — the payoff line and the install-guide link after the three steps */
 .start-done { margin-top: 28px; font-family: var(--mono); font-size: 13.5px;
   line-height: 1.6; color: var(--ink); border-left: 3px solid var(--blue);
@@ -1151,8 +1183,7 @@ html[lang="zh-Hans"] .cert-eyebrow, html[lang="zh-Hans"] .hero-kicker {
   text-underline-offset: 3px; }
 .start-guide a:hover { color: var(--ink); }
 
-/* S1 — the home shelf: real cards mounted from skills/catalog.json */
-.shelf-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
+/* S1 — the home shelf: real cards mounted from skills/catalog.json */.shelf-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 16px; margin-top: 24px; }
 .shelf-grid[hidden], .shelf-empty[hidden] { display: none; }
 .shelf-card { position: relative; overflow: hidden; border: 1px solid var(--line);

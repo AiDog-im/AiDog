@@ -79,6 +79,12 @@
       var k = el.getAttribute("data-i18n-alt");
       if (Object.prototype.hasOwnProperty.call(d, k)) el.setAttribute("alt", d[k]);
     });
+    // language-aware links (aibox difficulty car): pack holds the per-lang URL,
+    // e.g. start.aiboxHref -> https://aibox.im/{en|zh}/apps/aidog/
+    document.querySelectorAll("[data-i18n-href]").forEach(function (el) {
+      var k = el.getAttribute("data-i18n-href");
+      if (Object.prototype.hasOwnProperty.call(d, k)) el.setAttribute("href", d[k]);
+    });
   }
 
   function setLang(l) {

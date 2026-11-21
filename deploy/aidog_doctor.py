@@ -28,6 +28,7 @@ import json
 import os
 import re
 import shlex
+import shutil
 import stat
 import subprocess
 import sys
@@ -108,6 +109,13 @@ def add(level: str, name: str, detail: str) -> None:
 
 def sh(cmd: list[str], timeout: int = 10) -> str:
     try:
+        # aibox difficulty car (0.5.91): user-space tmux wrapper may sit in
+        # ~/.local/bin while this process runs with a PATH that lacks it
+        # (console subprocess / non-login shell) — resolve it explicitly.
+        if cmd and cmd[0] == "tmux" and shutil.which("tmux") is None:
+            wrap = Path.home() / ".local" / "bin" / "tmux"
+            if wrap.is_file() and os.access(wrap, os.X_OK):
+                cmd = [str(wrap), *cmd[1:]]
         out = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
         return (out.stdout or out.stderr).strip()
     except Exception as e:  # noqa: BLE001
