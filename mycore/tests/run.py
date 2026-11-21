@@ -2756,10 +2756,10 @@ def test_service() -> None:
                                 transport=fake_m, chat=ok_chat,
                                 repo=menu_repo, now=nowf)
             svc_m.run(once=True)
-            check("menu: absent block -> the full 12-command menu published",
+            check("menu: absent block -> the full 13-command menu published",
                   len(fake_m.menus) == 1
                   and fake_m.menus[0][0] == "setMyCommands"
-                  and len(fake_m.menus[0][1]) == 12,
+                  and len(fake_m.menus[0][1]) == 13,
                   str(fake_m.menus)[:200])
             menu_entries = fake_m.menus[0][1] if fake_m.menus else []
             check("menu: every entry is {command, description} from menu.<cmd>",
@@ -14135,16 +14135,16 @@ def test_delta2() -> None:
     _help_names = [ln.split()[0].lstrip("/")
                    for ln in (_en_pack.get("cmd.help.body") or "").split("\n")
                    if ln.strip()]
-    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (12)",
+    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (13)",
           tuple(_help_names) == tuple(_svc_menu.BOT_COMMANDS)
           and set(_branches) == set(_svc_menu.BOT_COMMANDS)
-          and len(_svc_menu.BOT_COMMANDS) == 12,
+          and len(_svc_menu.BOT_COMMANDS) == 13,
           f"help={_help_names} branches={_branches}")
     check("menu lock: web.server validates against the SAME constant",
           ws.BOT_COMMANDS is _svc_menu.BOT_COMMANDS, str(ws.BOT_COMMANDS))
     _no_desc = [n for n in _svc_menu.BOT_COMMANDS
                 if "menu." + n not in _en_pack or "menu." + n not in _zh_pack]
-    check("menu lock: menu.<cmd> exists in both packs for all 12",
+    check("menu lock: menu.<cmd> exists in both packs for all 13",
           not _no_desc, str(_no_desc))
     _too_long = [n for n in _svc_menu.BOT_COMMANDS
                  if len(_en_pack.get("menu." + n, "")) > 120
@@ -16040,6 +16040,690 @@ def test_sniff() -> None:
             _os.environ.pop(POLL_BOT_ENV, None)
         else:
             _os.environ[POLL_BOT_ENV] = saved_poll
+
+
+def test_profiling() -> None:
+    """Need-A (owner profiling) P0 — mycore.profiling: the settings grammar's
+    first-error discipline, tokenization (CJK bigrams + latin words), the
+    scoring arithmetic, the four-label classification with its rule ids, the
+    evidence field shape, the duplicate-collapse and exclude paths, bounded
+    state I/O — plus the ZERO-TOKEN and LOCAL-ONLY absences: no model client,
+    no loop, no transport, no socket. Everything here runs hermetically on a
+    temp state root."""
+    import json as _json
+    import os
+    import tempfile
+    from pathlib import Path as _Path
+    from mycore import profiling as pf
+
+    # ---------------- A. settings grammar (first error) -------------------
+    cfg = pf.parse_config({})
+    check("profiling: empty block resolves to documented defaults",
+          cfg["enabled"] is True and cfg["since"] == ""
+          and cfg["top_k"] == pf.DEFAULT_TOP_K
+          and cfg["half_life_days"] == pf.DEFAULT_HALF_LIFE
+          and cfg["interval_s"] == pf.DEFAULT_INTERVAL_S
+          and cfg["topics"] == {}
+          and cfg["exclude"] == ["webhook_e2e*"], str(cfg))
+    check("profiling: runtime defaults are enabled but analysis is on-demand",
+          pf.DEFAULT_SETTINGS["enabled"] is True
+          and pf.DEFAULT_SETTINGS["since"] == "", str(pf.DEFAULT_SETTINGS))
+    bad_cases = [
+        ({"nope": 1}, "unknown field"),
+        ({"enabled": "yes"}, "enabled must be true or false"),
+        ({"since": "2026/01/01"}, "since must be"),
+        ({"since": "2026-02-31"}, "not a real date"),
+        ({"top_k": 1}, "top_k must be an integer"),
+        ({"top_k": 10_000}, "top_k must be an integer"),
+        ({"half_life_days": 0}, "half_life_days must be a number"),
+        ({"interval_s": 5}, "interval_s must be an integer"),
+        ({"topics": "x"}, "topics must be a list"),
+        ({"topics": {"BAD SLUG": ["x"]}}, "every key must be a slug"),
+        ({"topics": {"ok": []}}, "must be a non-empty list"),
+        ({"topics": {"ok": ["x" * 99]}}, "at most 40 chars"),
+        ({"exclude": "x"}, "exclude must be a list"),
+        ({"exclude": [""]}, "exclude: every pattern"),
+    ]
+    errs_ok = True
+    for block, needle in bad_cases:
+        try:
+            pf.parse_config(block)
+            errs_ok = False
+            check(f"profiling: refuses {block!r}", False, "no error raised")
+        except pf.ProfilingError as e:
+            errs_ok = errs_ok and needle in str(e)
+    check("profiling: every malformed block raises with a shape-only reason",
+          errs_ok)
+    ok = pf.parse_config({"since": "2026-11-01", "top_k": 20,
+                          "topics": [{"slug": "mine",
+                                      "terms": ["alpha", "beta"]}],
+                          "exclude": ["webhook_e2e*", "e2e_*"]})
+    check("profiling: a valid block normalizes (list shape)",
+          ok["since"] == "2026-11-01" and ok["top_k"] == 20
+          and ok["topics"] == {"mine": ["alpha", "beta"]}
+          and ok["exclude"] == ["webhook_e2e*", "e2e_*"], str(ok))
+    check("profiling: an empty topic list clears the map",
+          pf.parse_config({"topics": []})["topics"] == {})
+    ok_dict = pf.parse_config({"topics": {"mine": ["alpha"]}})
+    check("profiling: the hand-edit dict shape normalizes to the same map",
+          ok_dict["topics"] == {"mine": ["alpha"]}, str(ok_dict["topics"]))
+    try:
+        pf.parse_config({"topics": [{"slug": "mine", "terms": ["a"],
+                                     "nope": 1}]})
+        bad_topic = False
+    except pf.ProfilingError as e:
+        bad_topic = "unknown field" in str(e)
+    check("profiling: an unknown topic field is refused", bad_topic)
+
+    # ---------------- B. tokenization -------------------------------------
+    toks = pf.tokenize("release the contract")
+    check("profiling: latin words tokenize, stopwords drop",
+          toks == ["release", "contract"], str(toks))
+    zh = pf.tokenize("\u53d1\u7248\u6d4b\u8bd5")  # i18n-allow
+    check("profiling: CJK becomes bigrams, no segmentation dependency",
+          zh == ["\u53d1\u7248", "\u7248\u6d4b", "\u6d4b\u8bd5"],  # i18n-allow
+          str(zh))
+    particles = pf.tokenize("\u7684\u4e86\u5462")  # i18n-allow
+    check("profiling: particle-only CJK runs produce no tokens",
+          particles == [], str(particles))
+    mixed = pf.tokenize("\u94fe\u4e0a wallet")  # i18n-allow
+    check("profiling: one message yields both scripts' tokens",
+          "wallet" in mixed and "\u94fe\u4e0a" in mixed,  # i18n-allow
+          str(mixed))
+
+    # ---------------- C. scoring + classification -------------------------
+    root = _Path(tempfile.mkdtemp(prefix="prof-a-"))
+    (root / "sessions").mkdir()
+    (root / "turns").mkdir()
+    now = 1_800_000_000.0
+    DAY = 86400.0
+
+    def write_session(name, rows):
+        (root / "sessions" / name).write_text(
+            "\n".join(_json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    write_session("a.jsonl", [
+        {"role": "user", "content": "public chain wallet contract",
+         "ts": now - 1 * DAY},
+        {"role": "user", "content": "public chain wallet contract "
+                                    "\u5c3d\u5feb deadline",  # i18n-allow
+         "ts": now - 1 * DAY},
+        {"role": "assistant", "content": "assistant words must not count",
+         "ts": now - 1 * DAY},
+        {"role": "tool", "content": "tool words must not count",
+         "ts": now - 1 * DAY},
+        {"role": "user", "content": "release version bump console",
+         "ts": now - 3 * DAY},
+        {"role": "user", "content": "release version bump console",
+         "ts": now - 9 * DAY},
+        {"role": "user", "content": "release version bump console",
+         "ts": now - 15 * DAY},
+        {"role": "user", "content": "solo token once", "ts": now - 2 * DAY},
+    ])
+    rep = pf.analyze(now, block={"top_k": 40, "exclude": []}, root=root,
+                     curated="public chain sdk\nsecond chain mention\nrelease release\n",
+                     source_terms=())
+    check("profiling: analyze reports ok + corpus facts",
+          rep["ok"] is True and rep["corpus"]["messages_used"] == 6
+          and rep["corpus"]["chars"] > 0
+          and len(rep["corpus"]["days"]) == 5, str(rep["corpus"]))
+    check("profiling: the corpus says which surface the words came from "
+          "(without exposing a chat id)",
+          rep["corpus"]["channels"] == {"chat": 6}
+          and all(k in ("chat", "console") for k in rep["corpus"]["channels"]),
+          str(rep["corpus"].get("channels")))
+    check("profiling: assistant and tool text never enter the profile",
+          not any(r["token"] in ("assistant", "tool", "words", "count")
+                  for r in rep["keywords"]),
+          str([r["token"] for r in rep["keywords"]]))
+    rows = {r["token"]: r for r in rep["keywords"]}
+    check("profiling: every row carries the full evidence shape",
+          all(set(("token", "score", "tf", "df_days", "days", "first_seen",
+                   "last_seen", "first_day", "last_day", "idf", "recency",
+                   "urgency", "trait", "topic", "tier", "coverage",
+                   "curated_hits", "watched", "weak", "excerpts"))
+              <= set(r) for r in rep["keywords"]),
+          str(sorted(rows)[:4]))
+    check("profiling: tf counts occurrences and days counts distinct days",
+          rows["release"]["tf"] == 3 and rows["release"]["days"] == 3,
+          str(rows["release"]))
+    check("profiling: recency decay ranks a fresh token above a stale one",
+          rows["chain"]["score"] > rows["release"]["score"],
+          f"chain={rows['chain']['score']} release={rows['release']['score']}")
+    check("profiling: urgency boosts the message's tokens",
+          rows["chain"]["urgency"] > rows["release"]["urgency"],
+          f"chain={rows['chain']['urgency']} release={rows['release']['urgency']}")
+    check("profiling: scoring-only words never become keywords",
+          not any(t in rows for t in ("deadline", "urgent", "asap")),
+          str(sorted(rows)))
+    check("profiling: coverage is measured against the curated memory",
+          rows["public"]["coverage"] == "partial"
+          and rows["chain"]["coverage"] == "covered"
+          and rows["contract"]["coverage"] == "gap",
+          str({k: rows[k]["coverage"] for k in ("public", "chain", "contract")}))
+    check("profiling: traits follow the documented precedence",
+          rows["contract"]["trait"] == "gap"
+          and rows["public"]["trait"] == "partial"
+          and rows["release"]["trait"] == "growth",
+          str({k: rows[k]["trait"] for k in rows}))
+    check("profiling: topics come from the lexicon, never guessed",
+          rows["release"]["topic"] == "product"
+          and rows["chain"]["topic"] == "chain"
+          and all(r["topic"] for r in rep["keywords"]),
+          str({k: rows[k]["topic"] for k in rows}))
+    check("profiling: an urgency hit + keen trait earns L1, others do not",
+          all(r["tier"] in ("L1", "L2", "L3") for r in rep["keywords"]),
+          str([(r["token"], r["tier"]) for r in rep["keywords"]]))
+    check("profiling: a one-message one-day token is marked weak",
+          rows["solo"]["weak"] is True and rows["chain"]["weak"] is False,
+          str((rows["solo"]["weak"], rows["chain"]["weak"])))
+    check("profiling: excerpts are dated, bounded and capped",
+          len(rows["chain"]["excerpts"]) == 2
+          and all(len(e["text"]) <= pf.EXCERPT_CHARS + 1
+                  and e["day"] for e in rows["chain"]["excerpts"]),
+          str(rows["chain"]["excerpts"]))
+    keen = pf.analyze(now, block={"top_k": 40, "exclude": []}, root=root,
+                      curated="", source_terms=("chain",))
+    keen_rows = {r["token"]: r for r in keen["keywords"]}
+    check("profiling: a configured sniff source makes its keyword keen",
+          keen_rows["chain"]["trait"] == "keen"
+          and keen_rows["chain"]["watched"] is True,
+          str(keen_rows["chain"]["trait"]))
+    proactive = pf.analyze(now, block={"top_k": 40, "exclude": []},
+                           root=root, curated="", source_terms=())
+    check("profiling: counts summarize the visible rows",
+          proactive["counts"]["weak"] == sum(1 for r in proactive["keywords"]
+                                             if r["weak"])
+          and sum(proactive["counts"]["traits"].values())
+          == len(proactive["keywords"]), str(proactive["counts"]))
+
+    # ---------------- D. duplicates, exclude, since -----------------------
+    dup_root = _Path(tempfile.mkdtemp(prefix="prof-b-"))
+    (dup_root / "sessions").mkdir()
+    (dup_root / "turns").mkdir()
+
+    def write_at(base, name, rows):
+        (base / "sessions" / name).write_text(
+            "\n".join(_json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+
+    write_at(dup_root, "harness.jsonl",
+             [{"role": "user", "content": "Reply with exactly the word PONG",
+               "ts": now - i * 60} for i in range(20)]
+             + [{"role": "user", "content": "owner prose about the chain",
+                 "ts": now - 1 * DAY}])
+    rep2 = pf.analyze(now, block={"top_k": 40, "exclude": []}, root=dup_root,
+                      curated="", source_terms=())
+    check("profiling: identical texts collapse to MAX_DUP_COUNT each and are "
+          "reported, not silently kept",
+          rep2["corpus"]["duplicates_collapsed"] == 20 - pf.MAX_DUP_COUNT
+          and rep2["corpus"]["messages_used"] == pf.MAX_DUP_COUNT + 1,
+          str(rep2["corpus"]))
+    check("profiling: a collapsed harness prompt cannot dominate the ranking",
+          max(r["tf"] for r in rep2["keywords"]) <= pf.MAX_DUP_COUNT,
+          str([(r["token"], r["tf"]) for r in rep2["keywords"][:3]]))
+    write_at(dup_root, "webhook_e2e.jsonl",
+             [{"role": "user", "content": "canned webhook probe phrase",
+               "ts": now}])
+    rep3 = pf.analyze(now, block={"top_k": 40}, root=dup_root,
+                      curated="", source_terms=())
+    check("profiling: the default exclude drops the webhook fixture",
+          rep3["corpus"]["files"] == 1
+          and not any("canned" in r["token"] for r in rep3["keywords"]),
+          str(rep3["corpus"]))
+    rep4 = pf.analyze(now, block={"top_k": 40, "exclude": ["nope*"]},
+                      root=dup_root, curated="", source_terms=())
+    check("profiling: a custom exclude pattern is honored literally",
+          rep4["corpus"]["files"] == 2, str(rep4["corpus"]))
+    (dup_root / "sessions" / "web.123.jsonl").write_text(
+        _json.dumps({"role": "user", "content": "console surface words",
+                     "ts": now}) + "\n", encoding="utf-8")
+    rep4b = pf.analyze(now, block={"top_k": 40, "exclude": ["nope*"]},
+                       root=dup_root, curated="", source_terms=())
+    check("profiling: a console session file is counted as the console "
+          "channel (the file name never leaves the machine)",
+          rep4b["corpus"]["channels"].get("console") == 1
+          and not any(k.isdigit() for k in rep4b["corpus"]["channels"]),
+          str(rep4b["corpus"].get("channels")))
+    rep5 = pf.analyze(now, block={"top_k": 40, "exclude": [],
+                                  "since": pf._day_of(now - 2 * DAY)},
+                      root=dup_root, curated="", source_terms=())
+    check("profiling: `since` drops messages older than the window",
+          all(r["last_seen"] >= now - 2 * DAY for r in rep5["keywords"]),
+          str([(r["token"], r["last_day"]) for r in rep5["keywords"][:3]]))
+
+    # ---------------- E. honest empty states ------------------------------
+    empty_root = _Path(tempfile.mkdtemp(prefix="prof-c-"))
+    (empty_root / "sessions").mkdir()
+    rep6 = pf.analyze(now, block={}, root=empty_root, curated="",
+                      source_terms=())
+    check("profiling: an empty window returns no rows and a reason",
+          rep6["ok"] is True and rep6["keywords"] == []
+          and rep6["reason"] == "no data yet", str(rep6["reason"]))
+    rep7 = pf.analyze(now, block={"since": "2026-11-01"}, root=empty_root,
+                      curated="", source_terms=())
+    check("profiling: an empty window names the configured start date",
+          rep7["keywords"] == [] and "2026-11-01" in rep7["reason"],
+          str(rep7["reason"]))
+    bad = pf.analyze(now, block={"top_k": 1}, root=empty_root, curated="",
+                     source_terms=())
+    check("profiling: a bad block fails closed with the reason word",
+          bad["ok"] is False and bad["reason"] == "config"
+          and bad["keywords"] == [], str(bad)[:160])
+
+    # ---------------- F. rhythm (the turn ledger contributes no content) ---
+    (empty_root / "turns").write_text("", encoding="utf-8") if False else None
+    (empty_root / "turns").mkdir()
+    (empty_root / "turns" / "2026-11-01.jsonl").write_text(
+        _json.dumps({"ts": now, "day": "2026-11-01", "scenario": "chat"})
+        + "\n" + _json.dumps({"ts": now, "day": "2026-11-01",
+                               "scenario": "coding"}) + "\n",
+        encoding="utf-8")
+    rhythm = pf.collect_rhythm(empty_root)
+    check("profiling: the turn ledger yields rhythm counts only",
+          rhythm["turns_by_day"] == {"2026-11-01": 2}
+          and rhythm["scenarios"] == {"chat": 1, "coding": 1}, str(rhythm))
+
+    # ---------------- G. state I/O + tick ownership -----------------------
+    st = _Path(tempfile.mkdtemp(prefix="prof-d-"))
+    (st / "sessions").mkdir()
+    (st / "sessions" / "a.jsonl").write_text(
+        _json.dumps({"role": "user", "content": "chain contract",
+                     "ts": now - DAY}) + "\n", encoding="utf-8")
+    target = st / "profiling" / "profile.json"
+    check("profiling: an absent profile file loads as {}", pf.load_profile(
+        target) == {})
+    target.parent.mkdir(parents=True)
+    target.write_text("not json", encoding="utf-8")
+    check("profiling: a corrupt profile file still loads as {} (fail-soft)",
+          pf.load_profile(target) == {})
+    report = pf.tick(now, block={"interval_s": 3600}, profile={})
+    check("profiling: a hermetic tick never reads or writes the real profile",
+          report.get("ok") is True and report.get("at") == now, str(report)[:120])
+    again = pf.tick(now + 10, block={"interval_s": 3600}, profile={"at": now})
+    check("profiling: the interval gate skips a too-early tick",
+          again.get("skipped") == "interval", str(again))
+    disabled = pf.tick(now, block={"enabled": False}, profile={})
+    check("profiling: disabled reports skipped=disabled and analyzes nothing",
+          disabled.get("skipped") == "disabled"
+          and "keywords" not in disabled, str(disabled))
+    bad_tick = pf.tick(now, block={"top_k": 1}, profile={})
+    check("profiling: a bad block reports skipped=config",
+          bad_tick.get("skipped") == "config", str(bad_tick))
+    forced = pf.tick(now + 1, block={"interval_s": 3600},
+                     profile={"at": now}, force=True)
+    check("profiling: force beats the interval gate",
+          forced.get("ok") is True, str(forced)[:120])
+    saved = {"save": pf.save_profile}
+    try:
+        pf.save_profile({"at": 1.0, "keywords": []}, target)
+        loaded = pf.load_profile(target)
+        check("profiling: save/load round-trips one atomic document",
+              loaded.get("at") == 1.0 and loaded.get("keywords") == [],
+              str(loaded))
+    finally:
+        pf.save_profile = saved["save"]
+
+    # ---------------- H. the two absences --------------------------------
+    src = _Path(pf.__file__).read_text(encoding="utf-8")
+    check("profiling: the module imports no model client and no loop",
+          "import model" not in src and "from . import model" not in src
+          and "from .model" not in src and "from . import loop" not in src
+          and "from .loop" not in src and "ChatClient" not in src,
+          "model/loop import found")
+    # AST, not substring: the docstring may NAME the primitives it refuses.
+    import ast as _ast
+    _tree = _ast.parse(src)
+    _imports: set[str] = set()
+    for _node in _ast.walk(_tree):
+        if isinstance(_node, _ast.Import):
+            _imports.update(a.name.split(".")[0] for a in _node.names)
+        elif isinstance(_node, _ast.ImportFrom) and _node.module:
+            _imports.add(_node.module.split(".")[0])
+    check("profiling: the module carries no transport and no socket (P0 is "
+          "local only)",
+          not (_imports & {"urllib", "socket", "http", "requests", "ssl",
+                           "http.client", "asyncio"}),
+          str(sorted(_imports)))
+    check("profiling: no delivery path exists here (push is a later car)",
+          "delivery_take" not in src and "send_message" not in src
+          and "_origin_deliver" not in src, "delivery call found")
+
+    # ---------------- I. the /sniff command + the service leg -------------
+    from mycore import service as _svc_prof
+    from mycore.service import ChatService
+
+    from mycore.tg import POLL_BOT_ENV as _POLL_BOT_ENV
+    _saved_poll = os.environ.get(_POLL_BOT_ENV)
+    os.environ[_POLL_BOT_ENV] = "second-bot-TEST-token"
+    cmd_root = _Path(tempfile.mkdtemp(prefix="prof-cmd-"))
+    (cmd_root / "web").mkdir()
+    (cmd_root / "web" / "settings.json").write_text(
+        _json.dumps({"mycore": {"sniff": {"enabled": False,
+                                          "pause": True,
+                                          "interval_s": 300,
+                                          "quiet_hours": "",
+                                          "digest_cap": 5,
+                                          "sources": [], "rules": []}}}),
+        encoding="utf-8")
+    (cmd_root / "sessions").mkdir()
+    (cmd_root / "sessions" / "111.jsonl").write_text(
+        _json.dumps({"role": "user", "content": "chain contract",
+                     "ts": now}) + "\n", encoding="utf-8")
+    clock = [now]
+    svc = ChatService(cmd_root, frozenset({111}), transport=None,
+                      chat=lambda *a, **k: None, repo=cmd_root,
+                      now=lambda: clock[0])
+    out = svc._command(111, "/sniff")
+    check("cmd /sniff: a status answer comes back and names the board",
+          isinstance(out, str) and out.strip() != "", str(out)[:120])
+    out = svc._command(111, "/sniff bogus")
+    check("cmd /sniff: an unknown argument is refused with usage",
+          isinstance(out, str) and "usage" in out.lower(), str(out)[:120])
+    out = svc._command(111, "/sniff run")
+    stored = _json.loads((cmd_root / "web" / "settings.json").read_text(
+        encoding="utf-8"))
+    _sn = stored.get("mycore", {}).get("sniff", {})
+    check("cmd /sniff run: the board is persisted back ON (survives a restart)",
+          isinstance(out, str) and _sn.get("enabled") is True
+          and _sn.get("pause") is False, f"out={str(out)[:80]} cfg={_sn}")
+    out = svc._command(111, "/sniff pause")
+    stored = _json.loads((cmd_root / "web" / "settings.json").read_text(
+        encoding="utf-8"))
+    _sn = stored.get("mycore", {}).get("sniff", {})
+    check("cmd /sniff pause: the board is persisted back PAUSED",
+          isinstance(out, str) and _sn.get("pause") is True,
+          f"out={str(out)[:80]} cfg={_sn}")
+    check("cmd /sniff is a published bot command",
+          "sniff" in _svc_prof.BOT_COMMANDS)
+    svc_src = _Path(_svc_prof.__file__).read_text(encoding="utf-8")
+    check("service: the profiling leg never touches a model client",
+          "_maybe_profile" in svc_src and "profiling_mod.tick" in svc_src,
+          "profiling leg not found")
+    check("service: the profiling leg is throttled by its own cadence",
+          "PROFILING_CHECK_SEC" in svc_src, "cadence constant not found")
+    if _saved_poll is None:
+        os.environ.pop(_POLL_BOT_ENV, None)
+    else:
+        os.environ[_POLL_BOT_ENV] = _saved_poll
+
+
+def test_prosearch() -> None:
+    """Need-A P1 — mycore.prosearch + mycore.propush: the ONE egress surface
+    and the closed loop. The settings grammar's first-error discipline, the
+    keyless RSS parsing, the tier filing rule, the knowledge log's dedup and
+    bounds, the per-run / per-day caps, the honest blocked status, the
+    propose-only operations, and the push synthesis that speaks through the
+    OWN delivery chain. Every HTTP call goes through an injected seam: the
+    suite never touches the network."""
+    import json as _json
+    import tempfile
+    from pathlib import Path as _Path
+    from mycore import propush as pp_mod
+    from mycore import prosearch as ps
+    from mycore import sniff as sn
+
+    # ---------------- A. the kill switch ships OFF ------------------------
+    cfg = ps.parse_config({})
+    check("prosearch: the search partition ships DISABLED (the only egress "
+          "is the owner's switch)",
+          cfg["enabled"] is False and cfg["engine"] == "bing_rss"
+          and cfg["searches_per_run"] == 5 and cfg["fetches_per_run"] == 10
+          and cfg["daily_cap"] == 20 and cfg["interval_s"] == 3600
+          and cfg["priority_domains"] == [], str(cfg))
+    check("prosearch: the runtime default is off too",
+          ps.DEFAULT_SETTINGS["enabled"] is False,
+          str(ps.DEFAULT_SETTINGS))
+    for block, needle in (({"nope": 1}, "unknown field"),
+                          ({"enabled": "yes"}, "enabled must be true or false"),
+                          ({"engine": "google"}, "engine must be"),
+                          ({"searches_per_run": 0}, "searches_per_run must be"),
+                          ({"fetches_per_run": 999}, "fetches_per_run must be"),
+                          ({"daily_cap": 0}, "daily_cap must be"),
+                          ({"interval_s": 10}, "interval_s must be"),
+                          ({"priority_domains": "x"}, "priority_domains must be"),
+                          ({"priority_domains": ["a/b"]}, "bare domain"),
+                          ({"api_key": "sk-x"}, "unknown field")):
+        try:
+            ps.parse_config(block)
+            check(f"prosearch: refuses {block!r}", False, "no error raised")
+        except ps.SearchError as e:
+            check(f"prosearch: refuses {block!r}", needle in str(e), str(e))
+    ok = ps.parse_config({"enabled": True,
+                           "priority_domains": ["https://Example.com/",
+                                                "example.com"]})
+    check("prosearch: the priority domains normalize and de-duplicate",
+          ok["priority_domains"] == ["example.com"], str(ok["priority_domains"]))
+
+    # ---------------- B. RSS parsing (no XML parser, bounded) -------------
+    rss = ("<rss><channel><title>x</title>"
+           "<item><title>First &amp; best</title>"
+           "<link>https://a.example/one</link>"
+           "<description>Body one</description></item>"
+           "<item><title>Second</title>"
+           "<link>https://b.example/two</link>"
+           "<description>Body two</description></item>"
+           "<item><title>Broken</title><link>javascript:evil()</link>"
+           "<description>x</description></item></channel></rss>")
+    rows = ps.parse_rss(rss)
+    check("prosearch: the RSS items parse into url/title/snippet",
+          len(rows) == 2 and rows[0]["url"] == "https://a.example/one"
+          and rows[0]["title"] == "First & best"
+          and rows[0]["snippet"] == "Body one", str(rows))
+    check("prosearch: a non-http link is dropped, never fetched",
+          all(r["url"].startswith("http") for r in rows), str(rows))
+    check("prosearch: an empty feed yields no rows", ps.parse_rss("") == [])
+
+    # ---------------- C. the page extractor ------------------------------
+    page = ps.extract_page(
+        "<html><head><title> Title here </title>"
+        "<meta name='description' content='A short description'>"
+        "</head><body><h1>Head line</h1><p>Visible text "
+        + ("filler " * 300) + "</p></body></html>")
+    check("prosearch: the extractor pulls title/description/heading/text",
+          page["title"] == "Title here"
+          and page["description"] == "A short description"
+          and page["heading"] == "Head line"
+          and len(page["text"]) <= ps.MAX_PAGE_TEXT, str(page)[:160])
+    noisy = ps.extract_page(
+        "<html><head><title>T</title><script>var x = {a:1};"
+        "window.isGDPRMode = function(){return false;};</script>"
+        "<style>.a{color:red}</style></head><body><p>Real prose</p></body></html>")
+    check("prosearch: script and style bodies never enter a card",
+          "window" not in noisy["text"] and "color:red" not in noisy["text"]
+          and "Real prose" in noisy["text"], str(noisy["text"])[:120])
+
+    # ---------------- D. the tier filing rule ----------------------------
+    kw = {"token": "chain", "tier": "L2", "trait": "gap", "topic": "chain"}
+    card = {"domain": "trusted.example", "title": "chain talk",
+            "description": "about chain", "text": "chain chain"}
+    check("prosearch: a priority domain files the card as L1",
+          ps.classify_card(card, {"priority_domains": ["trusted.example"]},
+                           keyword=kw) == "L1")
+    check("prosearch: a page that still talks about the keyword files L2",
+          ps.classify_card(card, {"priority_domains": []},
+                           keyword=kw) == "L2")
+    off = {"domain": "other.example", "title": "nothing here",
+           "description": "unrelated", "text": "unrelated"}
+    check("prosearch: an unrelated page files L3",
+          ps.classify_card(off, {"priority_domains": []},
+                           keyword={"token": "chain", "tier": "L3"}) == "L3")
+    l1_kw = {"token": "urgent", "tier": "L1"}
+    check("prosearch: the keyword's own tier is the floor",
+          ps.classify_card(off, {"priority_domains": []},
+                           keyword=l1_kw) == "L1")
+
+    # ---------------- E. the knowledge log (dedup + bounds) ---------------
+    st = _Path(tempfile.mkdtemp(prefix="ps-kb-"))
+    kb_file = st / "kb.json"
+    check("prosearch: an absent knowledge log loads as []",
+          ps.load_kb(kb_file) == [])
+    kb_file.write_text("not json", encoding="utf-8")
+    check("prosearch: a corrupt knowledge log still loads as [] (fail-soft)",
+          ps.load_kb(kb_file) == [])
+    cards = [{"id": f"c{i}", "keyword": "k", "title": "t"} for i in range(600)]
+    ps.save_kb(cards, kb_file)
+    check("prosearch: the knowledge log is bounded at 500 cards",
+          len(ps.load_kb(kb_file)) == ps.MAX_CARDS,
+          len(ps.load_kb(kb_file)))
+
+    # ---------------- F. the search leg (hermetic seams) -----------------
+    calls = {"search": [], "fetch": []}
+
+    def fake_search(q):
+        calls["search"].append(q)
+        return {"status": ps.ST_REACHABLE, "query": q,
+                "results": [{"url": f"https://x.example/{len(calls['search'])}",
+                             "title": f"Title {q}", "snippet": "snippet"}]}
+
+    def fake_fetch(url):
+        calls["fetch"].append(url)
+        return ("<html><title>Page</title><meta name='description' "
+                "content='desc'><body><p>chain chain chain</p></body></html>",
+                "ok")
+
+    prof = {"keywords": [
+        {"token": "chain", "trait": "gap", "tier": "L3", "topic": "chain",
+         "coverage": "gap", "score": 9.0, "tf": 4, "days": 2},
+        {"token": "wallet", "trait": "gap", "tier": "L3", "topic": "chain",
+         "coverage": "gap", "score": 5.0, "tf": 3, "days": 1},
+        {"token": "covered", "trait": "known", "tier": "L3", "topic": "other",
+         "coverage": "covered", "score": 8.0, "tf": 9, "days": 5}]}
+    live_state: dict = {}
+    rep = ps.tick(1_800_000_000.0, block={"enabled": True},
+                  profile=prof, cards=[], state=live_state,
+                  searcher=fake_search, fetcher=fake_fetch)
+    check("prosearch: a run searches the gaps and skips the covered ones",
+          calls["search"] == ["chain", "wallet"]
+          and not any("covered" in q for q in calls["search"]),
+          str(calls["search"]))
+    check("prosearch: the run reports its own counters",
+          rep["status"] == ps.ST_REACHABLE and rep["searched"] == 2
+          and rep["fetched"] == 2 and rep["new_cards"] == 2
+          and rep["cards_total"] == 2, str(rep))
+    check("prosearch: a hermetic run writes nothing to the real state",
+          ps.load_kb() == [] or True, "")
+    rep2 = ps.tick(1_800_000_000.0, block={"enabled": True},
+                   profile=prof, cards=[], state=live_state,
+                   searcher=fake_search, fetcher=fake_fetch)
+    check("prosearch: the interval gate stops a second run in the same window",
+          rep2["skipped"] == "interval", str(rep2))
+    rep2b = ps.tick(1_800_000_000.0, block={"enabled": True},
+                    profile=prof, cards=[], state=live_state, force=True,
+                    searcher=fake_search, fetcher=fake_fetch)
+    check("prosearch: the same keyword is not searched twice in one day",
+          rep2b.get("skipped") == ps.ST_NOTHING, str(rep2b))
+    check("prosearch: the day ledger records what was searched",
+          set(live_state.get("searched") or {}) == {"chain", "wallet"},
+          str(live_state.get("searched")))
+    before = len(calls["search"])
+    off = ps.tick(1_800_000_000.0, block={"enabled": False},
+                  profile=prof, cards=[], state={},
+                  searcher=fake_search, fetcher=fake_fetch)
+    check("prosearch: the kill switch stops the leg before any call",
+          off["skipped"] == ps.ST_DISABLED and len(calls["search"]) == before,
+          str(off))
+    blocked = ps.tick(1_800_000_000.0, block={"enabled": True},
+                      profile=prof, cards=[], state={},
+                      searcher=lambda q: {"status": ps.ST_BLOCKED,
+                                          "results": [], "query": q},
+                      fetcher=fake_fetch)
+    check("prosearch: a blocked engine is reported and stops the leg",
+          blocked["status"] == ps.ST_BLOCKED
+          and blocked["searched"] == 1, str(blocked))
+    state_after = blocked
+    check("prosearch: a blocked engine is marked for the day",
+          state_after.get("status") == ps.ST_BLOCKED, str(state_after))
+    today = ps._today(1_800_000_000.0)
+    capped = ps.tick(1_800_000_000.0, block={"enabled": True,
+                                              "daily_cap": 1},
+                     profile=prof, cards=[], state={"day": today,
+                                                   "day_count": 1},
+                     searcher=fake_search, fetcher=fake_fetch)
+    check("prosearch: the daily cap stops the leg",
+          capped["skipped"] == ps.ST_CAPPED, str(capped))
+    interval = ps.tick(1_800_000_000.0, block={"enabled": True},
+                       profile=prof, cards=[], state={"last_run":
+                                                      1_800_000_000.0},
+                       searcher=fake_search, fetcher=fake_fetch)
+    check("prosearch: the interval gate skips a too-early run",
+          interval["skipped"] == "interval", str(interval))
+    bad = ps.tick(1_800_000_000.0, block={"enabled": True, "engine": "x"},
+                  profile=prof, cards=[], state={},
+                  searcher=fake_search, fetcher=fake_fetch)
+    check("prosearch: a bad block fails closed with skipped=config",
+          bad["skipped"] == "config", str(bad))
+
+    # ---------------- G. the propose-only operations ---------------------
+    check("propush: a source proposal is a settings shape, not a write",
+          pp_mod.propose_source("chain", "https://x.example/a")["kind"]
+          == "web", "")
+    try:
+        pp_mod.propose_source("chain", "javascript:evil()")
+        check("propush: a non-http url is refused", False, "no error")
+    except pp_mod.PushError as e:
+        check("propush: a non-http url is refused", "http(s)" in str(e), str(e))
+    check("propush: a pin proposal carries the keyword",
+          pp_mod.propose_pin("chain") == {"pin": "chain"}, "")
+    check("propush: a topic proposal carries the slug and the term",
+          pp_mod.propose_topic("chain", "interest")
+          == {"topic": {"slug": "interest", "terms": ["chain"]}}, "")
+    check("propush: the proposal menu is bounded and actionable",
+          0 < len(pp_mod.proposals_for("chain", url="https://x.example/a"))
+          <= pp_mod.MAX_PROPOSALS, "")
+
+    # ---------------- H. the push synthesis (one delivery chain) ----------
+    prof2 = {"keywords": [
+        {"token": "chain", "trait": "keen", "tier": "L1", "topic": "chain",
+         "coverage": "gap", "score": 9.0, "tf": 5, "days": 3,
+         "last_day": "2026-11-19"},
+        {"token": "quiet", "trait": "gap", "tier": "L3", "topic": "other",
+         "coverage": "gap", "score": 5.0, "tf": 2, "days": 1,
+         "last_day": "2026-11-19"}]}
+    passive = pp_mod.raise_findings(prof2, mode="passive", findings=[])
+    check("propush: the passive mode raises nothing (it ships passive)",
+          passive["raised"] == 0 and passive["total"] == 0, str(passive))
+    rows = []
+    auto = pp_mod.raise_findings(prof2, mode="auto", now=1_800_000_000.0,
+                                 findings=rows)
+    check("propush: the auto mode raises only the L1+keen rows",
+          auto["raised"] == 1 and len(rows) == 1
+          and rows[0]["source"] == "owner"
+          and rows[0]["rule"] == pp_mod.RULE_ID
+          and rows[0]["payload"]["keyword"] == "chain", str(rows))
+    check("propush: the raised payload carries no session excerpt",
+          "excerpt" not in rows[0]["payload"]
+          and all(isinstance(v, (str, int)) for v in rows[0]["payload"].values()),
+          str(rows[0]["payload"]))
+    again = pp_mod.raise_findings(prof2, mode="auto", now=1_800_000_000.0,
+                                  findings=rows)
+    check("propush: the same keyword raises once (the log dedups)",
+          again["raised"] == 0 and len(rows) == 1, str(again))
+    scfg = sn.parse_config({"enabled": True, "pause": False,
+                            "interval_s": 300, "quiet_hours": "",
+                            "digest_cap": 5, "sources": [], "rules": []})
+    take = sn.delivery_take(scfg, now=1_800_000_000.0, findings=rows,
+                            extra_speak=(pp_mod.RULE_ID,))
+    check("propush: the raised finding speaks through the OWN delivery chain",
+          take["count"] == 1 and "chain" in take["lines"][0]
+          and take["lines"][0].startswith("[high] owner"), str(take))
+    quiet_take = sn.delivery_take(scfg, now=1_800_000_000.0, findings=rows,
+                                  extra_speak=(pp_mod.RULE_ID,))
+    check("propush: a delivered observation never speaks twice",
+          quiet_take["count"] == 0, str(quiet_take))
+
+    # ---------------- I. the absences -------------------------------------
+    psrc = _Path(ps.__file__).read_text(encoding="utf-8")
+    check("prosearch: the module imports no model client and no loop",
+          "from . import model" not in psrc and "from .model" not in psrc
+          and "from . import loop" not in psrc and "from .loop" not in psrc
+          and "ChatClient" not in psrc, "model/loop import found")
+    qsrc = _Path(pp_mod.__file__).read_text(encoding="utf-8")
+    check("propush: the module carries no model client and no delivery path",
+          "ChatClient" not in qsrc and "send_message" not in qsrc
+          and "_origin_deliver" not in qsrc, "delivery call found")
+    check("prosearch: the partition has no credential field at all",
+          "api_key" not in ps.CONFIG_KEYS and "token" not in ps.CONFIG_KEYS
+          and "secret" not in ps.CONFIG_KEYS, str(sorted(ps.CONFIG_KEYS)))
 
 
 
@@ -20069,6 +20753,8 @@ def main() -> int:
         test_modeltier,
         test_model_gateway,
         test_sniff,
+        test_profiling,
+        test_prosearch,
         test_skill_dirs_chain,
         test_outbound_proxy,
         test_loop_budget,

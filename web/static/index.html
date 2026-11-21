@@ -1315,6 +1315,48 @@
         </section>
       </div>
 
+      <!-- OWNER ANALYSIS (need-A): the owner's own words, scored locally.
+           Every row carries its evidence; nothing here speaks and nothing
+           leaves the machine. -->
+      <section class="card">
+        <h2><span data-i18n="sec.sniffOwner">OWNER ANALYSIS</span>
+            <span class="chat-badge" id="profKeywordCount">–</span></h2>
+        <div class="ctl-row">
+          <button class="btn primary" id="profAnalyze" type="button"
+                  data-i18n="prof.analyze">ANALYZE NOW</button>
+          <span class="sniff-ro" id="profSince">–</span>
+          <span class="save-state" id="profNote" role="status"></span>
+        </div>
+        <div class="stat-note" id="profCorpus" hidden></div>
+        <div class="sniff-seg" role="tablist">
+          <button class="sniff-seg-btn is-active" type="button"
+                  data-prof-seg="keywords" data-i18n="prof.keywords">KEYWORDS</button>
+          <button class="sniff-seg-btn" type="button"
+                  data-prof-seg="dims" data-i18n="prof.dimensions">DIMENSIONS</button>
+          <button class="sniff-seg-btn" type="button"
+                  data-prof-seg="gaps" data-i18n="prof.segGaps">GAPS</button>
+          <button class="sniff-seg-btn" type="button"
+                  data-prof-seg="know" data-i18n="prof.segKnow">KNOWLEDGE</button>
+        </div>
+        <div id="profKeywords"></div>
+        <div id="profDims" hidden></div>
+        <div id="profGaps" hidden></div>
+        <div id="profKnow" hidden></div>
+        <div class="prof-ctl">
+          <span class="ctl-row-label" data-i18n="prof.search">SEARCH</span>
+          <button class="btn" id="profSearchToggle" type="button"
+                  aria-pressed="false">—</button>
+          <button class="btn" id="profSearchRun" type="button"
+                  data-i18n="prof.runSearch">SEARCH NOW</button>
+          <span class="ctl-row-label" data-i18n="prof.push">PUSH</span>
+          <button class="btn" id="profPushToggle" type="button"
+                  aria-pressed="false">—</button>
+          <span class="save-state" id="profCtlMsg" role="status"></span>
+        </div>
+        <div class="stat-note" data-i18n="prof.tierHint">the tier rule</div>
+        <div class="stat-note" data-i18n="prof.local">local only · zero model tokens</div>
+      </section>
+
       <section class="card">
         <h2 data-i18n="sec.sniffControls">CONTROLS</h2>
         <div class="ctl-row">

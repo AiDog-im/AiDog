@@ -394,7 +394,9 @@ sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
 from lib import skill_route  # noqa: E402  (car H §3.2: gallery roots follow the router's ladder)
-from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, ledger, mission, mcp, modeltier, pipeline, security, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
+from mycore import (bridge, checkpoint, cli, decision, evolution, hooks, leash,  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ profiling grammar/ search + push grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
+                    ledger, mission, mcp, modeltier, pipeline, profiling, propush,
+                    prosearch, security, sniff, terminal)  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ profiling grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore import secrets_store  # noqa: E402  (E2: secrets.env at-rest state)
 from mycore.assembly import (build_system_stack,  # noqa: E402
@@ -687,6 +689,18 @@ DEFAULT_SETTINGS: dict = {
     # without an absence check. Shipped OFF: the kill switch is the default, and
     # `physical_address` must be filled before any message may be sent.
     "pipeline": dict(pipeline.DEFAULT_SETTINGS),
+    # Need-A (owner profiling): a copy of mycore.profiling.DEFAULT_SETTINGS —
+    # that constant stays the source of truth. The block is always present so
+    # the SENSE view renders the OWNER ANALYSIS section without an absence
+    # check. Analysis is local-only and spends no model tokens; P0 reads
+    # nothing and writes nothing on its own.
+    "profiling": dict(profiling.DEFAULT_SETTINGS),
+    # Need-A P1: the outer-web search partition (the feature's ONLY egress).
+    # A copy of mycore.prosearch.DEFAULT_SETTINGS — that constant stays the
+    # source of truth. It ships DISABLED: the owner flips the switch in the
+    # SENSE view, because a keyword query is the only thing that leaves the
+    # machine.
+    "search": dict(prosearch.DEFAULT_SETTINGS),
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
@@ -702,7 +716,8 @@ MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
                "max_tpm", "sniff", "decision", "subagent", "timeout",
-               "max_tokens", "run_deadline", "allowed_roots")
+               "max_tokens", "run_deadline", "allowed_roots", "profiling",
+               "search")
 # Pipeline car: the six writable fields of the acquisition-pipeline controls
 # card (mycore.pipeline.py owns the bounds; this tuple owns the field set).
 PIPELINE_KEYS = ("enabled", "auto_source", "interval_min", "daily_cap",
@@ -1915,6 +1930,35 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         sniff.parse_config(val)
                     except sniff.SniffError as e:
                         errors.append(f"mycore.sniff: {e}")
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "search":
+                    # Need-A P1: the outer-web search partition. Grammar
+                    # lives in mycore.prosearch.parse_config (first error,
+                    # shape-only: the partition has NO credential field at
+                    # all, so a value-shaped field is an unknown field).
+                    if not isinstance(val, dict):
+                        errors.append("mycore.search must be an object")
+                        continue
+                    try:
+                        prosearch.parse_config(val)
+                    except prosearch.SearchError as e:
+                        errors.append(str(e))
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "profiling":
+                    # Need-A: the owner-profiling partition. Grammar lives in
+                    # mycore.profiling.parse_config (first error, shape-only:
+                    # the block holds no credential at all).
+                    if not isinstance(val, dict):
+                        errors.append("mycore.profiling must be an object")
+                        continue
+                    try:
+                        profiling.parse_config(val)
+                    except profiling.ProfilingError as e:
+                        errors.append(str(e))
                         continue
                     clean_mc[key] = val
                     continue
@@ -5991,6 +6035,7 @@ def collect_mission_detail(mid: str) -> tuple[dict, int]:
 # local state, POST runs a read-only sweep or marks a finding acknowledged.
 # mycore.sniff has no actuation code path at all (asserted in core tests).
 SNIFF_FINDINGS_PAGE = 50
+PROFILING_PAGE = 200
 
 
 def collect_bridge_status() -> dict:
@@ -6015,6 +6060,113 @@ def collect_bridge_status() -> dict:
         "audit_file": bridge.audit_file().name,
         "template": "/api/bridge/template",
         "readme": "/api/bridge/template?file=readme",
+    }
+
+
+def _profiling_brief(report: dict) -> dict:
+    """One run's summary for the POST answer: counters and the honest reason,
+    never the rows (the caller already gets the whole read model)."""
+    if not isinstance(report, dict):
+        return {}
+    corpus = report.get("corpus") if isinstance(report.get("corpus"), dict) \
+        else {}
+    return {
+        "skipped": str(report.get("skipped") or ""),
+        "ok": report.get("ok") is True,
+        "reason": str(report.get("reason") or ""),
+        "error": str(report.get("error") or "")[:160],
+        "keywords": len(report.get("keywords") or []),
+        "messages_used": int(corpus.get("messages_used") or 0),
+        "days": len(corpus.get("days") or []),
+        "truncated": report.get("truncated") is True,
+    }
+
+
+def collect_profiling() -> dict:
+    """GET /api/profiling — the OWNER ANALYSIS read model (loopback, no auth,
+    same contract as GET /api/sniff / /api/pipeline).
+
+    Config comes from settings (a hand-edited bad partition fails closed to an
+    honest `config_error`), the analysis rows come from the stored profile
+    document. Nothing here analyzes: this is a read of what the last run
+    found, so opening the view never spends CPU or tokens."""
+    try:
+        cfg = profiling.parse_config(profiling.settings_block())
+        config_error = ""
+    except profiling.ProfilingError as e:
+        cfg = profiling.parse_config({})
+        config_error = str(e)[:160]
+    doc = profiling.load_profile()
+    keywords = doc.get("keywords") if isinstance(doc.get("keywords"), list) \
+        else []
+    corpus = doc.get("corpus") if isinstance(doc.get("corpus"), dict) else {}
+    stored_cfg = doc.get("config") if isinstance(doc.get("config"), dict) else {}
+    analyzed_since = str(stored_cfg.get("since") or "")
+    cards = prosearch.load_kb()
+    cards.sort(key=lambda c: float(c.get("fetched_at") or 0.0), reverse=True)
+    try:
+        scfg = prosearch.parse_config(prosearch.settings_block())
+        search_error = ""
+    except prosearch.SearchError as e:
+        scfg = prosearch.parse_config({})
+        search_error = str(e)[:160]
+    gaps = [r for r in keywords if r.get("coverage") in ("gap", "partial")]
+    gaps.sort(key=lambda r: (-float(r.get("score") or 0.0),
+                              str(r.get("token") or "")))
+    return {
+        "enabled": cfg["enabled"],
+        "since": cfg["since"],
+        "top_k": cfg["top_k"],
+        "half_life_days": cfg["half_life_days"],
+        "interval_s": cfg["interval_s"],
+        "exclude": list(cfg["exclude"]),
+        "push_mode": cfg["push_mode"],
+        "pinned": list(cfg["pinned"]),
+        "config_error": config_error,
+        "analyzed_at": float(doc.get("at") or 0.0),
+        # The window the STORED profile was computed over. It can differ
+        # from the current `since` (the window changed after the last run) —
+        # the view shows both, never one in place of the other.
+        "analyzed_since": analyzed_since,
+        "window_changed": analyzed_since != cfg["since"],
+        "reason": str(doc.get("reason") or ""),
+        "error": str(doc.get("error") or "")[:160],
+        "truncated": doc.get("truncated") is True,
+        "corpus": {
+            "files": int(corpus.get("files") or 0),
+            "messages_scanned": int(corpus.get("messages_scanned") or 0),
+            "messages_used": int(corpus.get("messages_used") or 0),
+            "duplicates_collapsed": int(
+                corpus.get("duplicates_collapsed") or 0),
+            "chars": int(corpus.get("chars") or 0),
+            "channels": corpus.get("channels")
+            if isinstance(corpus.get("channels"), dict) else {},
+            "days": len(corpus.get("days") or []),
+            "first_day": str(corpus.get("first_day") or ""),
+            "last_day": str(corpus.get("last_day") or ""),
+        },
+        "counts": doc.get("counts") if isinstance(doc.get("counts"), dict)
+        else {},
+        "rhythm": doc.get("rhythm") if isinstance(doc.get("rhythm"), dict)
+        else {},
+        "keywords": keywords[:PROFILING_PAGE],
+        "keywords_total": len(keywords),
+        "gaps": gaps[:PROFILING_PAGE],
+        "gaps_total": len(gaps),
+        "cards": cards[:PROFILING_PAGE],
+        "cards_total": len(cards),
+        "search": {
+            "enabled": scfg["enabled"],
+            "engine": scfg["engine"],
+            "daily_cap": scfg["daily_cap"],
+            "searches_per_run": scfg["searches_per_run"],
+            "fetches_per_run": scfg["fetches_per_run"],
+            "interval_s": scfg["interval_s"],
+            "priority_domains": list(scfg["priority_domains"]),
+            "config_error": search_error,
+        },
+        "local_only": True,
+        "zero_tokens": True,
     }
 
 
@@ -7344,6 +7496,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_mission())
         if path == "/api/sniff":
             return self._json(collect_sniff())
+        if path == "/api/profiling":
+            return self._json(collect_profiling())
         if path == "/api/pipeline":
             return self._json(collect_pipeline())
         if path == "/api/bridge/status":
@@ -7437,6 +7591,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_mission_post()
         if path == "/api/sniff":
             return self._handle_sniff_post()
+        if path == "/api/profiling":
+            return self._handle_profiling_post()
         if path == "/api/pipeline":
             return self._handle_pipeline_post()
         if path == "/api/service/restart":
@@ -8782,9 +8938,11 @@ class Handler(BaseHTTPRequestHandler):
     # ------------------------------------------------------ evolution legs ---
     # ------------------------------------------------------- sniff board ---
     def _handle_sniff_post(self) -> None:
-        """POST /api/sniff {action: sweep|ack, signature?} — Bearer gate.
+        """POST /api/sniff {action: sweep|ack|resume, signature?} — Bearer gate.
         `sweep` runs ONE read-only sweep now; `ack` marks a finding
-        acknowledged in the local log. Neither action can touch a device or
+        acknowledged in the local log; `resume` turns the board back on
+        (`enabled=true, pause=false` persisted through the strict sniff
+        partition gate) and then sweeps. Neither action can touch a device or
         a vehicle: mycore.sniff carries no actuation surface at all (the
         core suite asserts the absence)."""
         if not self._require_token():
@@ -8793,7 +8951,41 @@ class Handler(BaseHTTPRequestHandler):
         if doc is None:
             return
         action = doc.get("action")
+        if action == "resume":
+            # The one-click reopen (need-A line 1): persist the switch first
+            # (survives a restart), then run the wanted sweep. A write that
+            # the grammar refuses is reported, never silently swallowed.
+            block = dict(sniff.settings_block())
+            block["enabled"] = True
+            block["pause"] = False
+            try:
+                sniff.parse_config(block, strict_rules=False)
+            except sniff.SniffError as e:
+                return self._json({"error": "validation failed",
+                                   "details": [f"mycore.sniff: {e}"]}, 400)
+            code, body = self._apply_clean_settings(
+                {"mycore": {"sniff": block}})
+            if code != 200:
+                return self._json(body, code)
+            report = sniff.tick(force=True)
+            return self._json({"ok": True, "resumed": True,
+                               "sweep": report, "sniff": collect_sniff()})
         if action == "sweep":
+            resume = doc.get("resume") is True
+            if resume:
+                block = dict(sniff.settings_block())
+                block["enabled"] = True
+                block["pause"] = False
+                try:
+                    sniff.parse_config(block, strict_rules=False)
+                except sniff.SniffError as e:
+                    return self._json({"error": "validation failed",
+                                       "details": [f"mycore.sniff: {e}"]},
+                                      400)
+                code, body = self._apply_clean_settings(
+                    {"mycore": {"sniff": block}})
+                if code != 200:
+                    return self._json(body, code)
             report = sniff.tick(force=True)
             return self._json({"ok": True, "sweep": report,
                                "sniff": collect_sniff()})
@@ -8816,8 +9008,88 @@ class Handler(BaseHTTPRequestHandler):
                     {"error": f"persist failed: {type(e).__name__}"}, 500)
             return self._json({"ok": True, "sniff": collect_sniff()})
         return self._json({"error": "validation failed",
-                           "details": ["action must be one of: sweep|ack"]},
+                           "details": ["action must be one of: "
+                                       "sweep|ack|resume"]},
                           400)
+
+    def _handle_profiling_post(self) -> None:
+        """POST /api/profiling {action: ...} — Bearer gate.
+
+          analyze   ONE local analysis over the session history (no tokens,
+                    no network call: the module it calls has neither a model
+                    client nor a transport seam — both absences are asserted
+                    by the core suite)
+          search    ONE outer-web accumulation pass (the feature's only
+                    egress; it needs `mycore.search.enabled`, which ships
+                    false)
+          push      raise the L1+keen rows as SNIFF findings (the OWN
+                    delivery chain speaks them; the push mode decides whether
+                    they are spoken at all — it ships `passive`)
+          propose   the propose-only program operations: this action RETURNS
+                    proposals and writes NOTHING. The owner clicks one, and
+                    the console then writes it through the strict partition
+                    gate.
+        """
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if action == "analyze":
+            report = profiling.tick(force=True)
+            if report.get("skipped") == "config":
+                return self._json({"error": "validation failed",
+                                   "details": [str(report.get("error") or
+                                                   "bad mycore.profiling")]},
+                                  400)
+            return self._json({"ok": True, "report": _profiling_brief(report),
+                               "profiling": collect_profiling()})
+        if action == "search":
+            report = prosearch.tick(force=True)
+            if report.get("skipped") == "config":
+                return self._json({"error": "validation failed",
+                                   "details": [str(report.get("error") or
+                                                   "bad mycore.search")]},
+                                  400)
+            return self._json({"ok": True, "report": report,
+                               "profiling": collect_profiling()})
+        if action == "push":
+            profile = profiling.load_profile()
+            try:
+                cfg = profiling.parse_config(profiling.settings_block())
+            except profiling.ProfilingError as e:
+                return self._json({"error": "validation failed",
+                                   "details": [str(e)[:160]]}, 400)
+            result = propush.raise_findings(profile, mode=cfg["push_mode"])
+            return self._json({"ok": True, "report": result,
+                               "profiling": collect_profiling()})
+        if action == "propose":
+            keyword = doc.get("keyword")
+            if not isinstance(keyword, str) or not keyword.strip() \
+                    or len(keyword) > 120:
+                return self._json({"error": "validation failed",
+                                   "details": ["keyword must be a non-empty "
+                                               "string of at most 120 chars"]},
+                                  400)
+            url = doc.get("url")
+            if url is not None and (not isinstance(url, str)
+                                    or len(url) > 256):
+                return self._json({"error": "validation failed",
+                                   "details": ["url must be a string of at "
+                                               "most 256 chars"]}, 400)
+            try:
+                proposals = propush.proposals_for(keyword.strip(),
+                                                  url=url or "")
+            except propush.PushError as e:
+                return self._json({"error": "validation failed",
+                                   "details": [str(e)[:160]]}, 400)
+            return self._json({"ok": True, "proposals": proposals,
+                               "note": "proposals only — nothing was written",
+                               "profiling": collect_profiling()})
+        return self._json({"error": "validation failed",
+                           "details": ["action must be one of: "
+                                       "analyze|search|push|propose"]}, 400)
 
     def _handle_pipeline_post(self) -> None:
         """POST /api/pipeline {action, ...} — Bearer gate (the settings write's

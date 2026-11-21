@@ -10723,6 +10723,303 @@ async function sniffCfgWrite(mutate, okText) {
   }
 }
 
+/* --- OWNER ANALYSIS (need-A) -------------------------------------------
+   The owner's own words, scored locally. The read model carries every piece
+   of evidence with the row, so a claim is never shown without its source:
+   the row expands to the dated excerpts the analysis actually saw. */
+let ownProfileData = null;   // GET /api/profiling payload (null = never loaded)
+
+function profNote(kind, text) {
+  const el = document.getElementById("profNote");
+  if (!el) return;
+  el.className = "save-state " + kind;
+  el.textContent = text;
+}
+
+function profTraitLabel(v) {
+  return t("prof.trait." + String(v || ""), String(v || "-"));
+}
+function profTierLabel(v) {
+  return t("prof.tier." + String(v || ""), String(v || "-"));
+}
+function profCoverLabel(v) {
+  return t("prof.cover." + String(v || ""), String(v || "-"));
+}
+
+function renderProfiling() {
+  const d = ownProfileData || {};
+  const rows = Array.isArray(d.keywords) ? d.keywords : [];
+  const badge = document.getElementById("profKeywordCount");
+  if (badge) {
+    const total = Number(d.keywords_total);
+    badge.textContent = String(Number.isFinite(total) ? total : rows.length);
+  }
+  const since = document.getElementById("profSince");
+  if (since) {
+    const s = String(d.since || "");
+    since.textContent = t("prof.since", "since") + ": " + (s
+      ? s : t("prof.sinceAll", "all retained history"));
+  }
+  const corpus = document.getElementById("profCorpus");
+  if (corpus) {
+    const c = d.corpus || {};
+    const msgs = Number(c.messages_used) || 0;
+    if (!msgs) {
+      corpus.hidden = true;
+    } else {
+      corpus.hidden = false;
+      const chan = c.channels || {};
+      const chanText = Object.keys(chan).map(k => k + " " + chan[k]).join(" · ");
+      let text = t("prof.corpus", "{msgs} owner message(s) · {days} day(s) · {channels}")
+        .replace("{msgs}", String(msgs))
+        .replace("{days}", String(Number(c.days) || 0))
+        .replace("{channels}", chanText || "—");
+      const collapsed = Number(c.duplicates_collapsed) || 0;
+      if (collapsed) {
+        text += " · " + t("prof.collapsed", "{n} repeated message(s) collapsed")
+          .replace("{n}", String(collapsed));
+      }
+      if (d.truncated === true) {
+        text += " · " + t("prof.truncated", "corpus truncated");
+      }
+      if (d.window_changed === true) {
+        text += " · " + t("prof.windowChanged",
+          "the stored profile covers a different window");
+      }
+      if (d.reason) text += " · " + String(d.reason);
+      corpus.textContent = text;
+    }
+  }
+  const box = document.getElementById("profKeywords");
+  if (box) {
+    if (!rows.length) {
+      const why = (d.reason || "");
+      box.innerHTML = `<div class="sniff-empty">${escapeHtml(
+        why ? t("prof.noData", "no owner messages since {d}").replace("{d}", why)
+            : t("prof.noKeywords", "no keywords yet — press ANALYZE NOW"))}</div>`;
+    } else {
+      box.innerHTML = rows.map(r => {
+        const trait = String(r.trait || "");
+        const topic = String(r.topic || "");
+        const tier = String(r.tier || "");
+        const cover = String(r.coverage || "");
+        const weak = r.weak === true;
+        const ex = Array.isArray(r.excerpts) ? r.excerpts : [];
+        // The evidence stays one click away: every row keeps its full
+        // provenance, but the list itself stays scannable.
+        const evidence = ex.length ? `<details class="prof-ev-box">
+            <summary>${escapeHtml(t("prof.evidence", "evidence") + ": " +
+              String(Number(r.tf) || 0) + " · " + String(Number(r.days) || 0) +
+              "d · last " + String(r.last_day || "-"))}</summary>
+            <ul class="prof-ev">${ex.map(e =>
+          `<li><time>${escapeHtml(String(e.day || ""))}</time> ${escapeHtml(
+            String(e.text || ""))}</li>`).join("")}</ul></details>` : "";
+        return `<div class="prof-row">
+          <span class="prof-token">${escapeHtml(String(r.token || ""))}</span>
+          <span class="prof-badge ${escapeHtml(trait)}">${escapeHtml(
+            profTraitLabel(trait))}</span>
+          <span class="prof-badge">${escapeHtml(topic || "-")}</span>
+          <span class="prof-badge">${escapeHtml(profTierLabel(tier))}</span>
+          <span class="prof-badge">${escapeHtml(profCoverLabel(cover))}</span>
+          ${weak ? `<span class="prof-badge weak">${escapeHtml(
+              t("prof.weak", "weak"))}</span>` : ""}
+          ${evidence}</div>`;
+      }).join("");
+    }
+  }
+  // --- GAPS: the retrieval gaps the loop still has to fill -------------
+  const gaps = Array.isArray(d.gaps) ? d.gaps : [];
+  const gapBox = document.getElementById("profGaps");
+  if (gapBox) {
+    gapBox.innerHTML = gaps.length ? gaps.map(r => {
+      const token = String(r.token || "");
+      const cov = String(r.coverage || "");
+      return `<div class="prof-row">
+        <span class="prof-token">${escapeHtml(token)}</span>
+        <span class="prof-badge ${escapeHtml(cov)}">${escapeHtml(
+          profCoverLabel(cov))}</span>
+        <span class="sniff-meta">${escapeHtml(String(r.topic || "-") + " · "
+          + String(Number(r.tf) || 0) + " · " + String(Number(r.days) || 0) + "d")}</span>
+        <span class="prof-row-acts">
+          <button class="btn tiny" type="button" data-prof-propose="${
+            escapeHtml(token)}">${escapeHtml(
+            t("prof.proposals", "proposals"))}</button>
+        </span></div>`;
+    }).join("")
+      : `<div class="sniff-empty">${escapeHtml(
+          t("prof.noGaps", "no retrieval gaps"))}</div>`;
+  }
+  // --- KNOWLEDGE: the accumulated cards ---------------------------------
+  const cards = Array.isArray(d.cards) ? d.cards : [];
+  const knowBox = document.getElementById("profKnow");
+  if (knowBox) {
+    knowBox.innerHTML = cards.length ? cards.map(c => {
+      const tier = String(c.tier || "L3");
+      const day = c.fetched_at ? new Date(Number(c.fetched_at) * 1000)
+        .toISOString().slice(0, 10) : "";
+      return `<div class="prof-row">
+        <span class="prof-token">${escapeHtml(String(c.keyword || ""))}</span>
+        <span class="prof-badge">${escapeHtml(profTierLabel(tier))}</span>
+        <span class="prof-badge">${escapeHtml(String(c.topic || "-"))}</span>
+        <span class="sniff-meta">${escapeHtml(
+          String(c.domain || "") + " · " + day)}</span>
+        <div class="prof-row-sub">${escapeHtml(String(c.title || ""))}</div>
+        <div class="prof-row-sub">${escapeHtml(String(c.excerpt || ""))}</div>
+        <span class="prof-row-acts">
+          <a class="btn tiny" href="${escapeHtml(String(c.url || "#"))}"
+             target="_blank" rel="noopener noreferrer">${escapeHtml(
+            t("prof.open", "open"))}</a>
+        </span></div>`;
+    }).join("")
+      : `<div class="sniff-empty">${escapeHtml(
+          t("prof.noCards", "no knowledge cards yet"))}</div>`;
+  }
+  // --- controls ----------------------------------------------------------
+  const sc = d.search || {};
+  const stog = document.getElementById("profSearchToggle");
+  if (stog) {
+    const on = sc.enabled === true;
+    stog.setAttribute("aria-pressed", String(on));
+    stog.classList.toggle("primary", on);
+    stog.textContent = on ? t("prof.searchOn", "on")
+                           : t("prof.searchOff", "off");
+  }
+  const ptog = document.getElementById("profPushToggle");
+  if (ptog) {
+    const auto = d.push_mode === "auto";
+    ptog.setAttribute("aria-pressed", String(auto));
+    ptog.classList.toggle("primary", auto);
+    ptog.textContent = auto ? t("prof.pushAuto", "auto")
+                             : t("prof.pushPassive", "passive");
+  }
+  const dims = document.getElementById("profDims");
+  if (dims) {
+    const c = d.counts || {};
+    const groups = [
+      ["prof.trait", c.traits, profTraitLabel],
+      ["prof.topic", c.topics, (v) => String(v)],
+      ["prof.tier", c.tiers, profTierLabel],
+      ["prof.coverage", c.coverage, profCoverLabel],
+    ];
+    dims.innerHTML = `<div class="prof-dim-cols">${groups.map(([label, map, fn]) => {
+      const entries = Object.entries(map || {});
+      const body = entries.length ? entries.map(([k, v]) =>
+        `<div class="prof-dim-row"><span>${escapeHtml(fn(k))}</span><span>${
+          escapeHtml(String(v))}</span></div>`).join("")
+        : `<div class="prof-dim-row"><span>—</span><span>0</span></div>`;
+      return `<div class="prof-dim-col"><h4>${escapeHtml(
+        t(label, label))}</h4>${body}</div>`;
+    }).join("")}</div>`;
+  }
+}
+
+async function refreshProfiling() {
+  try {
+    ownProfileData = await fetch("/api/profiling").then(r => r.json());
+  } catch (e) { /* keep the last render */ }
+  renderProfiling();
+}
+
+/* every config write sends the WHOLE partition (the settings merge
+   replaces a list but never a dict — the search/profiling partitions are
+   written whole, so a stale copy can never clobber a sibling key) */
+async function profCfgWrite(part, okText) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { profNote("err", t("save.needToken", "token required")); return false; }
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ mycore: part }) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) { profNote("err", badTokenText()); return false; }
+    if (!res.ok) {
+      const details = (body.details || [body.error || "error"])
+        .map(x => String(x)).join("; ");
+      profNote("err", details.slice(0, 160)); return false;
+    }
+    await refreshProfiling();
+    if (okText) profNote("ok", okText);
+    return true;
+  } catch (e) {
+    profNote("err", String(e).slice(0, 80)); return false;
+  }
+}
+
+async function profWholePartition(change) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  const block = {
+    enabled: true, since: "", top_k: 100, half_life_days: 14,
+    interval_s: 3600, topics: [], exclude: ["webhook_e2e*"],
+    push_mode: "passive", pinned: [] };
+  try {
+    const doc = await fetch("/api/settings").then(r => r.json());
+    const cur = ((doc.mycore || {}).profiling) || {};
+    Object.keys(block).forEach(k => {
+      if (cur[k] !== undefined && cur[k] !== null) block[k] = cur[k];
+    });
+    if (!Array.isArray(block.topics)) block.topics = [];
+    if (!Array.isArray(block.pinned)) block.pinned = [];
+    if (!Array.isArray(block.exclude)) block.exclude = ["webhook_e2e*"];
+  } catch (e) { /* keep the defaults */ }
+  Object.assign(block, change || {});
+  return block;
+}
+
+async function profSearchRun() {
+  const body = await profPost({ action: "search" });
+  if (!body) return;
+  if (body.profiling) { ownProfileData = body.profiling; renderProfiling(); }
+  const rep = body.report || {};
+  profNote("ok", t("prof.cardCount", "{n} card(s)")
+    .replace("{n}", String(Number(rep.cards_total) || 0)));
+}
+
+async function profPropose(keyword) {
+  const body = await profPost({ action: "propose", keyword: keyword });
+  if (!body) return;
+  const list = Array.isArray(body.proposals) ? body.proposals : [];
+  if (!list.length) { profNote("err", t("prof.noGaps", "no proposals")); return; }
+  // A proposal is a CLICK, not a write: the console shows what would be
+  // written and asks the owner to apply it. Nothing was written yet.
+  profNote("ok", t("prof.proposed",
+    "proposal ready — nothing was written until you click"));
+}
+
+async function profPost(payload) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { profNote("err", t("save.needToken", "token required")); return null; }
+  try {
+    const res = await fetch("/api/profiling", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) { profNote("err", badTokenText()); return null; }
+    if (!res.ok) {
+      const details = (body.details || [body.error || "error"])
+        .map(x => String(x)).join("; ");
+      profNote("err", details.slice(0, 140)); return null;
+    }
+    return body;
+  } catch (e) {
+    profNote("err", String(e).slice(0, 80)); return null;
+  }
+}
+
+async function profAnalyze() {
+  profNote("ok", t("prof.analyzing", "analyzing…"));
+  const body = await profPost({ action: "analyze" });
+  if (!body) return;
+  if (body.profiling) { ownProfileData = body.profiling; renderProfiling(); }
+  const rep = body.report || {};
+  profNote("ok", t("prof.corpus", "{msgs} owner message(s) · {days} day(s)")
+    .replace("{msgs}", String(Number(rep.messages_used) || 0))
+    .replace("{days}", String(Number(rep.days) || 0)));
+}
+
 async function sniffSweep() {
   const body = await sniffPost({ action: "sweep" });
   if (!body) return;
@@ -10767,6 +11064,48 @@ function wireSniff() {
     if (el) el.addEventListener("click", fn);
   };
   on("sniffSweep", sniffSweep);
+  on("profAnalyze", profAnalyze);
+  on("profSearchRun", profSearchRun);
+  on("profSearchToggle", async () => {
+    const sc = (ownProfileData && ownProfileData.search) || {};
+    await profCfgWrite({ search: {
+      enabled: !(sc.enabled === true),
+      engine: String(sc.engine || "bing_rss"),
+      searches_per_run: Number(sc.searches_per_run) || 5,
+      fetches_per_run: Number(sc.fetches_per_run) || 10,
+      daily_cap: Number(sc.daily_cap) || 20,
+      interval_s: Number(sc.interval_s) || 3600,
+      priority_domains: JSON.parse(JSON.stringify(sc.priority_domains || []))
+    } }, t("prof.search", "SEARCH"));
+  });
+  on("profPushToggle", async () => {
+    const cur = (ownProfileData && ownProfileData.push_mode) || "passive";
+    await profCfgWrite({ profiling: await profWholePartition(
+      { push_mode: cur === "auto" ? "passive" : "auto" }) },
+      t("prof.push", "PUSH"));
+  });
+  const profView = document.getElementById("view-sniff");
+  if (profView) profView.addEventListener("click", async e => {
+    const prop = e.target.closest ? e.target.closest("[data-prof-propose]") : null;
+    if (prop) {
+      await profPropose(String(prop.dataset.profPropose || ""));
+      return;
+    }
+    const btn = e.target.closest ? e.target.closest("[data-prof-seg]") : null;
+    if (!btn) return;
+    const seg = String(btn.dataset.profSeg || "");
+    document.querySelectorAll("[data-prof-seg]").forEach(el => {
+      el.classList.toggle("is-active", el === btn);
+    });
+    const kw = document.getElementById("profKeywords");
+    const dm = document.getElementById("profDims");
+    const gp = document.getElementById("profGaps");
+    const kn = document.getElementById("profKnow");
+    if (kw) kw.hidden = seg !== "keywords";
+    if (dm) dm.hidden = seg !== "dims";
+    if (gp) gp.hidden = seg !== "gaps";
+    if (kn) kn.hidden = seg !== "know";
+  });
   on("sniffPause", async () => {
     const paused = sniffData && sniffData.pause === true;
     await sniffCfgWrite(b => { b.pause = !paused; },
@@ -11023,6 +11362,9 @@ function setView(name, fromUser) {
   // SNIFF car: the SENSE board lazy-loads on the same rule — first open, then
   // only on a user nav click (the sweep state changes server-side anyway).
   if (name === "sniff" && (fromUser || !sniffData)) refreshSniff();
+  // Need-A: the OWNER ANALYSIS section rides the SENSE board's own lazy-load
+  // rule (same view, same refresh cycle).
+  if (name === "sniff" && (fromUser || !ownProfileData)) refreshProfiling();
   // PIPELINE car: the acquisition board lazy-loads on the same rule — first
   // open, then only on a user nav click (the stages change server-side).
   if (name === "pipeline" && (fromUser || !pipeData)) refreshPipeline();
