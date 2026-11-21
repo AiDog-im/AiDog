@@ -20187,7 +20187,7 @@ def test_fleet() -> None:
               and set(pub) == {"clone", "fleet", "origin", "stop",
                                "tool_calls", "in_tok", "out_tok", "model",
                                "tools", "task_digest", "lint", "failed",
-                               "usage_complete"},
+                               "role", "band", "usage_complete"},
               str(sorted(pub)))
         populated = fleet.public_clone({"clone": "c1", "fleet": "f1",
                                         "tools": ["read_file", "grep", "write_file"],
@@ -20447,6 +20447,257 @@ def test_fleet() -> None:
           and "send_message" not in src and "_origin_deliver" not in src
           and "ChatClient" not in src and "run_turn" not in src,
           str(sorted(imports)))
+
+
+def test_fleetgate() -> None:
+    """Need-B P1a (design 4.3): the decision key (a deterministic, zero-token
+    complexity band) and the role catalog. The band never refuses in the
+    default `advise` mode; `enforce` refuses a split wider than the band
+    justifies; a role may narrow the granted tools but never widen them."""
+    from mycore import fleetgate as fg
+    from mycore import subagent as sub
+    import web.server as _web_srv
+
+    # --- A. the band is deterministic and explainable ---------------------
+    small = fg.band_for(["check the readme"])
+    wide = fg.band_for([
+        "compare the parser and the writer modules, then migrate both, then "
+        "audit the result and benchmark the tokenizer against the profiler",
+        "survey every call site in the repository and list them with the "
+        "file and the line",
+        "refactor the session store, migrate the archive layout, then "
+        "compare the two layouts and audit the outcome"])
+    check("fleetgate: a narrow request lands in band S with a ceiling of 1",
+          small["band"] == "S" and small["ceiling"] == 1
+          and small["reasons"] == [], str(small))
+    check("fleetgate: a broad request lands above band S and explains why",
+          wide["band"] in ("M", "L") and wide["ceiling"] >= 3
+          and len(wide["reasons"]) >= 2, str(wide))
+    check("fleetgate: the same briefs always produce the same band",
+          fg.band_for(["a", "b", "c"]) == fg.band_for(["a", "b", "c"]))
+
+    # --- B. the mode never refuses by accident ---------------------------
+    check("fleetgate: an unknown mode degrades to advise (never to enforce)",
+          fg.resolve_mode({"auto_split": "whatever"}) == "advise"
+          and fg.resolve_mode({}) == "advise"
+          and fg.resolve_mode("not a dict") == "advise"
+          and fg.resolve_mode({"auto_split": "ENFORCE"}) == "enforce")
+
+    # --- C. the role catalog ---------------------------------------------
+    name, record = fg.role_for("verifier")
+    check("fleetgate: a known role resolves with its own policy",
+          name == "verifier" and "run_bash" in fg.role_tools(record)
+          and record["max_iters"] >= 1, str(record)[:120])
+    check("fleetgate: the settings key is allow-listed in the console",
+          "fleet" in _web_srv.MYCORE_KEYS)
+    fallback_name, fallback = fg.role_for("nope")
+    check("fleetgate: an unknown role falls back and says so",
+          fallback_name == "scout" and fallback.get("fallback") is True)
+    check("fleetgate: no role can ever grant delegate or execute_code",
+          all("delegate" not in fg.role_tools(r)
+              and "execute_code" not in fg.role_tools(r)
+              for r in fg.ROLE_CATALOG.values()))
+    check("fleetgate: a role never raises the parent's iteration bound",
+          fg.role_max_iters({"max_iters": 99}, 12) == 12
+          and fg.role_max_iters({"max_iters": 4}, 12) == 4)
+
+    # --- D. the fixed report schema --------------------------------------
+    parsed = fg.parse_report("REPORT status: ok\nREPORT summary: did it\n"
+                             "REPORT handles: /tmp/out.txt\nREPORT blocker: none")
+    check("fleetgate: the fixed report block is parsed into fields",
+          parsed["format"] == "fixed" and parsed["status"] == "ok"
+          and parsed["summary"] == "did it"
+          and parsed["handles"] == ["/tmp/out.txt"], str(parsed))
+    free = fg.parse_report("just some prose")
+    check("fleetgate: a free-form clone is honest, not a failed task",
+          free["format"] == "free-form" and free["status"] == "", str(free))
+
+    # --- E. the gate composes with the real delegate path ----------------
+    import tempfile
+    with tempfile.TemporaryDirectory() as td:
+        reg = build_registry(allowed_roots=[td])
+        calls: list = []
+
+        def counted(messages=None, tools=None, **kw):
+            calls.append(messages)
+            return {"choices": [{"message": {"role": "assistant",
+                                              "content": "REPORT status: ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 5, "completion_tokens": 2}}
+
+        # advise (default) never refuses a wide split
+        sub.run_tasks(["a", "b", "c"], reg, None, counted, 300)
+        check("fleetgate: advise mode dispatches the split it was given",
+              len(calls) == 3, str(len(calls)))
+
+        # enforce mode refuses a split wider than the band justifies
+        import mycore.fleetgate as _fg_mod
+        saved = _fg_mod.settings_block
+        _fg_mod.settings_block = lambda repo=None: {"auto_split": "enforce"}
+        try:
+            err = ""
+            try:
+                sub.run_tasks(["a", "b", "c"], reg, None, counted, 300)
+            except Exception as e:  # noqa: BLE001 — the honest refusal
+                err = str(e)
+        finally:
+            _fg_mod.settings_block = saved
+        check("fleetgate: enforce refuses a split wider than the band",
+              "does not warrant" in err and "ceiling" in err, err[:160])
+
+    # --- F. a role narrows the granted tools ------------------------------
+    with tempfile.TemporaryDirectory() as td:
+        reg = build_registry(allowed_roots=[td])
+        seen_tools: list = []
+
+        def counted2(messages=None, tools=None, **kw):
+            names = [t.get("function", {}).get("name") for t in (tools or [])
+                      if isinstance(t, dict)]
+            seen_tools.append(set(n for n in names if n))
+            return {"choices": [{"message": {"role": "assistant",
+                                              "content": "REPORT status: ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+        sub.run_tasks([{"task": "check it", "role": "scout"}], reg,
+                      ["write_file", "run_bash"], counted2, 300)
+        check("fleetgate: the scout role keeps the read-only tool set",
+              seen_tools and "write_file" not in seen_tools[0]
+              and "run_bash" not in seen_tools[0]
+              and "read_file" in seen_tools[0], str(seen_tools[:1]))
+
+
+def test_memoryview() -> None:
+    """Need-B B-11 (the adopted UX advice): the curated memory must be
+    browsable. This is the read-only half — list the entries, search them
+    locally, never write."""
+    from mycore import memoryview as mv
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        body = Path(td) / "body"
+        (body / "memory").mkdir(parents=True)
+        (body / "memory" / "MEMORY_curated.md").write_text(
+            "# Facts\n\nthe owner prefers local tools\n\n# Notes\n\n"
+            "second entry about the console\n", encoding="utf-8")
+        (body / "memory" / "USER_curated.md").write_text(
+            "# Profile\n\nwrites in Chinese\n", encoding="utf-8")
+        repo = Path(td) / "repo"
+        repo.mkdir()
+        view = mv.collect(repo, body=body / "memory")
+        check("memoryview: the curated slot lists its entries",
+              view["slots"][0]["available"] is True
+              and view["slots"][0]["entries_total"] == 2
+              and any(e["title"] == "Facts" for e in view["slots"][0]["entries"]),
+              str(view["slots"][0])[:160])
+        check("memoryview: a local search narrows the entries",
+              mv.collect(repo, "console",
+                         body=body / "memory")["slots"][0]["entries_total"] == 1,
+              str(mv.collect(repo, "console",
+                             body=body / "memory")["slots"][0])[:120])
+        check("memoryview: the view is read-only and local",
+              view["read_only"] is True and view["local_only"] is True
+              and view["editable"] is False)
+        check("memoryview: an entry carries a bounded excerpt",
+              all(len(e["excerpt"]) <= mv.MAX_EXCERPT
+                  for s in view["slots"] for e in s["entries"]))
+
+    # an absent memory file is an empty slot, never a guess
+    empty = mv.collect(Path("/nonexistent-repo-for-the-test"))
+    check("memoryview: an absent memory file answers empty, not an error",
+          isinstance(empty["slots"], list)
+          and all("available" in s for s in empty["slots"])
+          and empty["entries_total"] >= 0, str(empty)[:160])
+
+
+def test_fleetplan() -> None:
+    """Need-B P1b (D3): a WRITE-capable clone fleet waits for the owner's
+    sign-off; a read-only fleet never does; one approval serves one
+    dispatch."""
+    from mycore import fleetplan as fp
+    from mycore import subagent as sub
+    import tempfile
+
+    with tempfile.TemporaryDirectory() as td:
+        os.environ["AIDOG_MC_STATE"] = td
+        try:
+            check("fleetplan: a read-only fleet is not write-capable",
+                  fp.is_write_capable(["read_file", "grep"]) is False)
+            check("fleetplan: a write tool makes the fleet write-capable",
+                  fp.is_write_capable(["read_file", "write_file"]) is True)
+            check("fleetplan: a non-list tool set is never write-capable",
+                  fp.is_write_capable("write_file") is False)
+
+            reg = build_registry(allowed_roots=[td])
+
+            def chat(messages=None, tools=None, **kw):
+                return {"choices": [{"message": {"role": "assistant",
+                                                 "content": "ok"},
+                                      "finish_reason": "stop"}],
+                        "usage": {"prompt_tokens": 1, "completion_tokens": 1}}
+
+            # a write fleet without approval is refused WITH a plan id
+            # (the default gate scope is `roles`: a fleet that NAMED a role
+            # waits for the owner; the plain delegate path keeps its
+            # shipped contract — see mycore.fleetgate.resolve_signoff).
+            refused = ""
+            try:
+                sub.run_tasks([{"task": "write it", "role": "implementer"}],
+                              reg, ["write_file"], chat, 300)
+            except Exception as e:  # noqa: BLE001 — the honest refusal
+                refused = str(e)
+            check("fleetplan: a role-based write fleet without approval is "
+                  "refused", "needs your approval" in refused
+                  and "plan f" in refused, refused[:140])
+            plans = fp.load_plans()
+            check("fleetplan: the refusal filed exactly one pending plan",
+                  len(plans) == 1 and plans[0]["status"] == "pending"
+                  and plans[0]["clones"] == 1, str(plans)[:160])
+
+            # a read-only fleet is never gated
+            sub.run_tasks(["read it"], reg, [], chat, 300)
+            check("fleetplan: a read-only fleet runs without any approval",
+                  len(fp.load_plans()) == 1)
+
+            # approving lets the dispatch through, and the approval is used up
+            pid = plans[0]["id"]
+            plan, err = fp.decide(pid, "approve")
+            check("fleetplan: the owner approves a pending plan",
+                  plan is not None and plan["status"] == "approved"
+                  and err == "", str(plan)[:120])
+            sub.run_tasks([{"task": "write it", "role": "implementer"}], reg,
+                          ["write_file"], chat, 300, approval_id=pid)
+            check("fleetplan: an approved plan authorizes exactly one dispatch",
+                  (fp.get_plan(pid) or {}).get("status") == "consumed")
+            refused2 = ""
+            try:
+                sub.run_tasks([{"task": "write it", "role": "implementer"}],
+                              reg, ["write_file"], chat, 300, approval_id=pid)
+            except Exception as e:  # noqa: BLE001 — the honest refusal
+                refused2 = str(e)
+            check("fleetplan: a consumed approval does not authorize a second "
+                  "dispatch", "not valid" in refused2, refused2[:120])
+
+            # the plain delegate path keeps its shipped contract by default
+            plain = ""
+            try:
+                sub.run_tasks(["write it"], reg, ["write_file"], chat, 300)
+                plain = "ran"
+            except Exception as e:  # noqa: BLE001 — would be a contract break
+                plain = str(e)[:120]
+            check("fleetplan: the plain delegate path keeps its shipped "
+                  "contract (the gate scope is the owner's setting)",
+                  plain == "ran", plain)
+
+            # the console list carries the fixed whitelist only
+            row = fp.public_row({"id": "fx", "status": "pending",
+                                 "patch": "SECRET", "desc": "d"})
+            check("fleetplan: the console row carries no internals",
+                  "patch" not in row and set(row) == {
+                      "id", "ts", "status", "fleet", "clones", "tools",
+                      "desc", "decided_at"}, str(sorted(row)))
+        finally:
+            os.environ["AIDOG_MC_STATE"] = _SUITE_STATE
 
 
 def test_pipeline() -> None:
@@ -21142,6 +21393,9 @@ def main() -> int:
         test_macos_report,
         test_pipeline,
         test_fleet,
+        test_fleetgate,
+        test_memoryview,
+        test_fleetplan,
     ]
     rows = []
     for fn in suites:

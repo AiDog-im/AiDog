@@ -10120,8 +10120,12 @@ function renderFleet() {
       const excerpt = c.task_digest ? `${t("fleet.task", "task")} ${c.task_digest}` : "";
       const tokens = c.usage_complete && Number.isInteger(c.in_tok) && Number.isInteger(c.out_tok)
         ? `${c.in_tok}/${c.out_tok}` : "?";
+      const role = c.role ? `<span class="chip">${escapeHtml(c.role)}</span>` : "";
+      const band = c.band ? `<span class="chip">${escapeHtml(
+        t("fleet.band", "band") + " " + c.band)}</span>` : "";
       return `<div class="ctl-row"><strong>${escapeHtml(c.clone || "clone")}</strong>` +
         `<span>${escapeHtml(status)} · ${escapeHtml(String(c.stop || "?"))}</span>` +
+        role + band +
         `<span class="stat-note">${escapeHtml(tokens)} tokens</span>` +
         `<span class="stat-note" style="min-width:0;overflow-wrap:anywhere;">${escapeHtml(excerpt)}</span></div>`;
     }).join("");
@@ -10131,6 +10135,74 @@ function renderFleet() {
   }).join("") + `<div class="stat-note">${escapeHtml(
     fleetData.coverage || "")}</div>`;
 }
+
+/* ---------------------------------------------- memory browser (B-11) --- */
+let memBrowseData = null;
+async function refreshMemoryBrowse(q) {
+  const box = document.getElementById("memBrowseList");
+  if (box) box.innerHTML = `<div class="stat-note">${escapeHtml(
+    t("memory.browseLoading", "loading…"))}</div>`;
+  try {
+    const url = "/api/memory" + (q ? "?q=" + encodeURIComponent(q) : "");
+    const r = await fetch(url);
+    const d = r.ok ? await r.json() : null;
+    memBrowseData = (d && Array.isArray(d.slots)) ? d : null;
+  } catch (e) { memBrowseData = null; }
+  renderMemoryBrowse();
+}
+
+function renderMemoryBrowse() {
+  const box = document.getElementById("memBrowseList");
+  const badge = document.getElementById("memBrowseBadge");
+  if (!box) return;
+  if (!memBrowseData) {
+    box.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("memory.browseUnavailable", "memory view unavailable"))}</div>`;
+    if (badge) badge.textContent = "–";
+    return;
+  }
+  const slots = memBrowseData.slots || [];
+  let total = 0;
+  const parts = [];
+  for (const s of slots) {
+    const entries = s.entries || [];
+    total += entries.length;
+    if (!s.available) {
+      parts.push(`<div class="stat-note">${escapeHtml(
+        t("memory.browseSlot", "slot") + " " + s.slot + ": " +
+        (s.note || "unavailable"))}</div>`);
+      continue;
+    }
+    if (!entries.length) {
+      parts.push(`<div class="stat-note">${escapeHtml(
+        t("memory.browseSlot", "slot") + " " + s.slot + ": " +
+        t("memory.browseNone", "nothing recorded yet"))}</div>`);
+      continue;
+    }
+    parts.push(`<div class="stat-note" style="margin-top:6px;">${escapeHtml(
+      t("memory.browseSlot", "slot") + " " + s.slot)}</div>`);
+    for (const e of entries) {
+      parts.push(`<details class="fleet-row"><summary>${escapeHtml(
+        e.title || t("memory.browseUntitled", "(untitled)"))}</summary>` +
+        `<div class="stat-note" style="margin-top:0;">${escapeHtml(
+          e.excerpt || "")}</div></details>`);
+    }
+  }
+  if (badge) badge.textContent = String(memBrowseData.entries_total ?? total);
+  box.innerHTML = parts.join("") || `<div class="stat-note">${escapeHtml(
+    t("memory.browseEmpty", "nothing recorded yet"))}</div>`;
+}
+
+const memBrowseBtnEl = document.getElementById("memBrowseBtn");
+if (memBrowseBtnEl) memBrowseBtnEl.addEventListener("click", () => {
+  const card = document.getElementById("memBrowseCard");
+  if (card) card.hidden = !card.hidden;
+  if (card && !card.hidden) refreshMemoryBrowse("");
+});
+const memSearchEl = document.getElementById("memSearch");
+if (memSearchEl) memSearchEl.addEventListener("input", () => {
+  refreshMemoryBrowse(memSearchEl.value.trim());
+});
 
 /* --------------------------------------------------- X13 sessions panel --- */
 async function refreshSessions(q) {
@@ -11405,6 +11477,7 @@ function setView(name, fromUser) {
   // lazy rule as the approval queue above
   if (name === "settings") {
     if (fromUser || !agentPlanData) refreshAgentPlans();
+    if (fromUser || !fleetPlanData) refreshFleetPlans();  // P1b fleet sign-off
     if (fromUser || !recData) refreshRecovery();   // car K: recovery facts
     if (fromUser || !secData) refreshSecurity();   // car E: security check
   }
@@ -12114,6 +12187,102 @@ if (agentPlanListEl) agentPlanListEl.addEventListener("click", e => {
 const agentPlanRefreshEl = document.getElementById("agentPlanRefresh");
 if (agentPlanRefreshEl) agentPlanRefreshEl.addEventListener("click",
   () => refreshAgentPlans());
+
+/* -------------------------------------- clone fleet approvals (P1b) ----- */
+let fleetPlanData = null;
+
+function renderFleetPlans() {
+  const list = document.getElementById("fleetPlanList");
+  const empty = document.getElementById("fleetPlanEmpty");
+  if (!list) return;
+  const rows = (Array.isArray(fleetPlanData) ? fleetPlanData : []).slice(0, 12);
+  if (empty) empty.hidden = rows.length > 0;
+  list.innerHTML = rows.map(r => {
+    const st = String(r.status || "pending");
+    const id = String(r.id || "");
+    const tools = (Array.isArray(r.tools) ? r.tools : [])
+      .map(k => `<span class="chip">${escapeHtml(String(k))}</span>`).join(" ");
+    const desc = escapeHtml(String(r.desc || ""));
+    if (st === "pending") {
+      return `<div class="plan-row" data-fplan-row="${escapeHtml(id)}">` +
+        `<div class="ctl-row" style="margin-bottom:4px;align-items:center;">` +
+        `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+        `${escapeHtml(String(r.clones ?? 0))} clone(s) · ${tools || ""} ` +
+        `${desc}</label>` +
+        `<button class="btn" type="button" data-fplan-decide="approve" ` +
+        `data-fplan-id="${escapeHtml(id)}" data-i18n="fplan.approve">` +
+        `APPROVE</button>` +
+        `<button class="btn" type="button" data-fplan-decide="reject" ` +
+        `data-fplan-id="${escapeHtml(id)}" data-i18n="fplan.reject">` +
+        `REJECT</button></div></div>`;
+    }
+    const word = st === "approved" ? t("fplan.stApproved", "approved")
+      : st === "rejected" ? t("fplan.stRejected", "rejected")
+      : st === "consumed" ? t("fplan.stConsumed", "used")
+      : st === "cancelled" ? t("fplan.stCancelled", "cancelled") : st;
+    return `<div class="plan-row" data-fplan-row="${escapeHtml(id)}">` +
+      `<div class="ctl-row" style="margin-bottom:0;">` +
+      `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+      `${escapeHtml(String(r.clones ?? 0))} clone(s) ${desc}</label>` +
+      `<span class="stat-note" style="margin:0;">${escapeHtml(word)}</span>` +
+      `</div></div>`;
+  }).join("");
+}
+
+async function refreshFleetPlans() {
+  try {
+    const doc = await fetch("/api/fleet/plans").then(r => r.json());
+    fleetPlanData = (doc && Array.isArray(doc.plans)) ? doc.plans : [];
+  } catch (e) { /* keep the last paint */ }
+  renderFleetPlans();
+}
+
+async function decideFleetPlan(id, action) {
+  const msg = document.getElementById("fleetPlanMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = t("save.needToken", "token required"); }
+    return;
+  }
+  if (msg) { msg.className = "save-state"; msg.textContent = "…"; }
+  try {
+    const res = await fetch("/api/fleet/plans/"
+      + encodeURIComponent(id), {
+        method: "POST",
+        headers: { "Content-Type": "application/json",
+                   "Authorization": "Bearer " + token },
+        body: JSON.stringify({ action }) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = badTokenText(); }
+      return;
+    }
+    if (!res.ok) {
+      const det = ((body && (body.details || [body.error])) || ["error"])
+        .join("; ");
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = det.slice(0, 160); }
+      return;
+    }
+    if (msg) { msg.className = "save-state"; msg.textContent =
+      "✓ " + t("fplan.done", "recorded"); }
+    refreshFleetPlans();
+  } catch (e) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = String(e).slice(0, 80); }
+  }
+}
+
+const fleetPlanListEl = document.getElementById("fleetPlanList");
+if (fleetPlanListEl) fleetPlanListEl.addEventListener("click", e => {
+  const btn = e.target.closest("[data-fplan-decide]");
+  if (btn) decideFleetPlan(btn.dataset.fplanId, btn.dataset.fplanDecide);
+});
+const fleetPlanRefreshEl = document.getElementById("fleetPlanRefresh");
+if (fleetPlanRefreshEl) fleetPlanRefreshEl.addEventListener("click",
+  () => refreshFleetPlans());
 /* car K: the recovery card's actions — each confirms, then posts */
 const recWdRestartEl = document.getElementById("recWdRestart");
 if (recWdRestartEl) recWdRestartEl.addEventListener("click", () =>
@@ -12515,11 +12684,41 @@ const JRN_MOMENTS = {
   pocket: ["jrn.m.pocket", "Pocket dog — its first message on your phone"],
   remembers: ["jrn.m.remembers", "It remembers you — the first time it quoted your own past"] };
 
+/* Need-B B-11: the three starter scenes. A scene only PREFILLS the chat
+   input (the owner presses send) and moves the console to Chat. Nothing is
+   sent, no setting is written, and no second onboarding state machine is
+   created — the journey card stays the one source of "what next". */
+const JRN_SCENES = [
+  { id: "knowledge",
+    title: "jrn.scene.knowledge.title",
+    fallbackTitle: "Remember my things",
+    desc: "jrn.scene.knowledge.desc",
+    fallbackDesc: "Tell it what matters; it keeps a profile you can read back.",
+    prompt: "Help me build a personal knowledge base. Remember that I prefer tools running locally and that my data should stay on this machine. I will tell you the important things next." },
+  { id: "private",
+    title: "jrn.scene.private.title",
+    fallbackTitle: "Keep it on this machine",
+    desc: "jrn.scene.private.desc",
+    fallbackDesc: "A local workflow for diaries, files and analysis that never leaves the box.",
+    prompt: "Start a fully local workflow with me: use the model endpoint I configured, keep my preferences in memory, and show me the plan before any file operation." },
+  { id: "reminder",
+    title: "jrn.scene.reminder.title",
+    fallbackTitle: "Let it remind me",
+    desc: "jrn.scene.reminder.desc",
+    fallbackDesc: "Set a reminder or a recurring job in plain language.",
+    prompt: "I configured a chat channel. Please check that it works, then set a test reminder for tomorrow at 15:00 to check my backup." },
+];
+
+function jrnSceneById(id) {
+  return JRN_SCENES.find(s => s.id === id) || null;
+}
+
 function renderJourney() {
   const card = document.getElementById("journeyCard");
   const stages = document.getElementById("jrnStages");
   const next = document.getElementById("jrnNext");
   const moments = document.getElementById("jrnMoments");
+  const scenes = document.getElementById("jrnScenes");
   if (!card || !stages || !next || !moments) return;
   const d = jrnData;
   if (!d || typeof d !== "object") { card.hidden = true; return; }
@@ -12542,6 +12741,17 @@ function renderJourney() {
       `${got ? "\u2713" : "\u25cb"} ` +
       `${escapeHtml(t(JRN_MOMENTS[k][0], JRN_MOMENTS[k][1]))}</div>`;
   }).join("");
+  if (scenes) {
+    scenes.innerHTML = JRN_SCENES.map(s =>
+      `<div class="ctl-row" style="align-items:flex-start;">` +
+      `<label style="flex:1;min-width:0;">` +
+      `<strong style="display:block;">${escapeHtml(t(s.title, s.fallbackTitle))}` +
+      `</strong>` +
+      `<span class="stat-note" style="margin:0;">` +
+      `${escapeHtml(t(s.desc, s.fallbackDesc))}</span></label>` +
+      `<button class="btn" type="button" data-jrn-scene="${escapeHtml(s.id)}" ` +
+      `data-i18n="jrn.sceneStart">START</button></div>`).join("");
+  }
 }
 
 async function refreshJourney() {
@@ -12554,8 +12764,21 @@ async function refreshJourney() {
 const overviewSecEl = document.getElementById("view-overview");
 if (overviewSecEl) overviewSecEl.addEventListener("click", e => {
   const b = e.target.closest("[data-jrn-go]");
-  if (b) setView(b.dataset.jrnGo, true);
+  if (b) { setView(b.dataset.jrnGo, true); return; }
+  const s = e.target.closest("[data-jrn-scene]");
+  if (s) jrnSceneStart(s.dataset.jrnScene);
 });
+
+/* Need-B B-11: a scene prefills the chat input and moves to Chat. It never
+   sends on the owner's behalf — the owner presses SEND. */
+function jrnSceneStart(id) {
+  const scene = jrnSceneById(id);
+  if (!scene) return;
+  const input = document.getElementById("chatInput");
+  if (input) input.value = scene.prompt;
+  setView("chat", true);
+  if (input) { try { input.focus(); } catch (e) { /* focus is optional */ } }
+}
 /* UX round 2 (B2): the Overview backup pointer opens the one real card */
 const ovBackupOpenEl = document.getElementById("ovBackupOpen");
 if (ovBackupOpenEl) ovBackupOpenEl.addEventListener("click", () => openBackupCard());

@@ -113,6 +113,81 @@ P0 verification in the development tree: core 2718/2718, web smoke 607/607,
 Stream browser probe 6/6, locale packs 1733/1733, source-language scan 0, and
 publish gate READY(0). This is not yet included in a release.
 
+## The decision key and the role catalog (Need-B P1a)
+
+Two engine-side pieces, both in `mycore/fleetgate.py`. Neither adds a
+user-visible string, and neither spends a token.
+
+**The decision key** — a deterministic complexity band over the briefs a
+parent wrote: parallel briefs, brief size, distinct paths, cross-cutting
+verbs, enumerated items and distinct topics. The band (S/M/L) yields a
+fan-out ceiling and a short human-readable reason list. It is a heuristic
+band, never a proof.
+
+`mycore.fleet.auto_split` decides what the band may do:
+
+| Mode | Behavior |
+|---|---|
+| `off` | the band is not computed at all |
+| `advise` (default) | the band is computed and recorded; **never** a refusal |
+| `enforce` | a fan-out wider than the band's ceiling is refused, with the reason |
+
+An unknown mode degrades to `advise` (never to `enforce`); a bad value is
+refused at settings-write time.
+
+**The role catalog** — `scout`, `analyst`, `implementer`, `verifier`. A role
+fixes a clone's tool policy, its iteration bound and its report contract, and
+asks for a fixed report block (`status`, `summary`, `findings`, `handles`,
+`blocker`) so the parent folds reports instead of transcripts. A clone that
+ignores the schema is recorded honestly as `free-form`, never as a failed
+task.
+
+A role is **opt-in**: a task without `role` keeps exactly today's behavior
+(the granted tools, the shared system line, the brief verbatim). A role may
+narrow the granted tools, never widen them, and never grant `delegate` or
+`execute_code`.
+
+```json
+delegate(tasks = [
+  {"task": "list every call site of the parser", "role": "scout"},
+  {"task": "run the parser test suite and report the exit status",
+   "role": "verifier"}])
+```
+
+The band, the roles and the parsed report are recorded in the local fleet
+ledger. The surfaces that SHOW them (the receipt, the board) and the
+sign-off gate before a write-capable fleet are the next increment (P1b).
+
+## The sign-off gate (Need-B P1b)
+
+A fleet whose clones may WRITE waits for the owner. `mycore.fleetplan.py`
+holds the proposal (the same shape as an exchange order plan: approve /
+reject / cancel — it authorizes ONE dispatch and carries no settings patch).
+
+`mycore.fleet.require_signoff` decides the gate's scope:
+
+| Mode | Behavior |
+|---|---|
+| `off` | no fleet ever waits |
+| `roles` (default) | a write-capable fleet that NAMED a role waits for the owner |
+| `writes` | every write-capable fleet waits, including the plain delegate path |
+
+The default keeps the shipped delegate contract (granting `write_file` to a
+clone has worked since 0.5.x); widen it with one setting. The gate reads the
+tools the fleet would ACTUALLY use (a role may narrow them), so a read-only
+role is never gated. A refusal names the plan id; once the owner approves it
+in the console, the model re-dispatches with `approval="<plan id>"`. One
+approval authorizes ONE dispatch and is then CONSUMED.
+
+## The fleet board and the sign-off queue (console)
+
+- The Stream view's FLEETS card lists recent fleets with each clone's
+  status, its **role** and the decision key's **band** as chips, and the
+  exact token facts (`in/out`, or `?` when the provider reported none).
+- Settings carries a "Clone fleet approvals" card (separate from "Agent
+  plans" on purpose: a fleet plan authorizes one dispatch, a settings plan
+  carries a patch) with APPROVE / REJECT, each Bearer-gated.
+
 ## Evidence
 
 - Whitelist carrier + console editor (0.5.40): `tmp/e2e_activation.py` `L2`

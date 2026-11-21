@@ -482,6 +482,22 @@ h1, h2, h3, h4, .serif {
   border-radius: 0 50% 50% 50%; transform: rotate(45deg);
 }
 
+/* ---------------------------------------------- first scenes (B-7a) ------ */
+.scene-grid {
+  display: flex; gap: 14px; align-items: stretch; margin-top: 30px;
+}
+.scene-card {
+  flex: 1; padding: 24px 22px; border: 1px solid var(--line);
+  background: var(--panel);
+  transition: transform .25s, border-color .25s, box-shadow .25s;
+}
+.scene-card:hover {
+  transform: translateY(-4px); border-color: rgba(40, 146, 255, .5);
+  box-shadow: var(--shadow);
+}
+.scene-card h4 { margin-bottom: 10px; }
+.scene-card p { color: var(--muted); font-size: 14px; line-height: 1.65; }
+
 /* ------------------------------------------------------------- skills --- */
 .empty-card {
   border: 1px dashed var(--line-2); text-align: center;
@@ -961,6 +977,7 @@ h1, h2, h3, h4, .serif {
   .hero-title { font-size: clamp(34px, 9vw, 52px); }
   .steps { flex-direction: column; }
   .step-arrow { transform: rotate(90deg); }
+  .scene-grid { flex-direction: column; }
   .pipeline { grid-template-columns: 1fr; }
   .parrow { transform: rotate(90deg); justify-self: center; }
   .arch-band { grid-template-columns: minmax(0, 1fr); gap: 12px; padding: 22px; }

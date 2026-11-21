@@ -370,6 +370,25 @@
             <div class="bar bar-violet"><div class="bar-fill" id="userBar"></div></div>
             <span class="num" id="userNum">–</span>
           </div>
+          <!-- Need-B B-11: the gauge was the whole memory surface. BROWSE
+               opens the READ-ONLY view of the same two files (entries +
+               local search). It cannot edit, move or prune anything —
+               editing stays a separate, human-approved action. -->
+          <div class="ctl-actions" style="margin-top:8px;">
+            <button class="btn" id="memBrowseBtn" type="button"
+                    data-i18n="memory.browse">BROWSE</button>
+          </div>
+        </div>
+
+        <!-- Need-B B-11: the read-only memory browser (GET /api/memory). -->
+        <div class="card span-2" id="memBrowseCard" hidden>
+          <h2><span data-i18n="memory.browseTitle">What it remembers</span>
+              <span class="chat-badge" id="memBrowseBadge">–</span></h2>
+          <div class="stat-note" data-i18n="memory.browseHint">read-only — these are the files the model writes; you can search them, but editing happens through the assistant, not here</div>
+          <input class="chat-input" id="memSearch" maxlength="120"
+                 data-i18n-ph="memory.browseSearch"
+                 placeholder="search the memory…">
+          <div id="memBrowseList"></div>
         </div>
 
         <!-- UX round 2 (B2): the backup entry point Overview was missing — a
@@ -473,6 +492,15 @@
             <div class="stat-note" style="margin-top:0;"
                  data-i18n="jrn.moments">Five moments we celebrate together</div>
             <div id="jrnMoments"></div>
+          </div>
+          <!-- Need-B B-11: three starter scenes inside the EXISTING journey
+               card. A scene only PREFILLS the chat input and moves you to
+               Chat — it never sends anything, never writes a setting, and
+               never creates a second onboarding state machine. -->
+          <div style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);">
+            <div class="stat-note" style="margin-top:0;"
+                 data-i18n="jrn.scenes">Start with one of these</div>
+            <div id="jrnScenes"></div>
           </div>
         </div>
         <!-- Draft E signature card: hold-to-seal authority preview + four
@@ -2169,6 +2197,21 @@
                writes: every change waits here, dry-validated by the SAME
                validator a hand-typed save runs; APPROVE applies it through
                the same write core as SAVE. -->
+          <!-- Need-B P1b: the sign-off queue for a WRITE-capable clone
+               fleet. A separate card on purpose: a fleet plan authorizes
+               ONE dispatch, a settings plan carries a patch — they are not
+               the same decision. -->
+          <div class="card" data-setgroup="services" id="fleetPlanCard">
+            <h2 data-i18n="fplan.sec">Clone fleet approvals</h2>
+            <div class="stat-note" data-i18n="fplan.hint">a delegated fleet that may write waits for you here — approving it authorizes that one dispatch, nothing else</div>
+            <div id="fleetPlanList"></div>
+            <div class="stat-note" id="fleetPlanEmpty" data-i18n="fplan.empty">no fleets waiting</div>
+            <div class="ctl-actions">
+              <button class="btn" id="fleetPlanRefresh" type="button"
+                      data-i18n="fplan.refresh">REFRESH</button>
+              <span class="save-state" id="fleetPlanMsg" role="status"></span>
+            </div>
+          </div>
           <div class="card" data-setgroup="services" id="agentPlanCard">
             <h2 data-i18n="aplan.sec">Agent plans</h2>
             <div class="stat-note" data-i18n="aplan.hint">the assistant proposes settings changes with its settings tool — nothing is written until you approve it here</div>

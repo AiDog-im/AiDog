@@ -53,7 +53,7 @@ branch. All of these are refused with a `400` and an exact
 
 Only the offending **tool name** is ever echoed — never a value, never
 anything secret (the field holds names only, so there is no secret to leak).
-The catalog lives in `mycore/tools.py::KNOWN_TOOL_NAMES` (**29 names** = 11
+The catalog lives in `mycore/tools.py::KNOWN_TOOL_NAMES` (**30 names** = 11
 core + `generate_image` + `connector_search` + `community_post` + `backup_run`
 (car 8, CKX-P2) + the six `browser_*` + the six `exchange_*` + `settings`
 (car C, propose-only) + `chain_read` (Web3/finance skills Phase 1, READ-ONLY
@@ -78,6 +78,30 @@ An **unknown name from the env var** is not fatal: it is ignored with one
 honest, non-secret stderr note per name —
 `tools_off unknown: <name>` — and the remaining known names still apply.
 
+## How the switch composes with the protected-write gate (car 0.5.84, A-1)
+
+The kill switch and the **protected-path write gate** are two independent
+guards, and both are refusals rather than partial restrictions:
+
+| Guard | Scope | Behavior |
+|---|---|---|
+| `mycore.tools_off` | a whole tool name | the tool is **unregistered** — absent from the schema, dispatch answers `ERROR: unknown tool '<name>'` |
+| protected writes (A-1) | specific files, inside tools that stay registered | `write_file` / `edit_file` refuse the protected set with a reason that names the sanctioned path |
+
+The A-1 protected set (body `constitution/`, `skills/`, `memory/` under the
+active body root plus the shared `<repo>/overlay` copy, the active
+`settings.json`, and the `<repo>/web/` tree) is refused with a fixed reason:
+settings is propose-only (file a plan with the `settings` tool; the owner
+approves it in the console), the constitution (SOUL.md) is owner-owned, and
+skills/memory are curated through `/learn` (lint gate) rather than
+`write_file`. **Reads stay open** — the constitution rides the system stack by
+design, and `settings get` is a read. `run_bash` is a different, declared trust
+boundary and is deliberately not covered.
+
+Composed: turning a tool OFF removes it entirely; turning it ON never grants
+a write to a protected path. The two guards never contradict each other and
+neither can be used to reach the other one's scope.
+
 ## Security note
 
 - No secrets: the key stores tool names only; validation echoes just the
@@ -101,7 +125,8 @@ honest, non-secret stderr note per name —
 - `tools_off: disabled=None parity` / `tools_off: disabled=frozenset() parity (byte-identical names)`
 - `tools_off: unknown env name ignored, known kept`
 
-**Web console smoke** (`tests/web_console_p3.py`, 4 new legs → total **154/154**):
+**Web console smoke** (`tests/web_console_p3.py` — four legs for this
+feature inside the full console suite, which now runs **607/607**):
 
 - `POST mycore valid tools_off -> 200 + round-trips`
 - `POST mycore unknown tools_off name -> 400 + name`
