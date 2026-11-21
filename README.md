@@ -66,9 +66,11 @@ subagents, MCP, and an institutional self-evolution loop (`/learn`,
 `/reflect`, lint-gated writes) whose maturity grows with use.
 
 **Platforms.** Linux via `install.sh` (the reference path, fully tested,
-including WSL2 on Windows), Windows through the same WSL2 command, macOS
-expected-but-untested, and iOS/Android through the Telegram bot plus the
-website — the console binds loopback-only on your own machine, so phone
+including WSL2 on Windows), Windows through the same WSL2 command **plus a
+native portable shell** (zip on the GitHub Release, attach-only to the
+WSL2 console, selftest-verified), macOS expected-but-untested, and
+iOS/Android through the chat channel plus the website — the console binds
+loopback-only on your own machine, so phone
 access is an SSH tunnel, never a cloud console. The honest matrix lives on
 the site's Platforms section; the guide is [docs/installation.md](docs/installation.md).
 
@@ -204,7 +206,7 @@ Every release is cut only after these run green on a clean tree:
 | Memory persistence | **58/58** |
 | Setup wizard | **106/106** |
 | Profile isolation (offline, subprocess cross-check) | **63/63** |
-| Desktop shell (`node --test`) | **16/16** |
+| Desktop shell (`node --test`) | **17/17** |
 | `aidog doctor` | **0 FAIL · 0 WARN** (honest environment WARN only when egress is fully gone) |
 | Publish gate (deny-by-default manifest) | **READY** |
 | Real-machine E2E | profiles **18/18** · channels **12/12** · domestic channels **46/46** · pipeline **39/39** · web3 read-only **33/33** · web3 approval **61/61** · frontend coverage **62/62** · frontend UI **45/45** · activation **81/81** · activation UI **50/50** · settings matrix **63/63** + UI **20/20** · missions **54/54** · mission-orch **63/63** · mission-pause **73/73** · skills catalog **187/187** · skills remote **58/58** · skills install API **65/65** · skills UI **23/23** · skills parity **68/68** · gateway UI **26/26** · ckx round-trip **28/28** · console UI probes **21/21** + **22/22** · region API **28/28** · region UI **20/20** |

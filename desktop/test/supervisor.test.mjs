@@ -79,6 +79,41 @@ test('probe healthy hits GET {base}/api/health', async () => {
   assert.equal(seen[0].method, 'GET');
 });
 
+// ---- win32 attach-only (car J) ----------------------------------------
+
+test('win32: healthy console still attaches; down console fails fast, never spawns', async () => {
+  // healthy -> the platform gate must not shadow the attach path
+  const up = makeFetch({ healthyAfter: 1 });
+  const upSpawn = makeSpawn();
+  const attached = await ensureConsole({
+    repo: '/some/repo',
+    base: BASE,
+    platform: 'win32',
+    fetchImpl: up.fn,
+    spawnImpl: upSpawn.fn,
+    logger: silent,
+  });
+  assert.equal(attached.mode, 'attached');
+  assert.equal(upSpawn.state.calls.length, 0);
+
+  // down -> honest attach-only error before any spawn or 10s poll
+  const down = makeFetch({ healthyAfter: Infinity });
+  const downSpawn = makeSpawn();
+  await assert.rejects(
+    () => ensureConsole({
+      repo: '/some/repo',
+      base: BASE,
+      platform: 'win32',
+      fetchImpl: down.fn,
+      spawnImpl: downSpawn.fn,
+      logger: silent,
+    }),
+    /only attaches/
+  );
+  assert.equal(downSpawn.state.calls.length, 0);
+  assert.equal(down.state.calls, 1); // one probe, then the honest throw
+});
+
 // ---- spawn -------------------------------------------------------------
 
 test('probe unhealthy -> spawn python3 server.py in {repo}/web, then healthy', async () => {
@@ -87,6 +122,7 @@ test('probe unhealthy -> spawn python3 server.py in {repo}/web, then healthy', a
   const res = await ensureConsole({
     repo: '/some/repo',
     base: BASE,
+    platform: 'linux',           // car J: spawn legs are platform-explicit
     env: { AIDOG_WEB_PORT: '18790' },
     fetchImpl: fetchFake.fn,
     spawnImpl: spawnFake.fn,
@@ -133,6 +169,7 @@ test('spawn never becomes healthy -> throws, child killed', async () => {
       ensureConsole({
         repo: '/some/repo',
         base: BASE,
+        platform: 'linux',       // car J: spawn legs are platform-explicit
         fetchImpl: fetchFake.fn,
         spawnImpl: spawnFake.fn,
         logger: silent,
@@ -167,6 +204,7 @@ test('stopSpawned kills only a spawned child', async () => {
   const res = await ensureConsole({
     repo: '/some/repo',
     base: BASE,
+    platform: 'linux',           // car J: spawn legs are platform-explicit
     fetchImpl: makeFetch({ healthyAfter: 2 }).fn,
     spawnImpl: makeSpawn().fn,
     logger: silent,
