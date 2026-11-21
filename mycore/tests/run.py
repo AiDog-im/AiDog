@@ -20822,6 +20822,224 @@ def test_activity_baseline() -> None:
               and ex.activity_baseline(store_dir, days=999)["days"] == 30)
 
 
+def test_exchange_scope() -> None:
+    """Audit #11 candidate 1: the OBSERVED key scope. The venue is asked
+    what the key is granted; only whitelisted, non-identifying fields leave
+    the module; grants wider than the product's own use are flagged; a venue
+    that does not expose the endpoint degrades to an honest 'not observable'
+    instead of a guess. The probe path is proven END TO END against a local
+    fake vendor over real HTTP + real HMAC signing — not a stub function."""
+    import json as _json
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from mycore import exchange_scope as sc
+
+    # ---------------- A. the module's shape -------------------------------
+    check("scope: only key venues are scoped (the six keyless ones have no "
+          "account to observe)",
+          set(sc.SCOPED_VENUES) == {"okx", "kraken", "binance"},
+          str(sc.SCOPED_VENUES))
+    check("scope: the requested side is stated per venue",
+          sc.REQUESTED["okx"]["uses"] and sc.REQUESTED["okx"]["read_only_sufficient"]
+          is True)
+
+    # ---------------- B. the fake vendor ----------------------------------
+    seen: list[dict] = []
+
+    def _lower_headers(headers) -> dict:
+        # HTTP header names are case-insensitive and urllib rewrites them
+        # ("OK-ACCESS-KEY" -> "Ok-Access-Key"), so compare lowercased.
+        return {str(k).lower(): v for k, v in dict(headers).items()}
+
+    class _Vendor(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: D401 — silence the test server
+            pass
+
+        def _reply(self, doc):
+            body = _json.dumps(doc).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def do_GET(self):  # noqa: N802 — BaseHTTPRequestHandler's name
+            seen.append({"method": "GET", "path": self.path,
+                         "headers": _lower_headers(self.headers)})
+            if self.path.startswith("/api/v5/account/config"):
+                # OKX account configuration: perm + human label + fields the
+                # product must NOT surface (uid, ipWhitelist)
+                self._reply({"code": "0", "msg": "", "data": [{
+                    "perm": "TRADE", "permDisp": "Trade",
+                    "level": "VIP1", "acctLv": "cfd",
+                    "label": "k1", "uid": "99887766",
+                    "ipWhitelist": "203.0.113.9"}]})
+            elif self.path.startswith("/sapi/v1/account/apiRestrictions"):
+                self._reply({"ipRestrict": False, "createTime": 1700000000000,
+                             "enableWithdrawals": True, "enableReading": True,
+                             "enableInternalTransfer": True,
+                             "enableFutures": False, "enableMargin": False,
+                             "enableSpotAndMarginTrading": True,
+                             "enableVanillaOptions": False,
+                             "permits": ["SPOT"]})
+            else:
+                self._reply({"code": -1121, "msg": "Invalid symbol."})
+
+        def do_POST(self):  # noqa: N802 — BaseHTTPRequestHandler's name
+            length = int(self.headers.get("Content-Length") or 0)
+            body = self.rfile.read(length) if length else b""
+            seen.append({"method": "POST", "path": self.path,
+                         "headers": _lower_headers(self.headers),
+                         "body": body.decode("utf-8", "replace")})
+            if self.path.startswith("/0/private/QueryApiKeys"):
+                # Kraken does not recognize this method on the public API
+                self._reply({"error": ["EGeneral:Unknown method"]})
+            else:
+                self._reply({"error": ["EAPI:Invalid key"]})
+
+    srv = ThreadingHTTPServer(("127.0.0.1", 0), _Vendor)
+    import threading
+    t = threading.Thread(target=srv.serve_forever, daemon=True)
+    t.start()
+    base = f"http://127.0.0.1:{srv.server_address[1]}"
+    saved_env = {k: os.environ.get(k) for k in
+                 ("OKX_API_KEY", "OKX_API_SECRET", "OKX_API_PASSPHRASE",
+                  "KRAKEN_API_KEY", "KRAKEN_API_SECRET",
+                  "BINANCE_API_KEY", "BINANCE_API_SECRET",
+                  "AIDOG_EX_OKX_URL", "AIDOG_EX_KRAKEN_URL",
+                  "AIDOG_EX_BINANCE_URL")}
+    saved_https = os.environ.get("HTTPS_PROXY")
+    saved_http = os.environ.get("http_proxy")
+    try:
+        os.environ["HTTPS_PROXY"] = ""
+        os.environ["http_proxy"] = ""
+        os.environ["OKX_API_KEY"] = "probe-key"
+        os.environ["OKX_API_SECRET"] = "probe-secret"
+        os.environ["OKX_API_PASSPHRASE"] = "probe-pass"
+        os.environ["KRAKEN_API_KEY"] = "probe-key"
+        # Kraken secrets are base64 — the fake one must be, or the signing
+        # step fails before the request is even made (which is its own
+        # honest failure mode, and the probe must survive it).
+        os.environ["KRAKEN_API_SECRET"] = "cHJvYmUtc2VjcmV0"
+        os.environ["BINANCE_API_KEY"] = "probe-key"
+        os.environ["BINANCE_API_SECRET"] = "probe-secret"
+        os.environ["AIDOG_EX_OKX_URL"] = base
+        os.environ["AIDOG_EX_KRAKEN_URL"] = base
+        os.environ["AIDOG_EX_BINANCE_URL"] = base
+
+        from mycore import exchanges as ex
+        transport = ex._urllib_transport
+
+        # --- C. OKX: granted, over-granted, whitelisted -------------------
+        okx = sc.probe("okx", transport=transport)
+        grants = okx["observed"]["grants"]
+        check("scope: okx reports the venue's own permission verdict",
+              okx["observed"]["state"] == "granted"
+              and grants.get("perm") == "TRADE", str(okx["observed"]))
+        check("scope: a trading grant on a read-only product use is flagged",
+              "trading-grant" in okx["flags"], str(okx["flags"]))
+        check("scope: identifying fields never leave the module",
+              "uid" not in grants and "ipWhitelist" not in grants
+              and "probe-key" not in _json.dumps(okx), str(grants))
+        check("scope: the request really carried the key header",
+              any(h["headers"].get("ok-access-key") == "probe-key"
+                  for h in seen
+                  if h["path"].startswith("/api/v5/account/config")))
+        check("scope: the request was signed (a signature header is present)",
+              any(h["headers"].get("ok-access-sign") for h in seen
+                  if h["path"].startswith("/api/v5/account/config")))
+
+        # --- D. Binance: withdrawal grant is flagged ----------------------
+        binance = sc.probe("binance", transport=transport)
+        check("scope: binance reports the venue's own restrictions",
+              binance["observed"]["state"] == "granted"
+              and binance["observed"]["grants"].get("enableWithdrawals") is True,
+              str(binance["observed"]))
+        check("scope: a withdrawal grant is flagged",
+              "withdraw-grant" in binance["flags"], str(binance["flags"]))
+        check("scope: binance metadata never leaves the module",
+              "ipRestrict" not in binance["observed"]["grants"]
+              and "createTime" not in binance["observed"]["grants"])
+        check("scope: the binance request was signed and keyed",
+              any(h["headers"].get("x-mbx-apikey") == "probe-key" for h in seen
+                  if h["path"].startswith("/sapi/v1/account/apiRestrictions")))
+
+        # --- E. Kraken: honest degradation -------------------------------
+        kraken = sc.probe("kraken", transport=transport)
+        check("scope: a venue without a scope endpoint says so, never guesses",
+              kraken["observed"]["state"] == "not_observable",
+              str(kraken["observed"]))
+        check("scope: a venue with no observation raises no flag",
+              kraken["flags"] == [], str(kraken["flags"]))
+
+        # --- F. no key -> not configured, no request at all --------------
+        before = len(seen)
+        os.environ.pop("BINANCE_API_KEY", None)
+        os.environ.pop("BINANCE_API_SECRET", None)
+        nokey = sc.probe("binance", transport=transport)
+        check("scope: without a key the probe reports 'not configured' and "
+              "sends nothing",
+              nokey["observed"]["state"] == "not_configured"
+              and len(seen) == before, str(nokey["observed"]))
+
+        # --- G. the summary counts ---------------------------------------
+        rows = [okx, kraken, nokey]
+        agg = sc.summary(rows)
+        check("scope: the summary counts granted, flagged and unknown",
+              agg["venues"] == 3 and agg["granted"] == 1
+              and agg["flagged"] == 1 and agg["not_observable"] == 1, str(agg))
+
+        # --- H. red lines, asserted on the source ------------------------
+        # Every path literal in the module must be one of the three
+        # account-permission queries. There is no order path, no transfer
+        # path, no withdrawal path — not "we do not call it today", but
+        # "the code cannot express it".
+        src = (Path(__file__).resolve().parent.parent
+               / "exchange_scope.py").read_text(encoding="utf-8")
+        paths = set(re.findall(r"\"(/[^\"]*)\"", src))
+        allowed = {"/api/v5/account/config",
+                   "/sapi/v1/account/apiRestrictions",
+                   "/0/private/QueryApiKeys"}
+        check("scope: the module can only name the three read-only scope "
+              "endpoints",
+              paths <= allowed, str(sorted(paths - allowed)))
+        import ast as _ast
+        tree = _ast.parse(src)
+        imported: set[str] = set()
+        for node in _ast.walk(tree):
+            if isinstance(node, _ast.ImportFrom):
+                for alias in node.names:
+                    imported.add(alias.name)
+            elif isinstance(node, _ast.Import):
+                for alias in node.names:
+                    imported.add(alias.name.split(".")[0])
+        expected = {"ExchangeError", "VENUES", "_binance_request",
+                    "_kraken_private", "_okx_private", "missing_slots"}
+        from_exchanges = {n for n in imported
+                          if n in expected or "order" in n.lower()
+                          or "transfer" in n.lower()
+                          or "withdraw" in n.lower()
+                          or "execute" in n.lower()}
+        check("scope: the module imports only the read-only scope helpers",
+              from_exchanges == expected,
+              str(sorted(from_exchanges - expected)))
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        if saved_https is None:
+            os.environ.pop("HTTPS_PROXY", None)
+        else:
+            os.environ["HTTPS_PROXY"] = saved_https
+        if saved_http is None:
+            os.environ.pop("http_proxy", None)
+        else:
+            os.environ["http_proxy"] = saved_http
+
+
 def test_pipeline() -> None:
     """Pipeline car (acquiring customers automatically, owner concept): the six
     stages are pure functions over ONE document, every send gate is re-checked
@@ -21520,6 +21738,7 @@ def main() -> int:
         test_fleetplan,
         test_c3_security,
         test_activity_baseline,
+        test_exchange_scope,
     ]
     rows = []
     for fn in suites:

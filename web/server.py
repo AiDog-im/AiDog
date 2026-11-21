@@ -156,6 +156,17 @@ Routes:
   GET  /api/exchange/quote      -> READ-ONLY public market probe: venue +
                                    optional symbol -> {venue, symbol, lines};
                                    own 10/60s sliding window -> 429
+  GET  /api/exchange/scope      -> the OBSERVED key scope (audit #11
+                                   candidate 1): the venue is asked, with the
+                                   owner's own key, what that key is granted ->
+                                   {venue, observed{state, grants, detail},
+                                   requested{uses, order_path}, flags[]}.
+                                   READ-ONLY by construction (three
+                                   account-permission queries; no order, no
+                                   transfer, no key echo); whitelisted fields
+                                   only; unknown venue -> 400; no key -> 200
+                                   with state 'not_configured' (nothing is
+                                   sent); own 6/60s sliding window -> 429
   GET  /api/exchange/plans      -> stored W2 order plans (read, no auth —
                                    same contract as every GET; fail-soft 503)
   GET  /api/quotes              -> Extensions car (Phase B): keyless READ-ONLY
@@ -4330,6 +4341,13 @@ EXCHANGE_QUOTE_RATE_LIMIT = 10  # quote probes per sliding minute
 EXCHANGE_QUOTE_RATE_WINDOW = 60.0
 _exchange_quote_times: deque = deque()
 _exchange_quote_lock = threading.Lock()
+# The key-scope probe (audit #11 candidate 1) gets its own, tighter window:
+# it authenticates with the owner's key, so it must not be spammable by a
+# page that reloads. 6 per minute is plenty for a button a person presses.
+EXCHANGE_SCOPE_RATE_LIMIT = 6
+EXCHANGE_SCOPE_RATE_WINDOW = 60.0
+_exchange_scope_times: deque = deque()
+_exchange_scope_lock = threading.Lock()
 BYOK_VOICE = "alloy"           # single OpenAI-compatible voice slot (both langs)
 BYOK_MAX_AUDIO = 5_000_000     # upstream speech bytes read cap
 
@@ -4358,6 +4376,21 @@ def _exchange_quote_rate_ok() -> bool:
         if len(_exchange_quote_times) >= EXCHANGE_QUOTE_RATE_LIMIT:
             return False
         _exchange_quote_times.append(now)
+        return True
+
+
+def _exchange_scope_rate_ok() -> bool:
+    """Independent sliding window for GET /api/exchange/scope — the key-scope
+    probe authenticates with the owner's key, so it gets its own tight
+    window (6/minute) and never spends the quote/STT budgets."""
+    now = time.time()
+    with _exchange_scope_lock:
+        while (_exchange_scope_times and
+               now - _exchange_scope_times[0] > EXCHANGE_SCOPE_RATE_WINDOW):
+            _exchange_scope_times.popleft()
+        if len(_exchange_scope_times) >= EXCHANGE_SCOPE_RATE_LIMIT:
+            return False
+        _exchange_scope_times.append(now)
         return True
 
 
@@ -7625,6 +7658,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_bridge_template()
         if path == "/api/exchange/quote":
             return self._handle_exchange_quote()
+        if path == "/api/exchange/scope":
+            return self._handle_exchange_scope()
         if path == "/api/quotes":
             return self._handle_quotes()
         if path == "/api/exchange/plans":
@@ -10455,6 +10490,40 @@ class Handler(BaseHTTPRequestHandler):
         lines = [ln for ln in str(text).splitlines() if ln.strip()]
         return self._json({"venue": venue, "symbol": symbol or "",
                            "lines": lines})
+
+    def _handle_exchange_scope(self) -> None:
+        """GET /api/exchange/scope?venue=<key> — the OBSERVED key scope
+        (audit #11 candidate 1). The venue is asked, with the owner's own
+        key, what that key is granted; the answer is reduced to whitelisted
+        names and booleans before it leaves the module. READ-ONLY by
+        construction: three account-permission queries, no order path, no
+        transfer path, no key echo. Answers 200 {venue, observed, requested,
+        flags}; an unknown venue -> 400; a venue without a key -> 200 with
+        state 'not_configured' (honest, and no request is sent); its own
+        sliding window (6/60s) -> 429."""
+        if not _exchange_scope_rate_ok():
+            return self._json({"error": "rate limited"}, 429)
+        try:
+            from mycore import exchange_scope as _scope
+            from mycore import exchanges as _exchanges
+        except Exception as e:  # noqa: BLE001 — module absent = honest 503
+            sys.stderr.write(f"exchange scope import failed err={type(e).__name__}\n")
+            return self._json({"error": "exchange scope module unavailable"},
+                              503)
+        query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+        venue = (query.get("venue") or [""])[0].strip().lower()
+        if venue not in _scope.SCOPED_VENUES:
+            return self._json(
+                {"error": "unknown venue",
+                 "details": ["venue must be one of: " +
+                             ", ".join(_scope.SCOPED_VENUES)]}, 400)
+        try:
+            result = _scope.probe(
+                venue, transport=_exchanges._urllib_transport, timeout=12.0)
+        except Exception as e:  # noqa: BLE001 — never a 500 on a probe
+            sys.stderr.write(f"exchange scope failed err={type(e).__name__}\n")
+            return self._json({"error": "scope probe failed"}, 502)
+        return self._json(result)
 
     def _handle_quotes(self) -> None:
         """GET /api/quotes?market=cn|us&symbol=<sym> — Extensions car (Phase B):
