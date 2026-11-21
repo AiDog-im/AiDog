@@ -23,6 +23,19 @@ bot itself.
   `sessions/archive/`) and start a fresh session.
 - **Example:** `/reset`
 
+### `/rewind [n]` · `/rewind` (as a reply)
+
+- **Purpose:** message-level session rewind (car C1, A-2). `/rewind <n>`
+  drops the last **n visible (user/assistant)** messages — tool rows are not
+  counted, since the chat never saw them. `/rewind` sent **as a reply** to a
+  message drops that message and everything after it (matched from the end
+  by content), so you can re-ask from that point.
+- **Safety:** the pre-rewind transcript is rotated into
+  `sessions/archive/` first (crash-safe: prefix → temp file → rotate →
+  atomic rename); a rewind that would empty the chat is refused — use
+  `/reset` for that.
+- **Example:** `/rewind 3` · reply to an old message with `/rewind`
+
 ### `/model [id]`
 
 - **Purpose:** with no argument, show the current model id and endpoint host
