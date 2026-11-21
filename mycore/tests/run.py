@@ -75,6 +75,8 @@ def expected_tool_names() -> frozenset[str]:
     registration) + connector_search IFF connectors.status() reports at
     least one credential slot (car 4c, mirrors the registration gate) +
     exchange_markets ALWAYS (keyless public market data, W1) and
+    chain_read ALWAYS (READ-ONLY JSON-RPC on the public chain endpoints,
+    Web3/finance skills Phase 1 — keyless, reads only) and
     exchange_portfolio / exchange_orders / exchange_prepare_order /
     exchange_execute_order / exchange_plans IFF at least one CEX credential
     slot is present (W1 account reads + W2 approval gate, the same gate).
@@ -83,6 +85,7 @@ def expected_tool_names() -> frozenset[str]:
     to a dead path — so every count assertion derives from this, never a
     literal."""
     out = set(CORE_TOOLS) | {"generate_image", "exchange_markets",
+                             "chain_read",
                              "community_post", "backup_run",
                              "settings"}   # car C: propose-only settings tool
     try:
@@ -571,9 +574,20 @@ def test_assembly() -> None:
     prod_sites = (REPO / "mycore" / "service.py", REPO / "web" / "server.py",
                   REPO / "mycore" / "cli.py", REPO / "mycore" / "acp.py")
     misses = {p.name: _calls_missing_facts(p) for p in prod_sites}
+    # Same wall, second clause: on the Telegram pipeline the decision router
+    # must run BEFORE the stack build — otherwise the injected block names the
+    # pre-router model while ChatClient actually calls the routed one.
+    svc_src = (REPO / "mycore" / "service.py").read_text(encoding="utf-8")
+    body_at = svc_src.find("def _pipeline_body(")
+    body_end = svc_src.find("\n    def ", body_at + 1)
+    body = svc_src[body_at:body_end if body_end > 0 else len(svc_src)]
+    router_at = body.find("decision.apply_router(")
+    stack_at = body.find("build_system_stack(")
+    order_ok = body_at >= 0 and 0 <= router_at < stack_at
     check("runtime facts: every production call site passes the slot",
-          not any(misses.values()),
-          str({k: v for k, v in misses.items() if v}))
+          not any(misses.values()) and order_ok,
+          str({k: v for k, v in misses.items() if v})
+          + ("" if order_ok else f" router={router_at} stack={stack_at}"))
 
 
 def test_context_files() -> None:
@@ -9910,7 +9924,7 @@ def test_tools_toggle() -> None:
     try:
         # catalog sanity: 11 core + backup_run (car 8) + generate_image
         # + connector_search + 6 browser + 3 exchange_* (W1) + 3 exchange_*
-        # (W2) + settings (car C, propose-only)
+        # (W2) + settings (car C, propose-only) + chain_read (Phase 1)
         check("tools_off: KNOWN_TOOL_NAMES covers core + conditional",
               {"read_file", "run_bash", "cron", "delegate", "execute_code",
                "backup_run",
@@ -9918,8 +9932,9 @@ def test_tools_toggle() -> None:
                "browser_close", "exchange_markets", "exchange_portfolio",
                "exchange_orders", "exchange_prepare_order",
                "exchange_execute_order", "exchange_plans",
+               "chain_read",
                "settings"} <= KNOWN_TOOL_NAMES
-              and len(KNOWN_TOOL_NAMES) == 28,
+              and len(KNOWN_TOOL_NAMES) == 29,
               str(sorted(KNOWN_TOOL_NAMES)))
 
         # 1) settings dict path disables a core tool
@@ -10270,6 +10285,238 @@ def test_exchanges() -> None:
         except ex.ExchangeError as e:
             check("exchanges: rpc unknown chain rejected",
                   "chain must be one of" in str(e), str(e))
+
+        # --- chain_read (Web3/finance skills Phase 1, D1=B): READ-ONLY ---
+        # Closed grammar BEFORE any transport (unreachable = no network on a
+        # grammar failure), exact-integer output (no float on wei/lamports),
+        # honest upstream errors, and the no-send/no-sign wall: the whitelist
+        # admits reads only, forever.
+        import inspect as _inspect
+        try:
+            ex.chain_read("dogechain", "eth_blockNumber",
+                          transport=unreachable)
+            check("chain_read: unknown chain rejected", False)
+        except ex.ExchangeError as e:
+            check("chain_read: unknown chain rejected",
+                  "chain must be one of" in str(e), str(e))
+        try:
+            ex.chain_read("base", "eth_sendRawTransaction",
+                          transport=unreachable)
+            check("chain_read: method outside whitelist rejected", False)
+        except ex.ExchangeError as e:
+            check("chain_read: method outside whitelist rejected",
+                  "method must be one of" in str(e), str(e))
+        try:
+            ex.chain_read("base", "getSlot", transport=unreachable)
+            check("chain_read: method must belong to its chain", False)
+        except ex.ExchangeError as e:
+            check("chain_read: method must belong to its chain",
+                  "method must be one of" in str(e), str(e))
+        try:
+            ex.chain_read("base", "eth_getBalance", transport=unreachable)
+            check("chain_read: missing address rejected", False)
+        except ex.ExchangeError as e:
+            check("chain_read: missing address rejected",
+                  "0x + 40 hex" in str(e), str(e))
+        try:
+            ex.chain_read("base", "eth_getBalance",
+                          address="0x" + "z" * 40, transport=unreachable)
+            check("chain_read: non-hex address rejected", False)
+        except ex.ExchangeError as e:
+            check("chain_read: non-hex address rejected",
+                  "0x + 40 hex" in str(e), str(e))
+        try:
+            ex.chain_read("solana", "getBalance", address="0xdeadbeef",
+                          transport=unreachable)
+            check("chain_read: non-base58 solana address rejected", False)
+        except ex.ExchangeError as e:
+            check("chain_read: non-base58 solana address rejected",
+                  "base58" in str(e), str(e))
+        try:
+            ex.chain_read("base", "eth_call", contract="0x" + "11" * 20,
+                          data="0x18160dd", transport=unreachable)
+            check("chain_read: odd-length calldata rejected", False)
+        except ex.ExchangeError as e:
+            check("chain_read: odd-length calldata rejected",
+                  "even-length hex" in str(e), str(e))
+        try:
+            ex.chain_read("base", "eth_getTransactionReceipt",
+                          tx_hash="0xabc", transport=unreachable)
+            check("chain_read: short tx hash rejected", False)
+        except ex.ExchangeError as e:
+            check("chain_read: short tx hash rejected",
+                  "0x + 64 hex" in str(e), str(e))
+
+        # --- happy paths through the injected transport (zero network) ---
+        captured.clear()
+        bal_fx = json.dumps({"jsonrpc": "2.0", "id": 1,
+                             "result": "0x2386f26fc10000"})   # 10**16
+        out = ex.chain_read(
+            "base", "eth_getBalance", address="0x" + "11" * 20,
+            transport=lambda u, m, h, p, t: fake_transport(
+                u, m, h, p, t, bal_fx))
+        check("chain_read: eth_getBalance prints exact wei (no float)",
+              out == "balance=10000000000000000 wei (eth_getBalance, latest)",
+              out)
+        req = json.loads(captured["payload"])
+        check("chain_read: balance request targets the chain endpoint",
+              captured["url"] == ex.CHAINS["base"][0]
+              and captured["method"] == "POST"
+              and req["method"] == "eth_getBalance"
+              and req["params"] == ["0x" + "11" * 20, "latest"],
+              str(captured.get("url")) + str(req))
+        call_fx = json.dumps({"jsonrpc": "2.0", "id": 1,
+                              "result": "0x" + "00" * 31 + "64"})
+        out = ex.chain_read(
+            "base", "eth_call", contract="0x" + "22" * 20,
+            data="0x18160ddd",
+            transport=lambda u, m, h, p, t: fake_transport(
+                u, m, h, p, t, call_fx))
+        check("chain_read: eth_call returns the raw result",
+              out.startswith("result=0x"), out)
+        rcpt_fx = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+            "transactionHash": "0x" + "ab" * 32, "blockNumber": "0x10",
+            "status": "0x1", "from": "0x" + "11" * 20,
+            "to": "0x" + "22" * 20, "value": "0x0",
+            "gasUsed": "0x5208",
+            "logs": [{"address": "0x" + "33" * 20,
+                      "topics": ["0x" + "44" * 32]}]}})
+        out = ex.chain_read(
+            "base", "eth_getTransactionReceipt", tx_hash="0x" + "ab" * 32,
+            transport=lambda u, m, h, p, t: fake_transport(
+                u, m, h, p, t, rcpt_fx))
+        check("chain_read: receipt decodes hex to exact ints",
+              "block=16" in out and "gas_used=21000" in out
+              and "status=success" in out and "logs=1" in out
+              and "log[0] address=0x" in out, out)
+        miss_fx = json.dumps({"jsonrpc": "2.0", "id": 1, "result": None})
+        try:
+            ex.chain_read("base", "eth_getTransactionReceipt",
+                          tx_hash="0x" + "cd" * 32,
+                          transport=lambda u, m, h, p, t: fake_transport(
+                              u, m, h, p, t, miss_fx))
+            check("chain_read: absent receipt stays honest", False)
+        except ex.ExchangeError as e:
+            check("chain_read: absent receipt stays honest",
+                  "receipt not found" in str(e), str(e))
+        slot_fx = json.dumps({"jsonrpc": "2.0", "id": 1,
+                              "result": 465484632})
+        out = ex.chain_read(
+            "solana", "getSlot",
+            transport=lambda u, m, h, p, t: fake_transport(
+                u, m, h, p, t, slot_fx))
+        check("chain_read: solana slot renders",
+              out == "solana slot=465484632 (getSlot, public keyless)", out)
+        # real Solana shape: {context:{slot}, value: lamports}
+        lam_fx = json.dumps({"jsonrpc": "2.0", "id": 1,
+                             "result": {"context": {
+                                 "apiVersion": "4.4.0",
+                                 "slot": 465484632}, "value": 12345}})
+        out = ex.chain_read(
+            "solana", "getBalance", address="11111111111111111111111111111111",
+            transport=lambda u, m, h, p, t: fake_transport(
+                u, m, h, p, t, lam_fx))
+        check("chain_read: solana lamports render exactly with context",
+              out.startswith("balance=12345 lamports")
+              and "slot=465484632" in out, out)
+        # real Solana shape for SPL holdings: {context, value:[{account:
+        # {data: {parsed: {info: {mint, tokenAmount}}}}}]} (jsonParsed)
+        ta_fx = json.dumps({"jsonrpc": "2.0", "id": 1, "result": {
+            "context": {"apiVersion": "4.3.0-beta.2", "slot": 465490784},
+            "value": [{"pubkey": "acct111",
+                       "account": {"data": {
+                           "program": "spl-token",
+                           "parsed": {"info": {
+                               "mint": "So11111111111111111111111111111111111111112",
+                               "tokenAmount": {"amount": "1500000000",
+                                               "decimals": 9,
+                                               "uiAmount": 1.5,
+                                               "uiAmountString": "1.5"}},
+                               "type": "account"},
+                           "space": 165}}}]}})
+        captured.clear()
+        out = ex.chain_read(
+            "solana", "getTokenAccountsByOwner",
+            address="11111111111111111111111111111111",
+            transport=lambda u, m, h, p, t: fake_transport(
+                u, m, h, p, t, ta_fx))
+        check("chain_read: spl token accounts parse jsonParsed",
+              "1 token accounts" in out
+              and "mint=So11111111111111111111111111111111111111112" in out
+              and "amount=1.5" in out and "decimals=9" in out
+              and "Token-2022 not covered" in out, out)
+        ta_req = json.loads(captured["payload"])
+        check("chain_read: spl request pins the classic program id",
+              ta_req["params"][1] == {"programId": ex.SPL_TOKEN_PROGRAM}
+              and ta_req["params"][2] == {"encoding": "jsonParsed"},
+              str(ta_req["params"]))
+        sig_fx = json.dumps({"jsonrpc": "2.0", "id": 1, "result": [
+            {"signature": "sig1", "slot": 100, "err": None,
+             "blockTime": 1700000000},
+            {"signature": "sig2", "slot": 99,
+             "err": {"InstructionError": [0, "Custom"]},
+             "blockTime": None}]})
+        out = ex.chain_read(
+            "solana", "getSignaturesForAddress",
+            address="11111111111111111111111111111111",
+            transport=lambda u, m, h, p, t: fake_transport(
+                u, m, h, p, t, sig_fx))
+        check("chain_read: signature list states none vs error honestly",
+              "2 signatures" in out and "sig1" in out and "err=none" in out
+              and "InstructionError" in out, out)
+        empty_fx = json.dumps({"jsonrpc": "2.0", "id": 1, "result": []})
+        out = ex.chain_read(
+            "solana", "getSignaturesForAddress",
+            address="11111111111111111111111111111111",
+            transport=lambda u, m, h, p, t: fake_transport(
+                u, m, h, p, t, empty_fx))
+        check("chain_read: empty history is an honest empty result",
+              "honest empty" in out, out)
+        err_fx = json.dumps({"jsonrpc": "2.0", "id": 1,
+                             "error": {"code": -32602,
+                                       "message": "Invalid params"}})
+        try:
+            ex.chain_read("base", "eth_blockNumber",
+                          transport=lambda u, m, h, p, t: fake_transport(
+                              u, m, h, p, t, err_fx))
+            check("chain_read: upstream JSON-RPC error surfaces", False)
+        except ex.ExchangeError as e:
+            check("chain_read: upstream JSON-RPC error surfaces",
+                  "Invalid params" in str(e), str(e))
+        nores_fx = json.dumps({"jsonrpc": "2.0", "id": 1})
+        try:
+            ex.chain_read("base", "eth_blockNumber",
+                          transport=lambda u, m, h, p, t: fake_transport(
+                              u, m, h, p, t, nores_fx))
+            check("chain_read: result-less payload stays honest", False)
+        except ex.ExchangeError as e:
+            check("chain_read: result-less payload stays honest",
+                  "no result" in str(e), str(e))
+
+        # ---- the no-send/no-sign wall: reads only, in this source ----
+        flat = [m for ms in ex.CHAIN_READ.values() for m in ms]
+        forbidden = ("eth_sendRawTransaction", "eth_sendTransaction",
+                     "eth_sign", "eth_signTransaction", "eth_signTypedData",
+                     "eth_signTypedData_v4", "personal_sign", "signMessage",
+                     "signTransaction", "signAndSendTransaction",
+                     "sendTransaction", "sendRawTransaction")
+        bad = [m for m in flat
+               if m in forbidden or m.startswith("eth_send")
+               or m.startswith("sign") or m.startswith("personal_sign")]
+        check("chain_read: whitelist carries no send/sign method",
+              not bad
+              and all(len(ms) == len(set(ms))
+                      for ms in ex.CHAIN_READ.values()),
+              str(sorted(flat)))
+        check("chain_read: chains are exactly the keyless CHAINS trio",
+              set(ex.CHAIN_READ) == set(ex.CHAINS),
+              str(sorted(ex.CHAIN_READ)))
+        body = _inspect.getsource(ex.chain_read)
+        tokens = [t for t in ("eth_send", "personal_sign", "signMessage",
+                              "_slot(", "okx_sign", "kraken_sign")
+                  if t in body]
+        check("chain_read: source carries no send/sign/slot token",
+              not tokens, str(tokens))
 
         # --- account legs: slot-gated BEFORE any transport ---
         # (run with an EMPTY slot map: these are the keyless-refusal paths)

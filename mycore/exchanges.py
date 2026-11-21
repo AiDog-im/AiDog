@@ -901,6 +901,235 @@ def quote(venue: str, symbol: str | None = None, *, timeout: float = 10.0) -> st
     return markets(venue, symbol, timeout=timeout)
 
 
+# ====================================================== chain reads (P1) ==
+#
+# `chain_read` (Web3/finance skills Phase 1, design doc §3 option B) is the
+# product's READ-ONLY JSON-RPC surface for the three `CHAINS` endpoints.
+# Read-only BY CONSTRUCTION: `CHAIN_READ` is a closed per-chain method
+# whitelist that admits broadcast and signing methods never, no credential
+# exists anywhere on this path (keyless public endpoints only), and the core
+# suite pins both facts against this source — the no-send/no-sign wall sits
+# next to the W2 withdrawal-absence wall. Output is capped at MAX_LINES like
+# every other read here; every failure is an honest ExchangeError naming the
+# rule (closed grammar first, network last).
+
+CHAIN_READ_LIMIT = 20         # bounded page for address-history reads
+# Classic SPL Token program on Solana (a public on-chain constant, not a
+# credential). Token-2022 accounts are out of scope and say so in the output.
+SPL_TOKEN_PROGRAM = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA"
+CHAIN_READ: dict[str, tuple[str, ...]] = {
+    "base": ("eth_blockNumber", "eth_getBalance", "eth_getTransactionCount",
+             "eth_call", "eth_getTransactionReceipt"),
+    "ethereum": ("eth_blockNumber", "eth_getBalance",
+                 "eth_getTransactionCount", "eth_call",
+                 "eth_getTransactionReceipt"),
+    "solana": ("getSlot", "getBalance", "getTokenAccountsByOwner",
+               "getSignaturesForAddress"),
+}
+
+_EVM_ADDR_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+_EVM_HASH_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+_SOL_ADDR_RE = re.compile(r"^[1-9A-HJ-NP-Za-km-z]{32,44}$")
+_EVM_DATA_RE = re.compile(r"^0x(?:[0-9a-fA-F]{2}){1,2048}$")   # even bytes
+_HEX_QTY_RE = re.compile(r"^0x[0-9a-fA-F]+$")
+
+
+def _hexint(val: object, what: str) -> int:
+    """Hex quantity (or int) -> exact int. Never float: wei and lamport
+    balances overflow it and would print as a rounded lie."""
+    if isinstance(val, bool):
+        raise ExchangeError(f"{what}: unexpected numeric shape {val!r}")
+    if isinstance(val, int):
+        return val
+    if isinstance(val, str) and _HEX_QTY_RE.match(val):
+        return int(val, 16)
+    raise ExchangeError(f"{what}: unexpected numeric shape {val!r}")
+
+
+def _chain_params(method: str, *, address: str | None, tx_hash: str | None,
+                  contract: str | None, data: str | None) -> list:
+    """Closed grammar: exactly the params each whitelisted method takes,
+    validated BEFORE any network call. A missing or malformed parameter is
+    an ExchangeError naming the shape — never a guessed default."""
+    if method in ("eth_blockNumber", "getSlot"):
+        return []
+    if method in ("eth_getBalance", "eth_getTransactionCount"):
+        addr = (address or "").strip()
+        if not _EVM_ADDR_RE.match(addr):
+            raise ExchangeError(
+                f"{method} needs address as 0x + 40 hex (got a rejected value)")
+        return [addr, "latest"]
+    if method == "eth_call":
+        to = (contract or "").strip()
+        calldata = (data or "").strip()
+        if not _EVM_ADDR_RE.match(to):
+            raise ExchangeError("eth_call needs contract as 0x + 40 hex")
+        if not _EVM_DATA_RE.match(calldata):
+            raise ExchangeError(
+                "eth_call needs data as 0x + even-length hex, 1..2048 bytes")
+        return [{"to": to, "data": calldata}, "latest"]
+    if method == "eth_getTransactionReceipt":
+        h = (tx_hash or "").strip()
+        if not _EVM_HASH_RE.match(h):
+            raise ExchangeError(
+                "eth_getTransactionReceipt needs tx_hash as 0x + 64 hex")
+        return [h]
+    if method in ("getBalance", "getSignaturesForAddress",
+                  "getTokenAccountsByOwner"):
+        addr = (address or "").strip()
+        if not _SOL_ADDR_RE.match(addr):
+            raise ExchangeError(
+                f"{method} needs a base58 address (32..44 chars, got a "
+                "rejected value)")
+        if method == "getBalance":
+            return [addr]
+        if method == "getSignaturesForAddress":
+            return [addr, {"limit": CHAIN_READ_LIMIT}]
+        return [addr, {"programId": SPL_TOKEN_PROGRAM},
+                {"encoding": "jsonParsed"}]
+    raise ExchangeError(f"method {method} is not on the read whitelist")
+
+
+def _chain_lines(chain: str, method: str, result: object) -> list[str]:
+    """One compact line per value: exact integers (no float on wei or
+    lamports), honest empty vs missing, receipt/log detail bounded."""
+    if method == "eth_blockNumber":
+        if not (isinstance(result, str) and result.startswith("0x")):
+            raise ExchangeError(f"{chain}/{method}: unexpected head {result!r}")
+        return [f"{chain} head={int(result, 16)} ({method}, public keyless)"]
+    if method == "getSlot":
+        return [f"{chain} slot={_fmt(result)} ({method}, public keyless)"]
+    if method == "eth_getBalance":
+        if not (isinstance(result, str) and result.startswith("0x")):
+            raise ExchangeError(
+                f"{chain}/{method}: unexpected balance {result!r}")
+        return [f"balance={int(result, 16)} wei ({method}, latest)"]
+    if method == "getBalance":
+        # Solana answers {context:{slot}, value: lamports} — read the value,
+        # keep the context slot as provenance; a bare integer stays valid.
+        val: object = result
+        ctx = ""
+        if isinstance(result, dict) and "value" in result:
+            val = result.get("value")
+            context = result.get("context")
+            slot = context.get("slot") if isinstance(context, dict) else None
+            if slot is not None:
+                ctx = f", slot={slot}"
+        return [f"balance={_hexint(val, f'{chain}/{method}')} lamports "
+                f"({method}{ctx})"]
+    if method == "eth_getTransactionCount":
+        return [f"nonce={_hexint(result, f'{chain}/{method}')} "
+                f"({method}, latest)"]
+    if method == "eth_call":
+        out = result if isinstance(result, str) else json.dumps(result)
+        if len(out) > 4098:
+            out = out[:4098] + "... [truncated]"
+        return [f"result={out} ({method})"]
+    if method == "eth_getTransactionReceipt":
+        if result is None:
+            raise ExchangeError(f"{chain}: receipt not found for that hash")
+        if not isinstance(result, dict):
+            raise ExchangeError(
+                f"{chain}/{method}: unexpected shape {type(result).__name__}")
+        state = {"0x1": "success", "0x0": "failed"}.get(
+            str(result.get("status")), str(result.get("status")))
+        raw_logs = result.get("logs")
+        logs = raw_logs if isinstance(raw_logs, list) else []
+        lines = [
+            f"tx={result.get('transactionHash', '-')} "
+            f"block={_hexint(result.get('blockNumber'), f'{chain}/receipt')} "
+            f"status={state} from={result.get('from', '-')} "
+            f"to={result.get('to') or 'contract creation'} "
+            f"value_wei={_hexint(result.get('value', '0x0'), f'{chain}/receipt')} "
+            f"gas_used={_hexint(result.get('gasUsed', '0x0'), f'{chain}/receipt')} "
+            f"logs={len(logs)}"
+        ]
+        for i, entry in enumerate(logs[:MAX_LINES - 1]):
+            if not isinstance(entry, dict):
+                continue
+            topics = entry.get("topics")
+            topics = topics if isinstance(topics, list) else []
+            lines.append(f"log[{i}] address={entry.get('address', '-')} "
+                         f"topic0={topics[0] if topics else '-'}")
+        return lines
+    if method == "getTokenAccountsByOwner":
+        # Solana answers {context:{slot}, value:[…]} with jsonParsed data.
+        if not isinstance(result, dict) or not isinstance(
+                result.get("value"), list):
+            raise ExchangeError(
+                f"{chain}/{method}: unexpected shape {type(result).__name__}")
+        rows = result["value"]
+        if not rows:
+            return [f"{chain}: no token accounts for that address (honest "
+                    "empty result, not an error)"]
+        shown = min(len(rows), MAX_LINES - 1)
+        lines = [f"{len(rows)} token accounts (classic SPL program; "
+                 f"Token-2022 not covered; first {shown} shown)"]
+        for entry in rows[:MAX_LINES - 1]:
+            try:
+                info = entry["account"]["data"]["parsed"]["info"]
+                amount = info["tokenAmount"]
+            except (KeyError, TypeError):
+                continue
+            lines.append(
+                f"mint={info.get('mint', '-')} "
+                f"amount={amount.get('uiAmountString') or amount.get('amount', '-')} "
+                f"decimals={amount.get('decimals', '-')} "
+                f"account={entry.get('pubkey', '-')}")
+        return lines
+    if method == "getSignaturesForAddress":
+        if not isinstance(result, list):
+            raise ExchangeError(
+                f"{chain}/{method}: unexpected shape {type(result).__name__}")
+        if not result:
+            return [f"{chain}: no signatures for that address (honest empty "
+                    "result, not an error)"]
+        lines = [f"{len(result)} signatures (latest first, limit "
+                 f"{CHAIN_READ_LIMIT})"]
+        for entry in result[:MAX_LINES - 1]:
+            if not isinstance(entry, dict):
+                continue
+            err = entry.get("err")
+            err_txt = "none" if err in (None, "null") else json.dumps(err)[:80]
+            lines.append(f"sig={entry.get('signature', '-')} "
+                         f"slot={entry.get('slot', '-')} err={err_txt} "
+                         f"time={entry.get('blockTime') or '-'}")
+        return lines
+    raise ExchangeError(f"{method}: no reader for that method")  # unreachable
+
+
+def chain_read(chain: str, method: str, *, address: str | None = None,
+               tx_hash: str | None = None, contract: str | None = None,
+               data: str | None = None, transport: Transport | None = None,
+               timeout: float = DEFAULT_TIMEOUT) -> str:
+    """READ-ONLY JSON-RPC against one of the three public ``CHAINS``
+    endpoints. Keyless: no slot, no signature, no credential exists on this
+    path, and the method whitelist admits reads only — this function cannot
+    place, sign or broadcast anything by construction."""
+    c = (chain or "").strip().lower()
+    if c not in CHAIN_READ:
+        raise ExchangeError(f"chain must be one of {'|'.join(CHAIN_READ)}")
+    if method not in CHAIN_READ[c]:
+        raise ExchangeError(
+            f"{c}: method must be one of {'|'.join(CHAIN_READ[c])}")
+    params = _chain_params(method, address=address, tx_hash=tx_hash,
+                           contract=contract, data=data)
+    transport = transport or _urllib_transport
+    body = json.dumps({"jsonrpc": "2.0", "id": 1, "method": method,
+                       "params": params})
+    doc = _post_form(CHAINS[c][0], body,
+                     {"Content-Type": "application/json"},
+                     transport=transport, timeout=timeout)
+    if not isinstance(doc, dict):
+        raise ExchangeError(f"{c}/{method}: unexpected response shape")
+    if doc.get("error"):
+        raise ExchangeError(f"{c}/{method}: {_err(doc)}")
+    if "result" not in doc:
+        raise ExchangeError(f"{c}/{method}: no result")
+    return "\n".join(_chain_lines(c, method, doc["result"])[:MAX_LINES])
+
+
+
 # ============================================================ W2: orders ==
 #
 # W2 (product decision 2026-10-25) adds ORDER PLACEMENT behind a hard approval

@@ -11,7 +11,10 @@ Companion pages: [capabilities.md](capabilities.md) (the `exchange` and
 Web3 pilot: **9 venues in one catalog** (`okx`, `kraken`, `jupiter`,
 `velora`, `hyperliquid`, `dydx`, `gmx`, `rpc`, `binance`) behind six
 `exchange_*` tools: `exchange_markets / exchange_portfolio / exchange_orders
-/ exchange_prepare_order / exchange_execute_order / exchange_plans`. Public
+/ exchange_prepare_order / exchange_execute_order / exchange_plans`, plus —
+since the Web3/finance skills Phase 1 (design doc §3, D1=B) — the seventh
+Web3 tool `chain_read`, a READ-ONLY JSON-RPC surface over the three public
+chain endpoints (`base`, `ethereum`, `solana`; §4.1). Public
 market data needs **no credential at all**; account reads and every W2 order
 tool are slot-gated with the same capability-honest pattern as
 [connectors.md](connectors.md) — **no slot → the tool does not register** and
@@ -173,6 +176,7 @@ core suite runs with **zero network and zero real keys**.
 | Situation | Behavior |
 |---|---|
 | always | `exchange_markets` registered — public keyless data for all 9 venues |
+| always (Phase 1) | `chain_read` registered — keyless READ-ONLY JSON-RPC on `base` / `ethereum` / `solana`; configuration resolves at CALL time, so a grammar mistake or a dead upstream is an honest ERROR line, never a missing capability |
 | ≥1 CEX venue's **full** slot set present | `exchange_portfolio` + `exchange_orders` + the three W2 tools (`exchange_prepare_order` / `exchange_execute_order` / `exchange_plans`) registered; `registry.exchange_note = None` |
 | no CEX slot set at all | account and order tools **not registered**; `registry.exchange_note = "exchange account tools not configured: okx not configured (set OKX_API_KEY / OKX_API_SECRET / OKX_API_PASSPHRASE in secrets.env); kraken not configured (set KRAKEN_API_KEY / KRAKEN_API_SECRET in secrets.env); binance not configured (set BINANCE_API_KEY / BINANCE_API_SECRET in secrets.env)"` |
 | probe raises (broken module etc.) | `exchange_markets` still registers (fail-soft literal venue enum); note carries `exchange unavailable: <Type>: <msg>` — the probe never breaks the registry |
@@ -196,6 +200,7 @@ exchange_orders         {venue}                                            # slo
 exchange_prepare_order  {venue, side, symbol?, order_type, qty, price?}    # slot-gated — DRY RUN
 exchange_execute_order  {plan_id}                                          # slot-gated — fail-closed
 exchange_plans          {action: list|cancel, plan_id?}                    # slot-gated — no approve here
+chain_read              {chain, method, address?, tx_hash?, contract?, data?}  # always — READ-ONLY JSON-RPC
 ```
 
 - `venue` is an enum taken from the live catalog; `symbol` defaults to the
@@ -224,6 +229,38 @@ exchange_plans          {action: list|cancel, plan_id?}                    # slo
   (provider body truncated to 160 chars) and render as the ordinary
   `ERROR: …` line; credentials never appear in any error, log, repr or
   return value.
+
+### 4.1 `chain_read` — READ-ONLY JSON-RPC (Web3/finance skills Phase 1)
+
+- **Closed grammar, two levels.** `chain ∈ {base, ethereum, solana}` and
+  `method` must belong to that chain's whitelist in
+  `mycore.exchanges.CHAIN_READ`: EVM chains carry `eth_blockNumber`,
+  `eth_getBalance`, `eth_getTransactionCount`, `eth_call`,
+  `eth_getTransactionReceipt`; `solana` carries `getSlot`, `getBalance`,
+  `getTokenAccountsByOwner`, `getSignaturesForAddress`. Parameter shapes
+  are validated before any network call (`address` = `0x`+40 hex or base58
+  32–44, `tx_hash` = `0x`+64, `contract` = `0x`+40, `data` = `0x` even-length
+  hex ≤ 2048 bytes) — a bad value is an `ExchangeError` naming the rule, not
+  a guessed request.
+- **Read-only by construction.** The whitelist admits no broadcast or
+  signing method; the core suite pins that absence against this source
+  (no-send/no-sign wall, next to the W2 withdrawal-absence wall), pins the
+  chain trio to `CHAINS`, and asserts the function body carries no
+  send/sign/slot token. No credential exists anywhere on this path.
+- **Output discipline.** One compact line per value, capped at `MAX_LINES`
+  (40); balances render as **exact integers** (wei / lamports — never a
+  float), `eth_call` returns raw hex for the caller to decode exactly,
+  receipts render `status=success|failed` plus bounded `log[i]` lines, Solana
+  history renders `err=none` vs the chain's own error JSON, and an empty
+  result is an honest `honest empty result, not an error` line.
+- **Honest limits.** `getTokenAccountsByOwner` covers the classic SPL
+  program only (the output says Token-2022 is not covered and how many rows
+  are shown); EVM address-scoped history has **no keyless source** and is
+  refused by name rather than faked (owner ruling D3).
+- Live-verified 2026-11-05 against all four public endpoints (head, balance,
+  `eth_call`, real receipt, slot, lamports with context, signature history,
+  SPL token accounts); unit legs run through injected transports (zero
+  network) in `mycore/tests/run.py::test_exchanges`.
 
 ## 5. Console surface
 
