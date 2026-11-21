@@ -25,12 +25,20 @@
   </div>
 </div>
 
-<!-- URGENT takeover: red scan (real advisory=urgent, or ?alert=urgent preview) -->
+<!-- URGENT takeover: red scan (real advisory=urgent, or ?alert=urgent preview)
+     Also hosts the unsaved-changes prompt (owner 2026-11-13): same layer,
+     two SAVE/CANCEL actions, zero new locale keys. -->
 <div class="alert-layer" id="alertLayer" hidden>
   <div class="alert-scan"></div>
   <div class="alert-box">
     <div class="alert-title" id="alertTitle" data-i18n="alert.title">⚠ URGENT</div>
     <ul class="alert-reasons" id="alertReasons"></ul>
+    <div class="alert-actions" id="alertActions" hidden>
+      <button class="btn primary" id="alertSaveBtn" type="button"
+              data-i18n="ctl.save">SAVE</button>
+      <button class="btn" id="alertCancelBtn" type="button"
+              data-i18n="save.cancel">CANCEL</button>
+    </div>
     <div class="alert-foot">
       <span id="alertHint" data-i18n="alert.hint">tap / Esc to dismiss</span>
       <span class="preview-tag" id="previewTag" data-i18n="alert.preview" hidden>PREVIEW</span>
@@ -1574,6 +1582,15 @@
                         data-i18n="myc.discover">DISCOVER MODELS</button>
                 <button class="btn" id="discAddBtn" type="button" hidden>ADD 0 SELECTED</button>
                 <span class="save-state" id="discMsg" role="status"></span>
+              </div>
+              <div id="discBar" class="disc-bar" hidden>
+                <button type="button" class="disc-toggle" id="discToggle">&#8722;</button>
+                <span class="disc-srcs" id="discSrcs" hidden></span>
+                <span class="disc-pager" id="discPager" hidden>
+                  <button type="button" id="discPrev">&#8249;</button>
+                  <span id="discPageNo">1/1</span>
+                  <button type="button" id="discNext">&#8250;</button>
+                </span>
               </div>
               <div id="discOut" class="test-out" hidden></div>
               <div class="stat-note" data-i18n="myc.discoverHint">Reads the endpoint's model directory (GET /models) — a directory read, so it never spends a token. Empty key: the saved Model API key above is used, for any endpoint you type. Filled key: only this probe uses it, never stored. Picked models are appended to the whitelist above — nothing is written until you press SAVE.</div>

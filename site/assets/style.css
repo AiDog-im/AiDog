@@ -895,6 +895,9 @@ h1, h2, h3, h4, .serif {
 .footer-free { color: var(--coral); }
 .footer-dim { opacity: .7; }
 /* CKX verified-integrator badge — links back to https://cryptokey.im/registry */
+.footer-badges { display: flex; justify-content: center; align-items: center;
+  gap: 20px; flex-wrap: wrap; margin-top: 18px; }
+.footer-badges .footer-ckx, .footer-badges .footer-afr { margin-top: 0; }
 .footer-ckx { display: flex; justify-content: center; margin-top: 18px; }
 .footer-ckx a { display: inline-flex; opacity: .9; transition: opacity .2s; }
 .footer-ckx a:hover, .footer-ckx a:focus-visible { opacity: 1; }
