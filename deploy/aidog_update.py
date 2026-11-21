@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""aidog_update — version check + upgrade for I'm AiDog (owner decree: we cut
+"""aidog_update — version check + upgrade for I'm AiDog (product rule: we cut
 every release; users are notified in-console and upgrade with one command).
 
 Mechanism (two-stage, confidential -> public; flip executed 2026-10-27):
@@ -45,7 +45,7 @@ SECRETS = REPO / "secrets.env"
 VERSION_FILE = REPO / "VERSION"
 MANIFEST_FILE = REPO / "release.json"
 MANIFEST_PATH = "release.json"
-# Release-channel fallback (owner decree: every release is published on the
+# Release-channel fallback (product rule: every release is published on the
 # product's own public repository). Fires ONLY on a root-manifest 404 from
 # origin — never on a rate limit, never on egress trouble, never for a
 # clone whose origin already IS this repository.

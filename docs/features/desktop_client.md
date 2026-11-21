@@ -79,7 +79,7 @@ the HUD bridge exists and an IPC opacity roundtrip works
 | Mode | Trigger | Observed result |
 |---|---|---|
 | **attach** | console already serving on 19167 | probe succeeds → `console:"attached"`; that server is left running on exit |
-| **spawn** | no server, repo found (`AIDOG_WEB_PORT=18790` trial) | spawns `python3 server.py` in `{repo}/web` → `console:"spawned"`; child killed on exit — no leak |
+| **spawn** | no server, repo found (`AIDOG_WEB_PORT=19167` trial) | spawns `python3 server.py` in `{repo}/web` → `console:"spawned"`; child killed on exit — no leak |
 | **no repo** | fresh `XDG_CONFIG_HOME`, cwd outside the repo, no `AIDOG_REPO` | `SELFTEST {"ok":false,"stage":"repo","repo":null}` rc=1; `error.html` shown with honest guidance |
 
 ## 6. Platform support & verification

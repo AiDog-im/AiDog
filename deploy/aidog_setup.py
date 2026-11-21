@@ -66,8 +66,9 @@ SLOTS: list[tuple[str, str, "re.Pattern[str]", bool, str]] = [
      "your numeric user id, comma-separated for several (fail-closed while empty)"),
     ("MODEL_API_KEY",
      "Model endpoint API key",
-     re.compile(r"^\S{8,}$"), True,
-     "leave EMPTY if your endpoint needs no key (local gateway default)"),
+     re.compile(r"^\S+$"), True,
+     "leave EMPTY if your endpoint needs no key; ANY provider's key works "
+     "(one line, no spaces)"),
     ("AIDOG_GH_PAT",
      "GitHub token for 'aidog update'",
      re.compile(r"^\S{20,}$"), True,

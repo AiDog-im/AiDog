@@ -100,8 +100,9 @@ If you add a user-visible string, add it to both packs. The suite
 
 This checkout is produced by a gate, not pushed to directly:
 
-1. The development repository's `origin` points at an owner-only vault; a
-   tracked `pre-push` hook refuses every destination that is not that vault.
+1. Direct pushes are refused: a tracked `pre-push` hook blocks every
+   destination except the private development remote, so this repository is
+   only ever written by the gate below.
 2. The public repository is rebuilt from a desensitized snapshot: manifest
    classification (deny wins, unknown is dropped) → ordered transformation
    rules → **leak scan and structural verification over the result** → commit

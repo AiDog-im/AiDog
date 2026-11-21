@@ -54,7 +54,7 @@ def _local_kv(name: str) -> str | None:
 def _src_kv(name: str) -> str | None:
     """Resolve a memory source key: env AIDOG_<name> first, then the local file.
 
-    Self-containment chain (owner decree, cross-machine revival): environment
+    Self-containment chain (product rule, cross-machine revival): environment
     override > deploy/memory_sources.local > unset (None). Set-but-empty env
     counts as unset.
     """
