@@ -906,6 +906,23 @@ h1, h2, h3, h4, .serif {
   text-transform: uppercase; color: #7d97ac; }
 
 /* -------------------------------------------------------- responsive --- */
+@media (max-width: 1200px) {
+  /* header: Docs joined the desktop nav row and brand + links + lang +
+     GitHub no longer fit below ~1201px (measured: nav-right right=1201 at
+     vw>=1201, overflowing under that) — hand the links to the burger from
+     1200 down (the 860 block below used to own this); the visible row keeps
+     brand, lang toggle and GitHub. */
+  .burger { display: block; order: 3; }
+  .nav { flex-wrap: wrap; gap: 12px; }
+  .nav-links {
+    order: 4; width: 100%; flex-direction: column; gap: 0; margin: 0;
+    max-height: 0; overflow: hidden; transition: max-height .3s ease;
+  }
+  .nav-links.open { max-height: 620px; border-top: 1px solid var(--ink); }
+  .nav-link { padding: 12px 4px;
+    border-bottom: 1px dashed rgba(165, 183, 202, .55); }
+  .nav-right { margin-left: auto; }
+}
 @media (max-width: 1020px) {
   .hero-inner { grid-template-columns: 1fr; }
   .plate-wrap { margin-top: 34px; }

@@ -16,8 +16,8 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2297%2F2297-brightgreen?style=flat-square" alt="core tests 2297/2297">
-  <img src="https://img.shields.io/badge/console_smoke-547%2F547-brightgreen?style=flat-square" alt="console smoke 547/547">
+  <img src="https://img.shields.io/badge/core_tests-2338%2F2338-brightgreen?style=flat-square" alt="core tests 2338/2338">
+  <img src="https://img.shields.io/badge/console_smoke-557%2F557-brightgreen?style=flat-square" alt="console smoke 557/557">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -103,7 +103,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 | 🔑 | **Zero-key onboarding** | Start with a trial model or bring your own key; secrets live in `secrets.env` (0600) and are **never echoed** — slot names only |
 | 💬 | **Streaming everywhere** | Provider SSE streaming, Telegram typing heartbeat, console chat cards with streamed replies |
 | ⚡ | **Local & portable** | stdlib-only core (voice/image extras lazy-load), service bound to local loopback, SSE streaming throughout, `execute_code` folds multi-step runs into one round trip |
-| 🖥️ | **Loopback web console** | Seven views — Overview · Chat · Skills · Exchange · Evolution · Stream · Settings (Usage & Cost and Voice are cards): activation checklist with fix deep-links, credential slot editor (37 editable slots — names + lengths only, values never rendered), cron list with delete, capability grid, channel forms with send test, hooks editor, evolution schedule, Web3 caps, a **Connections** card (Cloudflare + GitHub token slots, a per-permission scope checklist with a read-only default posture, and a real read-only test call) and a **Bridge** card (a reverse proxy YOU deploy on your own account — explicit target allow-list, one-click kill switch, one audit line per proxied request), plus a **Backup & Restore** card (one passphrase-protected `.ckx` file of credentials · settings · memory, encrypted in the browser with an in-page round-trip check before the download) whose **AGENT BACKUP** section schedules the same encrypted run through the vendored CKX CLI — Node probe, passphrase-slot presence, a local call meter and a one-click MCP switch, all read from the server, bound to `127.0.0.1`, token-gated writes |
+| 🖥️ | **Loopback web console** | Ten views — Overview · Chat · Skills · Stream · Sniff · Exchange · Community · Evolution · Help · Settings (Usage & Cost and Voice are cards): activation checklist with fix deep-links, credential slot editor (37 editable slots — names + lengths only, values never rendered), cron list with delete, capability grid, channel forms with send test, hooks editor, evolution schedule, Web3 caps, a **Connections** card (Cloudflare + GitHub token slots, a per-permission scope checklist with a read-only default posture, and a real read-only test call) and a **Bridge** card (a reverse proxy YOU deploy on your own account — explicit target allow-list, one-click kill switch, one audit line per proxied request), plus a **Backup & Restore** card (one passphrase-protected `.ckx` file of credentials · settings · memory, encrypted in the browser with an in-page round-trip check before the download) whose **AGENT BACKUP** section schedules the same encrypted run through the vendored CKX CLI — Node probe, passphrase-slot presence, a local call meter and a one-click MCP switch, all read from the server, bound to `127.0.0.1`, token-gated writes |
 | 🖼️ | **Media built in** | Local STT voice sessions with fuzzy wake phrases, TTS announcements, BYOK image generation, Telegram photo send |
 | 🖥️ | **Desktop HUD shell** | Electron frameless shell: transparency slider, always-on-top, tray — Linux packaging verified (Win/macOS not built yet, honestly) |
 | 👥 | **Multi-profile isolation** | `AIDOG_PROFILE` selects fully isolated profiles (settings / secrets / state / body) — 63/63 isolation gate + 18-leg real-machine E2E |
@@ -176,6 +176,31 @@ Then:
 
 Full guide: [`docs/installation.md`](docs/installation.md).
 
+## Commands
+
+**Telegram** (allowlisted chats only; full reference with examples:
+[`docs/commands.md`](docs/commands.md)):
+
+| Command | One line |
+|---|---|
+| `/help` | list every command |
+| `/reset` | archive this chat's session, start fresh |
+| `/model [id]` | show or set this chat's model |
+| `/status` | turns · model · uptime |
+| `/lang [code]` | show or switch the reply language |
+| `/learn memory <text>` / `/learn skill <slug> :: <desc> :: <body>` | record an experience (lint-gated) |
+| `/reflect [daily\|weekly\|monthly]` | draft the period reflect skeleton (facts only) |
+| `/evolution` | self-evolution loop status |
+| `/cron [add [message\|prompt] <spec> :: <text> \| del <id>]` | natural-language cron jobs |
+| `/checkpoint [restore <id>]` | file checkpoints + rollback |
+| `/version` | installed vs latest release |
+
+**Local CLI**: `bash deploy/install.sh` (provision + boot + verify) ·
+`aidog setup` (guided wizard) · `aidog doctor` (health gate) ·
+`aidog update apply` (upgrade; `aidog update` = read-only check).
+
+Full reference: [`docs/commands.md`](docs/commands.md).
+
 ## Verify
 
 Automated E2E covers the stack on this machine; a **manual spot-check**
@@ -200,11 +225,11 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2297/2297** |
-| Console smoke (live HTTP) | **547/547** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
+| `mycore` core suite | **2338/2338** |
+| Console smoke (live HTTP) | **557/557** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |
-| Setup wizard | **113/113** |
+| Setup wizard | **123/123** |
 | Profile isolation (offline, subprocess cross-check) | **63/63** |
 | Desktop shell (`node --test`) | **23/23** |
 | `aidog doctor` | **0 FAIL · 0 WARN** (honest environment WARN only when egress is fully gone) |
@@ -214,8 +239,8 @@ Every release is cut only after these run green on a clean tree:
 Catalog scope: **28 registered tools** · **9 exchange venues** · **27
 real-machine E2E suites** — all green.
 
-Locale packs: `en` (default) + `zh`, **1467 keys** each, parity lint in CI;
-the marketing site ships its own **341-key** bilingual pack.
+Locale packs: `en` (default) + `zh`, **1501 keys** each, parity lint in CI;
+the marketing site ships its own **381-key** bilingual pack.
 
 ## Documentation
 
@@ -258,7 +283,7 @@ source, documentation, deployment and tests.
 - Version truth = `VERSION` (semver) + `release.json` (date + notes);
   both bump together, every release is tagged `vX.Y.Z` and published as a
   **GitHub Release** (the discovery channel).
-- Upgrade: `python3 deploy/aidog_update.py apply` → dirty-tree guard →
+- Upgrade: `aidog update apply` → dirty-tree guard →
   fetch → `--ff-only` → restart runtime. The console shows an upgrade
   banner automatically when a newer release exists.
 

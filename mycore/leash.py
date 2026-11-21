@@ -175,8 +175,11 @@ def resume() -> dict:
 
 
 def stop_baseline() -> int:
-    """Capture BEFORE a turn starts: only a later request_stop() aborts it."""
-    return int(read_state().get("stop_seq") or 0)
+    """Capture BEFORE a turn starts: only a later request_stop() aborts it.
+    Always a FRESH file read (ttl=0): this one-shot capture may never be
+    served from the streaming guard's 0.25s cache — a stale entry could
+    under-count the counter and abort a turn nobody stopped."""
+    return int(read_state(ttl=0).get("stop_seq") or 0)
 
 
 def request_stop() -> dict:

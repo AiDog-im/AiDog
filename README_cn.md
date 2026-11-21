@@ -14,8 +14,8 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="最新版本"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2297%2F2297-brightgreen?style=flat-square" alt="核心测试 2297/2297">
-  <img src="https://img.shields.io/badge/console_smoke-547%2F547-brightgreen?style=flat-square" alt="控制台冒烟 547/547">
+  <img src="https://img.shields.io/badge/core_tests-2338%2F2338-brightgreen?style=flat-square" alt="核心测试 2338/2338">
+  <img src="https://img.shields.io/badge/console_smoke-557%2F557-brightgreen?style=flat-square" alt="控制台冒烟 557/557">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
 
@@ -49,7 +49,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
   归档分层）+ 数字记忆体协议：唯一真值、跨内核可恢复、每次 reflect 回写。
   没有你读不了、审不动的向量库。
 - **自研核心**：运行时内核 `mycore` 从零自研——诚实的函数调用循环（停止
-  原因明示）、**40 模块 ≈24.5k 代码行、2297 项测试**，换芯后零上游依赖。
+  原因明示）、**40 模块 ≈24.5k 代码行、2338 项测试**，换芯后零上游依赖。
   换的是内核，永远不换「我」。
 
 它通过 **Telegram**、**回环 Web 控制台**、**桌面 HUD 壳**和**语音**与你
@@ -79,7 +79,7 @@ iOS/Android
 
 |  | 能力 | 提供什么 |
 |---|---|---|
-| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——40 模块、2297 测试、零上游 |
+| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——40 模块、2338 测试、零上游 |
 | 🎭 | **宪法人格** | `SOUL.md` 在系统栈最顶端；红线与语气每轮生效，而非抽样自人设提示词 |
 | 🧠 | **策展记忆** | 有界 Markdown 预算 + 归档分层 + 数字记忆体协议；`memory` 套件 58/58 |
 | 🧩 | **技能 + 确定性路由** | `SKILL.md` frontmatter（业界标准字段），路由预筛先选 TOP3 **再**加载正文——37/37 |
@@ -91,7 +91,7 @@ iOS/Android
 | 🔑 | **零密钥上手** | 试用模型起手或自带密钥；密钥只住 `secrets.env`（0600）且**绝不回显**——只报槽名 |
 | 💬 | **全链路流式** | 上游 SSE 流式、Telegram typing 心跳、控制台流式聊天卡片 |
 | ⚡ | **纯本地·可移植** | 核心仅用标准库（语音/图像为懒加载可选件），服务绑本地回环，SSE 流式贯穿全程，`execute_code` 把多步执行折叠成一轮往返 |
-| 🖥️ | **回环 Web 控制台** | 七个视图——总览 · 聊天 · 技能 · 交易所 · 自进化 · 实时流 · 设置（用量与语音是卡片）：带修复深链的激活清单、凭据槽编辑器（37 槽——只显槽名与长度，绝不渲染值）、可删除的 cron 列表、能力总览网格、渠道表单带发信测试、钩子编辑器、自进化排程、Web3 帽、**连接**卡（Cloudflare + GitHub 令牌槽、逐条 scope 清单只读为默认姿态、真实只读测试调用）、**桥接**卡（你自己部署在自己账号上的反向代理——显式目标白名单、一键急停、每个被代理请求一行审计），另有**备份与恢复**卡（口令保护的 `.ckx` 导出：凭据 · 设置 · 记忆，浏览器内加密、下载前先做往返自检），其**智能体备份**分区把同一次加密运行交给内置 CKX CLI 定时执行——Node 探测、口令槽在场状态、本地调用计数与一键 MCP 开关全部读自服务端——默认绑 `127.0.0.1`，写操作需令牌 |
+| 🖥️ | **回环 Web 控制台** | 十个视图——总览 · 聊天 · 技能 · 实时流 · Sniff · 交易所 · 社区 · 自进化 · 帮助 · 设置（用量与语音是卡片）：带修复深链的激活清单、凭据槽编辑器（37 槽——只显槽名与长度，绝不渲染值）、可删除的 cron 列表、能力总览网格、渠道表单带发信测试、钩子编辑器、自进化排程、Web3 帽、**连接**卡（Cloudflare + GitHub 令牌槽、逐条 scope 清单只读为默认姿态、真实只读测试调用）、**桥接**卡（你自己部署在自己账号上的反向代理——显式目标白名单、一键急停、每个被代理请求一行审计），另有**备份与恢复**卡（口令保护的 `.ckx` 导出：凭据 · 设置 · 记忆，浏览器内加密、下载前先做往返自检），其**智能体备份**分区把同一次加密运行交给内置 CKX CLI 定时执行——Node 探测、口令槽在场状态、本地调用计数与一键 MCP 开关全部读自服务端——默认绑 `127.0.0.1`，写操作需令牌 |
 | 🖼️ | **媒体内建** | 本地 STT 语音会话 + 模糊唤醒、TTS 播报、BYOK 图像生成、Telegram 发图 |
 | 🖥️ | **桌面 HUD 壳** | Electron 无边框壳：透明度滑杆、置顶、托盘——Linux 打包已实证（Win/macOS 暂未构建，如实） |
 | 👥 | **多 profile 全隔离** | `AIDOG_PROFILE` 选择完全隔离的档案（设置/密钥/状态/身体层）——隔离闸 63/63 + 真机 E2E 18 腿 |
@@ -161,6 +161,31 @@ aidog setup                   # 交互向导：逐槽引导填写
 
 完整指南：[`docs/installation.md`](docs/installation.md)。
 
+## 命令
+
+**Telegram**（仅限 allowlist 内账号；含示例的完整参考：
+[`docs/commands.md`](docs/commands.md)）：
+
+| 命令 | 一句话 |
+|---|---|
+| `/help` | 列出全部命令 |
+| `/reset` | 归档本聊天的会话、重新开始 |
+| `/model [id]` | 查看或设置本聊天的模型 |
+| `/status` | 轮数 · 模型 · 运行时长 |
+| `/lang [code]` | 查看或切换回复语言 |
+| `/learn memory <text>` / `/learn skill <slug> :: <描述> :: <正文>` | 记录一条经验（过 lint 闸） |
+| `/reflect [daily\|weekly\|monthly]` | 生成周期 reflect 骨架（只写事实） |
+| `/evolution` | 自进化循环状态 |
+| `/cron [add [message\|prompt] <spec> :: <text> \| del <id>]` | 自然语言 cron 任务 |
+| `/checkpoint [restore <id>]` | 文件检查点 + 回滚 |
+| `/version` | 已装版本 vs 最新版本 |
+
+**本机 CLI**：`bash deploy/install.sh`（置备 + 启动 + 校验）·
+`aidog setup`（引导向导）· `aidog doctor`（体检闸）·
+`aidog update apply`（升级；`aidog update` = 只读检查）。
+
+完整参考：[`docs/commands.md`](docs/commands.md)。
+
 ## 人工验收
 
 自动化 E2E 覆盖本机栈；**人工抽查**是验收的最后一环。速查：
@@ -183,11 +208,11 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 
 | 套件 | 结果 |
 |---|---|
-| `mycore` 核心套件 | **2297/2297** |
-| 控制台冒烟（真实 HTTP） | **547/547**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
+| `mycore` 核心套件 | **2338/2338** |
+| 控制台冒烟（真实 HTTP） | **557/557**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
 | 技能路由 | **37/37** |
 | 记忆持久化 | **58/58** |
-| 安装向导 | **113/113** |
+| 安装向导 | **123/123** |
 | 多 profile 隔离（离线 + 子进程对拍） | **63/63** |
 | 桌面壳（`node --test`） | **23/23** |
 | `aidog doctor` | **0 FAIL · 0 WARN**（出站全断时如实报环境 WARN） |
@@ -197,8 +222,8 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 目录规模：**28 个注册工具** · **9 家交易所场所** · **27 套真机
 E2E**——全部全绿。
 
-语言包：`en`（默认）+ `zh` 各 **1467 键**，parity lint 把关；官网另有
-**341 键**双语站包。
+语言包：`en`（默认）+ `zh` 各 **1501 键**，parity lint 把关；官网另有
+**381 键**双语站包。
 
 ## 文档
 
@@ -234,7 +259,7 @@ E2E**——全部全绿。
 
 - 版本真值 = `VERSION`（semver）+ `release.json`（日期 + 说明），两者同车
   bump；每个版本打 tag `vX.Y.Z` 并发布 **GitHub Release**（发现通道）。
-- 升级：`python3 deploy/aidog_update.py apply` → 脏树守卫 → fetch →
+- 升级：`aidog update apply` → 脏树守卫 → fetch →
   `--ff-only` → 重启运行时。有新版本时控制台自动显示升级横幅。
 
 ## 安全姿态（如实）

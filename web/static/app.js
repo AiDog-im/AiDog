@@ -28,6 +28,42 @@ const evNodes = new Map();
 
 function t(key, fallback) { return dict[key] !== undefined ? dict[key] : (fallback || key); }
 
+/* --- discoverability car: the Help view's Telegram command table -------- *
+   Rendered from the SAME cmd.help.body pack key the /help command answers
+   with, so the console table and the bot can never drift apart: each pack
+   line is "<command> — <description>". A line without the separator keeps
+   its own text (honest, never invented). Repainted on every language switch
+   (loadLang) — the view itself fetches nothing. */
+function renderHelpCmds() {
+  const box = document.getElementById("helpTgList");
+  if (!box) return;
+  const rows = String(t("cmd.help.body", "") || "").split("\n")
+    .map(s => s.trim()).filter(Boolean);
+  box.textContent = "";
+  if (!rows.length) {                       // pack without the key: say so
+    const row = document.createElement("div");
+    row.className = "help-row";
+    row.textContent = t("help.tg.empty",
+      "the command list is not in this language pack yet");
+    box.appendChild(row);
+    return;
+  }
+  rows.forEach(line => {
+    const dash = line.indexOf(" — ");
+    const cmd = line.split(/\s+/)[0];       // first token: /help, /model, …
+    const row = document.createElement("div");
+    row.className = "help-row";
+    const code = document.createElement("code");
+    code.textContent = cmd;
+    const desc = document.createElement("span");
+    desc.className = "help-txt";
+    desc.textContent = dash > 0 ? line.slice(dash + 3) : line.slice(cmd.length).trim();
+    row.appendChild(code);
+    row.appendChild(desc);
+    box.appendChild(row);
+  });
+}
+
 /* ------------------------------------------------------------------ i18n -- */
 async function loadLang(lang) {
   try {
@@ -56,6 +92,7 @@ async function loadLang(lang) {
   renderExchange();            // venue rows / probe labels follow the language too
   renderCommunity();           // delta4: reason note / filter / rows re-translate
   renderHall();                // car F: task-hall card text follows the language too
+  renderHelpCmds();            // discoverability: the TG command table repaints too
   chatBadge(chatBusy);            // badge label follows the active language
   renderCtx(lastCtx);             // X14: context line label follows too
   refreshEventTexts();
@@ -1630,16 +1667,25 @@ async function upstreamTest() {
      - #discKey is read into one request body and nowhere else — never
        stored, never rendered, never copied into another node, and it is not
        a settings field (SAVE_BAR_SKIP), so it can never promise a save;
+       EMPTY it and runDiscover names the saved MODEL_API_KEY slot instead
+       (model UX car: the key lives inline on this card, one row up);
      - only the SERVER's reason word is rendered (an HTTP status or an
        exception class), never a URL, a body line or a key;
      - ADD only edits the #mycModels field (hidden since the chips
        terminal state) and dispatches one `input` event: the dirty flag,
        the sticky bar and the existing saveSettings() stay the single
        writer — discovery and the manual add box add NO write route.
+       (model UX car: ADD may also FILL #mycModel when it still holds the
+       shipped default — still through that one input event, never a
+       direct settings write, and never a model the operator typed.)
    The chips render from the field's value and write back through the same
    input event, so typed edits, chip x, discovery ADD and the add box all
    meet in one place; activation U6 now adds through the box. */
 const DISCOVER_MAX = 32;              // mycore.models grammar: at most 32 ids
+// model UX car: the shipped default kernel model (server-side default too).
+// The ADD auto-fill below only ever touches a field still holding THIS id
+// (or an empty one) — a model the operator typed themselves is never moved.
+const DEFAULT_KERNEL_MODEL = "mimo-v2.6-flash";
 let discState = { models: [], total: 0, ready: false };
 let discMsgState = null;              // {kind, a, b, reason, raw} — relang repaint
 
@@ -1698,7 +1744,8 @@ function discPaintMsg() {
   const s = discMsgState;
   if (!s) { el.className = "save-state"; el.textContent = ""; return; }
   const own = s.kind === "run" || s.kind === "none" || s.kind === "found" ||
-              s.kind === "full" || s.kind === "fail";
+              s.kind === "full" || s.kind === "fail" || s.kind === "filled" ||
+              s.kind === "missing";
   el.className = "save-state" + (own ? "" : " err");
   if (s.kind === "run") {
     el.textContent = t("myc.discoverRun", "reading the model directory…");
@@ -1714,8 +1761,22 @@ function discPaintMsg() {
       "only {n} added — the whitelist holds at most 32 entries")
       .replace("{n}", String(s.a));
   } else if (s.kind === "fail") {
-    el.textContent = t("myc.discoverFail", "discovery failed — {reason}")
-      .replace("{reason}", String(s.reason || "?"));
+    const reason = String(s.reason || "?");
+    // model UX car: a 401 (or the slot-not-set refusal behind it) is not
+    // troubleshooting material — say what to DO, in plain words.
+    el.textContent = (s.needKey || reason.indexOf("401") >= 0)
+      ? t("myc.discover401",
+          "the endpoint needs an API key — save one above, or fill the probe field")
+      : t("myc.discoverFail", "discovery failed — {reason}")
+          .replace("{reason}", reason);
+  } else if (s.kind === "filled") {
+    el.textContent = t("myc.modelFilled",
+      "kernel model set to {v} — change it above if you prefer")
+      .replace("{v}", String(s.v || ""));
+  } else if (s.kind === "missing") {
+    el.textContent = t("myc.modelMissing",
+      "kernel model {v} is not listed by the endpoint — the chat will fail; pick one from the list")
+      .replace("{v}", String(s.v || ""));
   } else if (s.kind === "net") {
     el.textContent = t("myc.testNet", "request failed — ") + String(s.raw || "");
   } else {
@@ -1775,7 +1836,11 @@ function renderDiscResults() {
 
 /* ADD writes only into #mycModels — and only up to the 32 entries the server
    grammar accepts. Anything that does not fit says so; nothing is dropped
-   silently. */
+   silently. model UX car: a successful ADD also re-checks the KERNEL model
+   field — an untouched default (or an empty box) would 404 against a
+   third-party endpoint, so it is filled from the picked list through the
+   same one-writer input event; a model the operator set themselves is
+   never moved. */
 function discAdd() {
   const el = document.getElementById("mycModels");
   if (!el) return;
@@ -1785,11 +1850,32 @@ function discAdd() {
   const fresh = picked.filter(m => have.indexOf(m) < 0);
   const free = Math.max(0, DISCOVER_MAX - have.length);
   const add = fresh.slice(0, free);
+  let filled = null;
   if (add.length) {
     el.value = have.concat(add).join(", ");
     el.dispatchEvent(new Event("input", { bubbles: true }));
+    filled = modelFieldAutofill(add[0]) ? add[0] : null;
   }
   if (fresh.length > add.length) discMsg({ kind: "full", a: add.length });
+  else if (filled) discMsg({ kind: "filled", v: filled });
+}
+
+/* model UX car: fill the Kernel model field ONLY when it is empty or still
+   the shipped default that the fresh whitelist no longer offers (the
+   "config did not succeed" 404). One `input` event — dirty tracking, the
+   sticky bar and saveSettings() stay the single writer; this never touches
+   the stored settings. Returns whether the field moved. */
+function modelFieldAutofill(pickId) {
+  const mEl = document.getElementById("mycModel");
+  if (!mEl || !pickId) return false;
+  const cur = String(mEl.value || "").trim();
+  const white = modelIdList();
+  const move = cur === "" ||
+    (cur === DEFAULT_KERNEL_MODEL && white.indexOf(cur) < 0);
+  if (!move) return false;
+  mEl.value = pickId;
+  mEl.dispatchEvent(new Event("input", { bubbles: true }));
+  return true;
 }
 
 /* Manual add box (chips terminal state, round D car 2): same rules as
@@ -1831,19 +1917,31 @@ async function runDiscover() {
   renderDiscResults();
   discMsg({ kind: "run" });
   try {
+    const probeKey = ((keyEl && keyEl.value) || "").trim();
+    // model UX car: an EMPTY probe field now names the saved slot instead of
+    // depending on the url-match rule — the key lives one card up and works
+    // for ANY endpoint the operator types. A filled probe key stays inline
+    // and travels alone (the server refuses both together).
+    const reqBody = { base_url: ((urlEl && urlEl.value) || "").trim() };
+    if (probeKey) reqBody.api_key = probeKey;
+    else reqBody.slot = "MODEL_API_KEY";
     const res = await fetch("/api/models/discover", {
       method: "POST",
       headers: { "Content-Type": "application/json",
                  "Authorization": "Bearer " + token },
-      body: JSON.stringify({
-        base_url: ((urlEl && urlEl.value) || "").trim(),
-        api_key: ((keyEl && keyEl.value) || "").trim()
-      })
+      body: JSON.stringify(reqBody)
     });
     let body = null;
     try { body = await res.json(); } catch (e) { body = null; }
     if (!res.ok) {
       const details = (body && Array.isArray(body.details)) ? body.details : [];
+      // no key saved yet: the server's "slot not set" refusal is the same
+      // call-to-action as a 401 — plain words, not grammar.
+      if (res.status === 400 && details.length &&
+          /slot .*not set/.test(String(details[0]))) {
+        discMsg({ kind: "fail", reason: String(details[0]), needKey: true });
+        return;
+      }
       discMsg({ kind: "raw", raw: res.status + " · " +
         (details.length ? details[0]
           : ((body && body.error) || t("myc.testFail", "test failed"))) });
@@ -1868,6 +1966,85 @@ async function runDiscover() {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+/* model UX car: did this payload move kernel model / base_url against the
+   STORED settings? Both keys always join the payload, so a bare "payload
+   has mycore" test would fire a directory read on every unrelated save. */
+function payloadMycoreDiffers(payload, pre) {
+  const cur = (payload && payload.mycore) || {};
+  const norm = v => String(v == null ? "" : v).trim();
+  return norm(cur.model) !== norm(pre.model) ||
+         norm(cur.base_url) !== norm(pre.base_url);
+}
+
+/* model UX car: post-save read-only check. After a save that could move the
+   mycore block, re-read the endpoint's directory (GET /models — zero
+   tokens) and warn on the discovery status line when the configured kernel
+   model is NOT in it: that is exactly the "config looked fine but chat
+   404s" experience this car fixes.
+   Contract: SILENT by design — it never paints the run state, never
+   re-renders the result list and never raises the save bar; if a discovery
+   the operator started is in flight or its results are on screen, their
+   view wins and this returns without a word; a failed probe stays silent
+   too (the operator has DISCOVER for diagnosis). The warning is cleared by
+   the next run or by a model that IS listed. */
+let modelVerifySeq = 0;
+async function verifyKernelModel() {
+  const btn = document.getElementById("discBtn");
+  const urlEl = document.getElementById("mycUrl");
+  const mEl = document.getElementById("mycModel");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token || !urlEl || !mEl) return;
+  if (btn && btn.disabled) return;          // a discover run is in flight
+  if (discState.ready) return;              // the operator's results are up
+  const mine = String(mEl.value || "").trim();
+  if (!mine) return;
+  const seq = ++modelVerifySeq;
+  try {
+    const res = await fetch("/api/models/discover", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({
+        base_url: String(urlEl.value || "").trim(),
+        slot: "MODEL_API_KEY"
+      })
+    });
+    const body = await res.json().catch(() => null);
+    if (seq !== modelVerifySeq) return;      // a newer run owns the line
+    if (!res.ok || !body || body.ok !== true) return;   // honest silence
+    const ids = (Array.isArray(body.models) ? body.models : [])
+      .map(m => (m && typeof m === "object") ? String(m.id || "") : "")
+      .filter(Boolean);
+    // the operator's view may have appeared while we were fetching
+    if ((btn && btn.disabled) || discState.ready) return;
+    if (!ids.length) return;
+    if (ids.indexOf(mine) < 0) {
+      discMsg({ kind: "missing", v: mine });
+    } else if (discMsgState && discMsgState.kind === "missing") {
+      discMsg(null);                          // stale warning: it is listed now
+    }
+  } catch (e) { /* silent by contract — DISCOVER is the diagnosis path */ }
+}
+
+/* model UX car: paste hygiene for the three Model-card inputs. The clipboard
+   text is cleaned BEFORE it lands (single-line inputs already drop CR/LF;
+   this also drops other control bytes and trims), then ONE input event
+   fires so dirty tracking / the sticky bar see it exactly like typing. */
+function cleanPaste(e) {
+  const el = e.currentTarget;
+  if (!el || !e.clipboardData) return;
+  const raw = String(e.clipboardData.getData("text") || "");
+  const clean = raw.replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  e.preventDefault();
+  const v = String(el.value || "");
+  const start = Number.isInteger(el.selectionStart) ? el.selectionStart : v.length;
+  const end = Number.isInteger(el.selectionEnd) ? el.selectionEnd : start;
+  el.value = v.slice(0, start) + clean + v.slice(end);
+  const pos = start + clean.length;
+  if (el.setSelectionRange) { try { el.setSelectionRange(pos, pos); } catch (err) {} }
+  el.dispatchEvent(new Event("input", { bubbles: true }));
 }
 
 /* ---- v0.5.55 gateway car: structured endpoint manager ------------------
@@ -3703,7 +3880,7 @@ async function saveSettings() {
     currency: (document.getElementById("curSelect") || {}).value || "USD",
     fx_rate: parseFloat((document.getElementById("fxInput") || {}).value) || 0,
     mycore: {
-      model: ((document.getElementById("mycModel") || {}).value || "").trim() || "mimo-v2.6-flash",
+      model: ((document.getElementById("mycModel") || {}).value || "").trim() || DEFAULT_KERNEL_MODEL,
       base_url: ((document.getElementById("mycUrl") || {}).value || "").trim() || "http://127.0.0.1:3460/v1",
     },
     media: {
@@ -3718,6 +3895,14 @@ async function saveSettings() {
     },
     alert_preview: document.getElementById("alertSelect").value,
   };
+  // model UX car: was this save allowed to change the mycore block? The
+  // block always JOINS the payload (model/base_url ride every save), so the
+  // post-save endpoint check below fires on a real mycore edit — not on
+  // every unrelated save (a directory read the operator did not ask for).
+  const preMy = (settings.mycore && typeof settings.mycore === "object")
+    ? settings.mycore : {};
+  const mycoreTouched = mycDirty || epDirty ||
+    payloadMycoreDiffers(payload, preMy);
   // --- car B1: blocks the operator actually edited join the payload here.
   //     Nothing is ever added for a clean block, so the legacy 16-key
   //     payload above keeps its exact behavior. Credential values never
@@ -3777,6 +3962,16 @@ async function saveSettings() {
     const regSel = document.getElementById("regionSel");
     payload.region = { code: (regSel && regSel.value === "cn") ? "cn" : "global" };
   }
+  // Discoverability car: the TG command menu — {enabled} always rides with
+  // the block and `commands` is the CHECKED subset (empty = publish every
+  // command, exactly the server grammar and the service read).
+  if (bmDirty) {
+    const bmOnEl = document.getElementById("bmEnabled");
+    const bmCmds = Array.from(
+      document.querySelectorAll("#bmCmdList input.bm-cmd"))
+      .filter(cb => cb.checked).map(cb => cb.value);
+    payload.botmenu = { enabled: !!(bmOnEl && bmOnEl.checked), commands: bmCmds };
+  }
   const hookPatch = hooksPayload();
   if (hookPatch) payload.hooks = hookPatch;
   const hookMsg = document.getElementById("hookMsg");
@@ -3789,6 +3984,8 @@ async function saveSettings() {
   if (ledMsgClear) { ledMsgClear.className = "save-state"; ledMsgClear.textContent = ""; }
   const regionMsgClear = document.getElementById("regionMsg");
   if (regionMsgClear) { regionMsgClear.className = "save-state"; regionMsgClear.textContent = ""; }
+  const bmMsgClear = document.getElementById("bmMsg");
+  if (bmMsgClear) { bmMsgClear.className = "save-state"; bmMsgClear.textContent = ""; }
   if (!token) {
     state.className = "save-state err";
     state.textContent = t("save.needToken", "token required");
@@ -3853,6 +4050,14 @@ async function saveSettings() {
           regionMsg.textContent = regErrs.join("; ");
         }
       }
+      const bmMsg = document.getElementById("bmMsg");
+      if (bmMsg) {
+        const bmErrs = details.filter(d => String(d).includes("botmenu"));
+        if (bmErrs.length) {
+          bmMsg.className = "save-state err";
+          bmMsg.textContent = bmErrs.join("; ");
+        }
+      }
       if (obMsg && obErrs.length) {
         obMsg.className = "save-state err";
         obMsg.textContent = obErrs.join("; ");
@@ -3884,11 +4089,16 @@ async function saveSettings() {
     guardDirty = false; obedDirty = false;
     ledDirty = false;
     regionDirty = false;
+    bmDirty = false;
     if (payload.ledger) loadLedgerStatus();
     if (payload.region) {
       const rm = document.getElementById("regionMsg");
       if (rm) { rm.className = "save-state"; rm.textContent = ""; }
       applyRegion();                 // engine repaints the tier immediately
+    }
+    if (payload.botmenu) {
+      const bmm = document.getElementById("bmMsg");
+      if (bmm) { bmm.className = "save-state"; bmm.textContent = ""; }
     }
     // v0.5.55: the endpoint manager re-reads the server-normalized chain
     // (source/rows/presence may all have changed) and drops its edit flag.
@@ -3905,6 +4115,10 @@ async function saveSettings() {
     refreshSelf();             // v0.5.55: pricing table may have changed
     refreshCaps();             // tools_off / shell / env flags may have changed
     refreshControl();          // car 7: guardrails/obedience blocks may have changed
+    // model UX car: a save that could move the mycore block re-reads the
+    // endpoint directory once (zero tokens) and SPEAKS UP when the kernel
+    // model is not in it — the chat would 404 otherwise.
+    if (mycoreTouched) verifyKernelModel();
   } catch (e) {
     state.className = "save-state err";
     state.textContent = String(e).slice(0, 50);
@@ -3981,6 +4195,9 @@ let guardDirty = false, obedDirty = false;
 let ledDirty = false, _ledgerWired = false;
 // Car I (owner #16): the region select rides the same dirty-block contract
 let regionDirty = false;
+// Discoverability car: the TG command-menu block follows the same contract
+// (only an edited block joins the save payload).
+let bmDirty = false;
 // activation car: only the keys the chat service reads AT START raise this
 // flag (tools_off / mcp / shell / context_dirs) — a models/budget edit must
 // never nag for a restart it does not need.
@@ -4205,6 +4422,31 @@ function renderTgCreds(body) {
     hint.dataset.i18n = hintKey;
     hint.textContent = t(hintKey, hintFb);
     list.appendChild(hint);
+    shown++;
+  });
+  list.hidden = shown === 0;
+  associateSettingsLabels();
+}
+
+/* ------------------------------------- Model card key row (model UX car) --
+   The MODEL_API_KEY slot INLINE in the Model card, right under the endpoint
+   field — the same presence-only credRow mechanism as the Credentials card
+   (a value never round-trips; credWrite's `[data-slot=…]` sync keeps every
+   copy of this row in step). This is the key runDiscover resolves when the
+   probe field is left empty. */
+const MODEL_CARD_SLOTS = [["MODEL_API_KEY", "myc.keyRow"]];
+
+function renderModelKeyCreds(body) {
+  const list = document.getElementById("modelKeyList");
+  if (!list) return;
+  const slots = Array.isArray(body.slots) ? body.slots : [];
+  const writable = body.writable !== false;
+  list.textContent = "";
+  let shown = 0;
+  MODEL_CARD_SLOTS.forEach(([name, labelKey]) => {
+    const slot = slots.find(s => s && s.name === name);
+    if (!slot) return;            // not in the payload: hide, never invent
+    list.appendChild(credRow(slot, writable, labelKey));
     shown++;
   });
   list.hidden = shown === 0;
@@ -4653,6 +4895,7 @@ async function loadCreds() {
     credsData = body;
     renderCreds(body);
     renderTgCreds(body);
+    renderModelKeyCreds(body);     // model UX car: key inline on Model card
     renderConnections(body);
     renderProxyCred(body);        // car H: AIDOG_PROXY_AUTH row on its own card
     list.hidden = false;
@@ -4664,6 +4907,8 @@ async function loadCreds() {
     credsData = null;
     list.hidden = true;
     if (tgList) { tgList.textContent = ""; tgList.hidden = true; }
+    const mkList = document.getElementById("modelKeyList");
+    if (mkList) { mkList.textContent = ""; mkList.hidden = true; }
     renderConnections(null);
     renderProxyCred(null);        // honest absence (no invented credential row)
     credHintReason = "unavailable";
@@ -4786,7 +5031,8 @@ function wireCredList() {
       credWrite(name, "", wrap, input);
     }
   };
-  ["credList", "tgCredList", "connListCF", "connListGH", "proxyCred"].forEach(id => {
+  ["credList", "tgCredList", "modelKeyList", "connListCF", "connListGH",
+   "proxyCred"].forEach(id => {
     const el = document.getElementById(id);
     if (el) el.addEventListener("click", handler);
   });
@@ -6150,6 +6396,27 @@ function initSettingsPanels() {
       });
     }
   }
+  // Discoverability car: botmenu prefill — the switch plus the 11-box
+  // subset picker. NOTHING checked is the shipped state (publish every
+  // command), so an absent `commands` must read as all-unchecked here, never
+  // as all-checked. One listener set per card (dataset.wired, region parity).
+  const bmBlock = (settings.botmenu && typeof settings.botmenu === "object")
+    ? settings.botmenu : {};
+  const bmOnPrefill = document.getElementById("bmEnabled");
+  if (bmOnPrefill) bmOnPrefill.checked = bmBlock.enabled !== false;
+  const bmWanted = Array.isArray(bmBlock.commands) ? bmBlock.commands : [];
+  document.querySelectorAll("#bmCmdList input.bm-cmd").forEach(cb => {
+    cb.checked = bmWanted.length > 0 && bmWanted.indexOf(cb.value) >= 0;
+  });
+  bmDirty = false;
+  const bmCard = document.getElementById("botmenuCard");
+  if (bmCard && !bmCard.dataset.wired) {
+    bmCard.dataset.wired = "1";
+    const markBm = () => { bmDirty = true; };
+    if (bmOnPrefill) bmOnPrefill.addEventListener("change", markBm);
+    document.querySelectorAll("#bmCmdList input.bm-cmd")
+      .forEach(cb => cb.addEventListener("change", markBm));
+  }
   // Car 4 (D6): decision endpoint row (raw stored strings; empty = default)
   const dec = (myc.decision && typeof myc.decision === "object")
     ? myc.decision : {};
@@ -6194,7 +6461,7 @@ function initSettingsPanels() {
 const SAVE_BAR_SKIP = "#credList, #tokenInput, #profCreate, #chanTestText, "
   + "#chanTestTarget, #chanTestRoute, #backupCard, #bridgeCard, "
   + "#proxyCard, #connectionsCard, #missionCard, #orchCard, #discPanel, "
-  + "#mycModelAdd";
+  + "#mycModelAdd, #modelKeyList";
 let saveBarCardEl = null;
 
 function saveBarPaint(text, kind) {
@@ -8981,11 +9248,11 @@ async function commSendReply(num) {
 })();
 
 /* ---------------------------------------------------------------- views -- */
-/* All nine views live in the same document; the inactive ones are hidden with
+/* All ten views live in the same document; the inactive ones are hidden with
    CSS, so every poller keeps writing into real DOM and ids stay stable.
    ?view=<name> deep-links the active view (default: overview). */
 const VIEWS = ["overview", "chat", "skills", "exchange", "evolution", "stream",
-               "community", "sniff", "settings"];
+               "community", "sniff", "help", "settings"];
 const QS_VIEW = (params.get("view") || "").toLowerCase();
 let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
 
@@ -10307,6 +10574,12 @@ if (presetLmEl) presetLmEl.addEventListener("click", () =>
   presetApply("lmstudio", "myc.presetLmstudio"));
 const discAddBtnEl = document.getElementById("discAddBtn");
 if (discAddBtnEl) discAddBtnEl.addEventListener("click", discAdd);
+// model UX car: one paste normalizer for the three Model-card inputs
+// (endpoint / kernel model / probe key) — see cleanPaste
+["mycUrl", "mycModel", "discKey"].forEach(id => {
+  const el = document.getElementById(id);
+  if (el) el.addEventListener("paste", cleanPaste);
+});
 const mycModelsEl = document.getElementById("mycModels");
 if (mycModelsEl) mycModelsEl.addEventListener("input", renderModelChips);
 /* chips terminal state (round D car 2): the manual add box. It sits in
