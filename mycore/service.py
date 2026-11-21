@@ -389,6 +389,120 @@ class ServiceLog:
 
 # --------------------------------------------------------------- service ----
 
+# backlog (owner 2026-11-02): TG typewriter streaming — a long reply is
+# previewed in place (one sendMessage prefix, throttled editMessageText
+# updates, one final edit with the authoritative text) instead of one
+# blocked send after the whole turn. Tuned far under Telegram's ~30 edit/s
+# ceiling; a SHORT answer never streams: it finishes below the first-send
+# threshold, the preview stays unstarted, and the caller falls back to the
+# ordinary single sendMessage (byte-identical to the pre-backlog path).
+STREAM_FIRST_CHARS = 160      # first-send threshold (prefix + honest " …")
+STREAM_FIRST_DELAY = 2.5      # s — slow first tokens still preview
+STREAM_EDIT_CHARS = 120       # min NEW chars before an edit
+STREAM_EDIT_INTERVAL = 0.5    # s between edits (~2/s, far under 30/s)
+STREAM_MAX_EDITS = 60         # per-message cap; the final edit is exempt
+
+
+class _Typewriter:
+    """Live preview of ONE streaming TG reply.
+
+    Contract (every failure collapses to `dead`, never an exception):
+      - push() accumulates deltas; the first send fires at the char
+        threshold or the delay, whichever lands first (prefix + " …");
+      - later edits need BOTH a char delta and the interval gap;
+      - edit failure -> dead: the text already on screen STAYS (never
+        rolled back, never re-sent — failure keeps the shown original);
+      - first-send failure -> stays unstarted: finalize() returns False and
+        the caller sends the full reply as ONE message (the fallback);
+      - finalize(text) is the last edit with the complete authoritative
+        text (the caller appends the release note first); True = the
+        preview owns delivery (started — even if it died mid-way), False =
+        the caller must take the ordinary single send.
+
+    send/edit/now are injected for offline tests; all text passes through
+    the tg client, which owns the 4096 cap."""
+
+    def __init__(self, send, edit, log=None, chat="", now=None):
+        self._send = send              # (text) -> {message_id: ...}
+        self._edit = edit              # (message_id, text) -> dict
+        self._log = log
+        self._chat = chat              # already redacted by the caller
+        self._now = now or time.monotonic
+        self.buf = ""
+        self.started = False
+        self.dead = False
+        self.edits = 0
+        self.msg_id = None
+        self._shown = ""               # text currently on screen (w/ marker)
+        self._shown_n = 0               # buf length behind that shown text
+        self._t0 = self._now()
+        self._last_edit = 0.0
+
+    def _note(self, event: str, *extra: str) -> None:
+        if self._log is not None:
+            self._log.write(event, f"chat={self._chat}", *extra)
+
+    def push(self, piece: str) -> None:
+        if self.dead or not piece:
+            return
+        self.buf += piece
+        now = self._now()
+        if not self.started:
+            if (len(self.buf) < STREAM_FIRST_CHARS
+                    and now - self._t0 < STREAM_FIRST_DELAY):
+                return
+            try:
+                doc = self._send(self.buf + " …") or {}
+            except Exception as e:  # noqa: BLE001 — one failed send = fallback
+                self.dead = True
+                self._note("STREAM_FIRST_FAIL", f"err={type(e).__name__}")
+                return
+            # tg._call returns the {ok, result} envelope — the id lives in
+            # result.message_id (sendMessage's result is the message object)
+            res = doc.get("result") if isinstance(doc, dict) else None
+            self.msg_id = res.get("message_id") if isinstance(res, dict) else None
+            if self.msg_id is None:
+                self.dead = True
+                self._note("STREAM_FIRST_FAIL", "err=no_message_id")
+                return
+            self.started = True
+            self._shown = self.buf + " …"
+            self._shown_n = len(self.buf)
+            self._last_edit = now
+            self._note("STREAM_FIRST", f"chars={len(self.buf)}")
+            return
+        if self.edits >= STREAM_MAX_EDITS:
+            return
+        if (len(self.buf) - self._shown_n >= STREAM_EDIT_CHARS
+                and now - self._last_edit >= STREAM_EDIT_INTERVAL):
+            try:
+                self._edit(self.msg_id, self.buf + " …")
+            except Exception as e:  # noqa: BLE001 — keep the shown text
+                self.dead = True
+                self._note("STREAM_EDIT_FAIL", f"err={type(e).__name__}")
+                return
+            self.edits += 1
+            self._shown = self.buf + " …"
+            self._shown_n = len(self.buf)
+            self._last_edit = now
+
+    def finalize(self, text: str) -> bool:
+        if not self.started:
+            return False                 # caller: the ordinary single send
+        if self.dead:
+            return True                  # shown text stays; never re-sent
+        if text and text != self._shown:
+            try:
+                self._edit(self.msg_id, text)
+                self.edits += 1
+                self._note("STREAM_FINAL", f"edits={self.edits}",
+                           f"chars={len(text)}")
+            except Exception as e:  # noqa: BLE001 — keep the shown text
+                self.dead = True
+                self._note("STREAM_EDIT_FAIL", f"err={type(e).__name__}")
+        return True
+
+
 class ChatService:
     """One getUpdates consumer: auth -> command/turn -> reply.
 
@@ -439,6 +553,9 @@ class ChatService:
         self._sniff_check = 0.0         # last SENSE sweep/delivery evaluation
         self._ledger_check = 0.0        # last daily usage-report evaluation (D2)
         self._hold_state: dict[str, str] = {}   # car 7: gate log dedupe (leg -> code)
+        self._tw: _Typewriter | None = None      # backlog: THIS turn's TG preview
+        # (single poll loop — one turn at a time; every deliver path consumes
+        # or clears it, so a stale preview can never leak into a later send)
         self.log = ServiceLog(self.state / LOG_NAME, now=now)
         self.lang = self._load_lang()
         # HARD token gate (tg.py): dedicated MYCORE_TG_TOKEN required here too.
@@ -630,7 +747,8 @@ class ChatService:
                 reply = self._command(cid, text)
             else:
                 skey = f"{cid}:{tid}" if tid is not None else cid
-                reply = self._pipeline(cid, text, session_key=skey)
+                reply = self._pipeline(cid, text, session_key=skey,
+                                       thread_id=tid, stream=True)
         except Exception as e:  # noqa: BLE001 — one bad update must not kill the loop
             self.log.write("UPDATE_ERR", f"chat={redact_chat(cid)}",
                            f"err={type(e).__name__}")
@@ -644,7 +762,9 @@ class ChatService:
                 note = self._take_release_note()
                 if note:
                     reply = f"{reply}\n\n{note}"
-            self._send(cid, reply, thread_id=tid)
+            self._finish_reply(cid, reply, thread_id=tid)
+        else:
+            self._tw = None          # nothing to deliver — drop any preview
         self._drain_photos(cid, tid)      # text first, photos after (car 4c)
 
     def _handle_voice(self, chat_id: int, med: dict,
@@ -712,13 +832,16 @@ class ChatService:
                 out_text = self._command(chat_id, reply)
             else:
                 skey = f"{chat_id}:{tid}" if tid is not None else chat_id
-                out_text = self._pipeline(chat_id, reply, session_key=skey)
+                out_text = self._pipeline(chat_id, reply, session_key=skey,
+                                          thread_id=tid, stream=True)
         except Exception as e:  # noqa: BLE001 — one bad turn must not kill the loop
             self.log.write("UPDATE_ERR", f"chat={redact_chat(chat_id)}",
                            f"err={type(e).__name__}")
             out_text = self._t("err.internal")
         if out_text:
-            self._send(chat_id, out_text, thread_id=tid)
+            self._finish_reply(chat_id, out_text, thread_id=tid)
+        else:
+            self._tw = None          # nothing to deliver — drop any preview
         self._drain_photos(chat_id, tid)
 
     def _drain_photos(self, chat_id: int, tid: int | None) -> None:
@@ -783,6 +906,21 @@ class ChatService:
             self.log.write("SEND_FAIL", f"chat={redact_chat(chat_id)}",
                            f"err={str(e)[:120]}")
             return False
+
+    def _finish_reply(self, chat_id: int, text: str,
+                      thread_id: int | None = None) -> bool:
+        """Deliver a pipeline reply (backlog, owner 2026-11-02). When THIS
+        turn streamed, the live preview owns delivery: one final edit
+        carries the complete text (the release note is already appended by
+        the caller); if the preview died mid-way the already-shown text
+        STAYS — never rolled back, never re-sent. Everything else takes the
+        ordinary single send — byte-identical to the pre-backlog path."""
+        tw = self._tw
+        self._tw = None
+        if tw is not None and tw.started:
+            tw.finalize(text)
+            return True
+        return self._send(chat_id, text, thread_id=thread_id)
 
     # ---------------------------------------------------------- commands ----
     def _settings_doc(self) -> dict:
@@ -1961,7 +2099,8 @@ class ChatService:
             pass
 
     def _pipeline(self, chat_id: int | str, text: str,
-                  session_key: int | str | None = None) -> str:
+                  session_key: int | str | None = None, *,
+                  thread_id: int | None = None, stream: bool = False) -> str:
         """Session load -> body stack -> run_turn -> persisted delta -> reply.
 
         Returns the final reply text (honest short lines on failure); the
@@ -1998,7 +2137,8 @@ class ChatService:
         self._fire_hooks("turn_start", chat_id)
         try:
             return self._pipeline_body(chat_id, text, session_key=session_key,
-                                       stop_base=stop_base)
+                                       stop_base=stop_base,
+                                       thread_id=thread_id, stream=stream)
         finally:
             stop_beat()
             scheduler.clear_origin()
@@ -2006,7 +2146,13 @@ class ChatService:
 
     def _pipeline_body(self, chat_id: int, text: str,
                        session_key: int | str | None = None,
-                       stop_base: int = 0) -> str:
+                       stop_base: int = 0, *,
+                       thread_id: int | None = None,
+                       stream: bool = False) -> str:
+        # Every pipeline turn starts preview-clean: a command turn, a gate
+        # hold or an exception between turns can never leak a stale preview
+        # into a later delivery.
+        self._tw = None
         cfg = self._model_for_chat(chat_id)
         path = self._session_path(session_key if session_key is not None
                                   else chat_id)
@@ -2036,6 +2182,18 @@ class ChatService:
         self.log.write("TURN_START", f"chat={redact_chat(chat_id)}",
                        f"model={cfg.model}", f"history={len(history)}")
 
+        # backlog (owner 2026-11-02): TG typewriter preview — only for the
+        # TG legs (stream=True), never in dry-run (the ordinary DRYRUN_SEND
+        # covers delivery) and never for channel routes (no edit concept).
+        tw: _Typewriter | None = None
+        if stream and not self.dry_run:
+            tw = _Typewriter(
+                send=lambda t: self.tg.send_message(chat_id, t,
+                                                    thread_id=thread_id),
+                edit=lambda mid, t: self.tg.edit_message(chat_id, mid, t),
+                log=self.log, chat=redact_chat(chat_id))
+            self._tw = tw
+
         def on_event(kind: str, data: dict) -> None:
             # Names only — tool ARGUMENTS may carry machine paths, never logged.
             if kind == "tool_call":
@@ -2053,6 +2211,7 @@ class ChatService:
             # / pre-dispatch; this leg does not stream, so no delta check).
             res = run_turn(messages, chat_fn, self.registry,
                            on_event=on_event, budget_chars=self._budget(),
+                           on_delta=tw.push if tw else None,
                            should_stop=lambda: leash.stop_requested(stop_base))
         except Exception as e:  # noqa: BLE001 — run_turn never raises; belt anyway
             self.log.write("TURN_CRASH", f"chat={redact_chat(chat_id)}",

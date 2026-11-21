@@ -1438,6 +1438,33 @@ def test_tg() -> None:
     except TgError:
         check("tg: empty chat refused", True)
 
+    # --- edit_message: payload shape, truncation, validation (backlog) ---
+    seen_e = {}
+    def edit_transport(url, payload, timeout):
+        seen_e["payload"] = payload
+        return json.dumps({"ok": True, "result": {"message_id": 7}})
+    c_ed = TgClient(token="t", transport=edit_transport)
+    c_ed.edit_message("42", 7, "hello")
+    form_e = urllib.parse.parse_qs(seen_e["payload"].decode())
+    check("tg: edit payload carries chat_id + message_id + text",
+          form_e.get("chat_id") == ["42"] and form_e.get("message_id") == ["7"]
+          and form_e.get("text") == ["hello"], str(form_e))
+    c_ed.edit_message("42", 7, "z" * 5000)
+    check("tg: edit overlong text truncated",
+          len(form_e.get("text", [""])[0]) <= 4096)
+    for bad_mid in ("7", True, None, 3.5):
+        try:
+            c_ed.edit_message("42", bad_mid, "x")
+            check(f"tg: edit message_id {bad_mid!r} refused", False)
+        except TgError:
+            check(f"tg: edit message_id {bad_mid!r} refused", True)
+    for bad_chat, bad_txt in (("", "x"), ("42", "   ")):
+        try:
+            c_ed.edit_message(bad_chat, 7, bad_txt)
+            check("tg: edit chat/text validation", False)
+        except TgError:
+            check("tg: edit chat/text validation", True)
+
     # --- send_chat_action: form-encoded, validation, honest failure ---
     act = {}
     def act_transport(url, payload, timeout):
@@ -1801,23 +1828,37 @@ class FakeTgTransport:
     """Offline Telegram transport: scripted getUpdates batches + recorded sends.
     `actions` records sendChatAction heartbeats [(chat_id_str, action)].
     `send_threads` records message_thread_id per sendMessage (None = none)
-    (car 4a-M3, topic isolation)."""
+    (car 4a-M3, topic isolation). `edits` records editMessageText as
+    (chat_id, message_id, text) (backlog typewriter). `fail_sends` makes
+    the NEXT n sendMessage calls raise (the first-send failure leg)."""
 
     def __init__(self, updates=None):
         self.updates = list(updates or [])
         self.sends = []            # [(chat_id_str, text)] in call order
         self.actions = []          # [(chat_id_str, action)] typing heartbeats
         self.send_threads = []     # [thread_id_str_or_None] aligned with sends
+        self.edits = []            # [(chat_id, message_id, text)] backlog
+        self.fail_sends = 0        # raise on the next n sendMessage calls
         self.polls = 0
 
     def __call__(self, url, payload, timeout):
         method = url.rsplit("/", 1)[-1]
         if method == "sendMessage":
+            if self.fail_sends > 0:
+                self.fail_sends -= 1
+                raise RuntimeError("offline sendMessage failure")
             import urllib.parse as up
             form = up.parse_qs(payload.decode("utf-8"))
             self.sends.append((form.get("chat_id", [""])[0],
                                form.get("text", [""])[0]))
             self.send_threads.append(form.get("message_thread_id", [None])[0])
+            return json.dumps({"ok": True, "result": {"message_id": 1}})
+        if method == "editMessageText":
+            import urllib.parse as up
+            form = up.parse_qs(payload.decode("utf-8"))
+            self.edits.append((form.get("chat_id", [""])[0],
+                               form.get("message_id", [""])[0],
+                               form.get("text", [""])[0]))
             return json.dumps({"ok": True, "result": {"message_id": 1}})
         if method == "sendChatAction":
             import urllib.parse as up
@@ -1843,6 +1884,137 @@ def mk_update(update_id, uid, chat_id, text, thread_id=None):
     if thread_id is not None:
         msg["message_thread_id"] = thread_id
     return {"update_id": update_id, "message": msg}
+
+
+def test_typewriter() -> None:
+    """Backlog (owner 2026-11-02): the TG typewriter preview — offline unit
+    legs over the injected send/edit/now seams: threshold and delay first
+    sends, edit throttling, every failure collapsing to `dead` (shown text
+    never rolls back), and the finalize ownership contract that decides
+    preview-vs-single-send at the delivery point."""
+    from mycore.service import (_Typewriter, STREAM_FIRST_CHARS,
+                                STREAM_FIRST_DELAY, STREAM_EDIT_CHARS,
+                                STREAM_EDIT_INTERVAL, STREAM_MAX_EDITS)
+
+    check("typewriter: tuning constants are the documented values",
+          STREAM_FIRST_CHARS == 160 and STREAM_FIRST_DELAY == 2.5
+          and STREAM_EDIT_CHARS == 120 and STREAM_EDIT_INTERVAL == 0.5
+          and STREAM_MAX_EDITS == 60,
+          f"{STREAM_FIRST_CHARS}/{STREAM_FIRST_DELAY}/{STREAM_EDIT_CHARS}"
+          f"/{STREAM_EDIT_INTERVAL}/{STREAM_MAX_EDITS}")
+
+    t = [0.0]
+    now = lambda: t[0]  # noqa: E731
+    sent: list[str] = []
+    edited: list[tuple] = []
+
+    def send_ok(text):
+        sent.append(text)
+        return {"ok": True, "result": {"message_id": 7}}
+
+    def edit_ok(mid, text):
+        edited.append((mid, text))
+        return {}
+
+    # --- short answer: threshold never reached inside the delay window ->
+    #     unstarted -> finalize False (caller falls back to ONE send) ---
+    tw = _Typewriter(send_ok, edit_ok, now=now)
+    for piece in ("hi", " there", " friend"):
+        tw.push(piece)
+    check("typewriter: short answer never starts the preview",
+          not tw.started and sent == [] and edited == [], str(sent))
+    check("typewriter: unstarted finalize defers to the single send",
+          tw.finalize("hi there friend") is False and sent == [], str(sent))
+
+    # --- char threshold: first send fires with the honest marker ---
+    tw2 = _Typewriter(send_ok, edit_ok, now=now)
+    tw2.push("x" * STREAM_FIRST_CHARS)
+    check("typewriter: threshold first-send carries prefix + marker",
+          tw2.started and sent == ["x" * STREAM_FIRST_CHARS + " …"]
+          and tw2.msg_id == 7, str(sent[-1:])[:80])
+
+    # --- delay: slow first tokens still preview (before any threshold) ---
+    sent.clear()
+    tw3 = _Typewriter(send_ok, edit_ok, now=now)
+    tw3.push("abc")
+    check("typewriter: below both gates sends nothing", sent == [])
+    t[0] += STREAM_FIRST_DELAY + 0.5
+    tw3.push("d")
+    check("typewriter: delay gate previews the slow prefix",
+          tw3.started and sent == ["abcd …"], str(sent))
+
+    # --- edit throttling: needs BOTH the char delta and the interval ---
+    edited.clear()
+    t[0] += 1.0
+    tw3.push("e" * STREAM_EDIT_CHARS)          # delta ok, interval ok (t+1)
+    check("typewriter: delta+interval edits once",
+          len(edited) == 1 and edited[0][0] == 7, str(edited))
+    t[0] += 0.1                                # interval NOT met
+    tw3.push("f" * STREAM_EDIT_CHARS)
+    check("typewriter: interval gap suppresses the edit", len(edited) == 1,
+          str(edited))
+    t[0] += STREAM_EDIT_INTERVAL + 0.1
+    tw3.push("g")                              # cumulative delta still large
+    check("typewriter: next window edits again", len(edited) == 2,
+          str(edited))
+
+    # --- edit failure -> dead: the shown text STAYS, finalize keeps it ---
+    before = len(edited)
+    def edit_boom(mid, text):
+        edited.append((mid, text))
+        raise RuntimeError("offline edit failure")
+    tw3._edit = edit_boom
+    t[0] += 5.0
+    tw3.push("h" * STREAM_EDIT_CHARS)
+    check("typewriter: edit failure marks dead (one attempt only)",
+          tw3.dead and len(edited) == before + 1, str(len(edited)))
+    t[0] += 5.0
+    tw3.push("i" * STREAM_EDIT_CHARS)
+    check("typewriter: dead stream ignores further deltas",
+          len(edited) == before + 1, str(len(edited)))
+    check("typewriter: dead started stream owns delivery (no re-send)",
+          tw3.finalize("whatever the final text is") is True
+          and sent == ["abcd …"], str(sent))
+
+    # --- first-send failure -> stays unstarted -> finalize False ---
+    sent.clear()
+    def send_boom(text):
+        sent.append(text)
+        raise RuntimeError("offline send failure")
+    tw4 = _Typewriter(send_boom, edit_ok, now=now)
+    tw4.push("z" * STREAM_FIRST_CHARS)
+    check("typewriter: first-send failure stays unstarted",
+          tw4.dead and not tw4.started and len(sent) == 1, str(sent))
+    check("typewriter: failed first-send defers to the ordinary send",
+          tw4.finalize("z" * STREAM_FIRST_CHARS) is False, str(sent))
+
+    # --- finalize: one edit with the authoritative text ---
+    sent.clear()
+    edited.clear()
+    tw5 = _Typewriter(send_ok, edit_ok, now=now)
+    tw5.push("y" * STREAM_FIRST_CHARS)
+    tw5.finalize("y" * STREAM_FIRST_CHARS + " END")
+    check("typewriter: finalize edits the authoritative text once",
+          len(edited) == 1 and edited[0][1] == "y" * STREAM_FIRST_CHARS + " END"
+          and tw5.edits == 1, str(edited))
+
+    # --- MAX_EDITS caps the updates, the final edit is exempt ---
+    edited.clear()
+    tw5.edits = STREAM_MAX_EDITS
+    t[0] += 10.0
+    tw5.push("q" * STREAM_EDIT_CHARS)
+    check("typewriter: MAX_EDITS stops the live updates",
+          len(edited) == 0, str(len(edited)))
+    tw5.finalize("authoritative tail")
+    check("typewriter: final edit bypasses the cap",
+          len(edited) == 1 and edited[-1][1] == "authoritative tail",
+          str(edited))
+
+    # --- empty deltas never send ---
+    tw6 = _Typewriter(send_ok, edit_ok, now=now)
+    tw6.push("")
+    check("typewriter: empty delta ignored", not tw6.started
+          and sent != [""], str(sent))
 
 
 def test_service() -> None:
@@ -1966,6 +2138,56 @@ def test_service() -> None:
             svc.handle_update(mk_update(5, 111, 123456789, "hello there"))
             check("service: known sender answered with model text",
                   fake.sends == [("123456789", "pong")], str(fake.sends))
+
+            # --- backlog (owner 2026-11-02): TG typewriter delivery ---
+            check("service: short reply = one send, zero edits",
+                  fake.edits == [], str(fake.edits))
+
+            def long_chat(messages=None, tools=None, on_delta=None, **kw):
+                chunk = "y" * 220
+                if on_delta is not None:
+                    on_delta(chunk)
+                return fake_response(text=chunk + " end")
+
+            fake_tw = FakeTgTransport()
+            svc_tw = ChatService(tdp / "st_tw", frozenset({111}),
+                                 transport=fake_tw, chat=long_chat, now=nowf)
+            svc_tw.handle_update(mk_update(60, 111, 42, "long please"))
+            check("service: long reply streams one preview send",
+                  len(fake_tw.sends) == 1
+                  and fake_tw.sends[0][1] == "y" * 220 + " …",
+                  str(fake_tw.sends)[:100])
+            check("service: final edit carries the authoritative text",
+                  len(fake_tw.edits) == 1
+                  and fake_tw.edits[0][2] == "y" * 220 + " end",
+                  str(fake_tw.edits)[:120])
+            log_tw = svc_tw.log.read_text()
+            check("service: stream events logged, content never logged",
+                  "STREAM_FIRST" in log_tw and "STREAM_FINAL" in log_tw
+                  and "yyyy" not in log_tw, log_tw[-300:])
+
+            # first-send failure -> preview never started -> ONE full send
+            fake_fb = FakeTgTransport()
+            fake_fb.fail_sends = 1
+            svc_fb = ChatService(tdp / "st_fb", frozenset({111}),
+                                 transport=fake_fb, chat=long_chat, now=nowf)
+            svc_fb.handle_update(mk_update(61, 111, 42, "long please"))
+            check("service: failed first-send falls back to one full send",
+                  len(fake_fb.sends) == 1
+                  and fake_fb.sends[0][1] == "y" * 220 + " end"
+                  and fake_fb.edits == [],
+                  str(fake_fb.sends)[:100])
+
+            # dry-run: the preview never touches the transport
+            fake_dr = FakeTgTransport()
+            svc_dr = ChatService(tdp / "st_dry_tw", frozenset({111}),
+                                 transport=fake_dr, chat=long_chat,
+                                 dry_run=True, now=nowf)
+            svc_dr.handle_update(mk_update(62, 111, 42, "long please"))
+            check("service: dry-run streams nothing (DRYRUN_SEND only)",
+                  fake_dr.sends == [] and fake_dr.edits == []
+                  and "DRYRUN_SEND" in svc_dr.log.read_text(),
+                  str(fake_dr.sends))
             sess_path = state1 / "sessions" / "123456789.jsonl"
             check("service: per-chat session jsonl persisted",
                   sess_path.is_file() and
@@ -2063,18 +2285,18 @@ def test_service() -> None:
                 check("service: /version up to date says so (installed shown)",
                       "0.5.69" in v_ok and "up to date" in v_ok, v_ok[:140])
 
-                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.74")
-                staged({"day": "x", "pending": "0.5.74"})
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.75")
+                staged({"day": "x", "pending": "0.5.75"})
                 svc.handle_update(mk_update(31, 111, 123456789, "/version"))
                 v_up = fake.sends[-1][1]
                 check("service: /version update -> latest + apply command",
-                      "0.5.74" in v_up and "aidog_update.py apply" in v_up,
+                      "0.5.75" in v_up and "aidog_update.py apply" in v_up,
                       v_up[:170])
                 st_after = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: /version consumes the staged notice (no dup)",
                       not st_after.get("pending")
-                      and st_after.get("notified") == "0.5.74",
+                      and st_after.get("notified") == "0.5.75",
                       str(st_after))
 
                 svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", None, fail=True)
@@ -2085,7 +2307,7 @@ def test_service() -> None:
                       and "RuntimeError" in v_err, v_err[:170])
 
                 # daily check: stages once, day-capped, then one-shot attach
-                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.74")
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.75")
                 (state1 / "release_notice.json").unlink(missing_ok=True)
                 svc._maybe_release_check()
                 n1 = fetch_calls["n"]
@@ -2095,28 +2317,28 @@ def test_service() -> None:
                 stg = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: newer release stages exactly one pending notice",
-                      stg.get("pending") == "0.5.74", str(stg))
+                      stg.get("pending") == "0.5.75", str(stg))
 
                 svc.handle_update(mk_update(33, 111, 123456789, "hello again"))
                 note1 = fake.sends[-1][1]
                 check("service: next message carries the release note once",
-                      "0.5.74" in note1 and "pong" in note1, note1[:220])
+                      "0.5.75" in note1 and "pong" in note1, note1[:220])
                 svc.handle_update(mk_update(34, 111, 123456789, "and again"))
                 note2 = fake.sends[-1][1]
                 check("service: the note is one-shot (second message clean)",
                       note2 == "pong", repr(note2))
 
                 # commands never carry the note; the pending survives them
-                staged({"day": "x", "pending": "0.5.74"})
+                staged({"day": "x", "pending": "0.5.75"})
                 svc.handle_update(mk_update(35, 111, 123456789, "/help"))
                 h_txt = fake.sends[-1][1]
                 check("service: commands do not carry the release note",
-                      "/version" in h_txt and "0.5.74" not in h_txt,
+                      "/version" in h_txt and "0.5.75" not in h_txt,
                       h_txt[:90])
                 st_h = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: an unconsumed pending survives a command",
-                      st_h.get("pending") == "0.5.74", str(st_h))
+                      st_h.get("pending") == "0.5.75", str(st_h))
 
                 # already-upgraded guard: pending == VERSION on disk -> cleared
                 ver = (Path(svc.repo) / "VERSION").read_text().strip()
@@ -12719,6 +12941,18 @@ def test_delta2() -> None:
     _, errs = ws.validate_settings_patch({"mycore": {"reasoning_effort": ""}})
     check("delta2 schema: empty effort (off) accepted", errs == [], str(errs))
 
+    # ---------------- backlog: model timeout (owner 2026-11-02) -----------
+    clean, errs = ws.validate_settings_patch({"mycore": {"timeout": 45}})
+    check("timeout schema: 45 accepted",
+          errs == [] and clean["mycore"]["timeout"] == 45, str(errs))
+    for bad in (4, 601, 0, -1, "30", True, 3.5, None):
+        _, errs = ws.validate_settings_patch({"mycore": {"timeout": bad}})
+        check(f"timeout schema: {bad!r} refused",
+              bool(errs) and "timeout" in errs[0], str(errs))
+    _, errs = ws.validate_settings_patch({"mycore": {"model": "m"}})
+    check("timeout schema: absent key legal (default keeps working)",
+          errs == [], str(errs))
+
     saved = {"settings": ws.SETTINGS_FILE, "secrets": ws.SECRETS,
              "dirs": ws.chat_sessions_dir}
     try:
@@ -13377,7 +13611,8 @@ def test_model_gateway() -> None:
             "upstreams": "http://legacy.example/v1|LEGACY_K",
             "endpoints": [{"url": "http://struct.example/v1",
                            "keys": ["MODEL_UP_K2"]}],
-            "rotation": "round_robin", "max_rpm": 5, "max_tpm": 700}}),
+            "rotation": "round_robin", "max_rpm": 5, "max_tpm": 700,
+            "timeout": 45}}),
             encoding="utf-8")
         real_repo = _gcli.REPO
         saved_env = {k: os.environ.pop(k, None)
@@ -13395,6 +13630,8 @@ def test_model_gateway() -> None:
                   cfg.rotation == "round_robin" and cfg.max_rpm == 5
                   and cfg.max_tpm == 700,
                   f"{cfg.rotation} {cfg.max_rpm} {cfg.max_tpm}")
+            check("gw: timeout resolves from settings",
+                  cfg.timeout == 45.0, str(cfg.timeout))
             os.environ["MYCORE_UPSTREAMS"] = "http://env.example/v1"
             cfg = _gcli.resolve_model_config()
             check("gw: env MYCORE_UPSTREAMS wins over BOTH tracks",
@@ -13415,7 +13652,8 @@ def test_model_gateway() -> None:
                   and ModelConfig().max_tpm == 0)
             settings.write_text(_json.dumps({"mycore": {
                 "endpoints": [{"url": "ftp://bad"}],
-                "rotation": "sideways", "max_rpm": 99999}}),
+                "rotation": "sideways", "max_rpm": 99999,
+                "timeout": 700}}),
                 encoding="utf-8")
             cfg = _gcli.resolve_model_config()
             check("gw: invalid endpoints -> chain off + honest note",
@@ -13424,6 +13662,8 @@ def test_model_gateway() -> None:
             check("gw: junk rotation / out-of-range rpm ignored",
                   cfg.rotation == "" and cfg.max_rpm == 0,
                   f"{cfg.rotation!r} {cfg.max_rpm}")
+            check("gw: out-of-range timeout keeps DEFAULT_TIMEOUT",
+                  cfg.timeout == 120.0, str(cfg.timeout))
         finally:
             _gcli.REPO = real_repo
             for k, v in saved_env.items():
@@ -16630,6 +16870,7 @@ def main() -> int:
         test_loop_budget,
         test_cli_precedence,
         test_tg,
+        test_typewriter,
         test_watchdog,
         test_service,
         test_evolution,
