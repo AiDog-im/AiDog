@@ -37,6 +37,7 @@
     <a href="#start" class="nav-link" data-i18n="nav.start">Start</a>
     <a href="#skills" class="nav-link" data-i18n="nav.skills">Skills</a>
     <a href="#capabilities" class="nav-link" data-i18n="nav.capabilities">Capabilities</a>
+    <a href="#desktop" class="nav-link" data-i18n="nav.desktop">Desktop</a>
     <a href="#sniff" class="nav-link" data-i18n="nav.sniff">Sniff</a>
     <a href="#console" class="nav-link" data-i18n="nav.console">Console</a>
     <a href="#models" class="nav-link" data-i18n="nav.models">Models</a>
@@ -64,7 +65,7 @@
     <p class="hero-sub reveal" data-i18n="hero.sub">Not a platform. Not an assistant farm. One companion grown for one person — a constitution for a personality, curated memory for a life, a self-developed core that answers to you alone.</p>
     <div class="hero-badges reveal">
       <span class="badge badge-free"><span class="pulse-dot" aria-hidden="true"></span><span data-i18n="hero.badgeFree">PERMANENTLY FREE — forever, no exceptions</span></span>
-      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 40 modules · 2487/2487 tests</span>
+      <span class="badge badge-core" data-i18n="hero.badgeCore">Self-developed core · 40 modules · 2494/2494 tests</span>
       <span class="badge badge-local" data-i18n="hero.badgeLocal">Runs on your machine · loopback by default</span>
     </div>
     <div class="hero-cta reveal">
@@ -90,7 +91,7 @@
   </div>
   <div class="fact-strip" aria-label="verified facts">
     <div class="fact-strip-track" id="factTrack">
-      <span class="fact"><b>2487/2487</b> <span data-i18n="facts.core">core tests</span></span>
+      <span class="fact"><b>2494/2494</b> <span data-i18n="facts.core">core tests</span></span>
       <span class="fact"><b>40</b> <span data-i18n="facts.modules">self-developed modules</span></span>
       <span class="fact"><b>558/558</b> <span data-i18n="facts.smoke">console smoke</span></span>
       <span class="fact"><b>37/37</b> <span data-i18n="facts.router">skill router</span></span>
@@ -220,7 +221,7 @@
     </div>
     <div class="feature">
       <h4>macOS</h4>
-      <p data-i18n="plat.macos">Python 3.10+, tmux and git — expected to work, not yet officially tested. Report what you find.</p>
+      <p data-i18n="plat.macos">Python 3.10+, tmux and git — verified on macOS 26 (arm64), 2026-11-12: Miniconda supplies Python 3.10+ and `conda install -c conda-forge tmux` (no Homebrew, no sudo). GitHub blocked? take the codeload zip instead of cloning.</p>
     </div>
     <div class="feature">
       <h4>iOS / Android</h4>
@@ -342,10 +343,41 @@
   </div>
 </section>
 
+<!-- ============================================ DESKTOP HUD (0.5.87) -->
+<section class="section" id="desktop">
+  <div class="section-head reveal">
+    <span class="section-index">05</span>
+    <h2 data-i18n="desk.title">Desktop HUD — the console as a floating overlay</h2>
+    <p class="section-sub" data-i18n="desk.sub">A frameless Electron shell that lifts the console onto your desktop: transparency slider, always-on-top, tray. It ships as a portable archive — no installer, no registry, no auto-update, no telemetry — and it attaches to the console you already run instead of spawning a second one.</p>
+  </div>
+  <div class="feature-grid reveal">
+    <div class="feature">
+      <h4 data-i18n="desk.f1T">Attaches, never spawns</h4>
+      <p data-i18n="desk.f1B">The shell probes 127.0.0.1:19167 and attaches to your running console (set AIDOG_REPO when it cannot find the install). It never starts a second Python stack of its own.</p>
+    </div>
+    <div class="feature">
+      <h4 data-i18n="desk.f2T">Linux</h4>
+      <p data-i18n="desk.f2B">Built (dir + tar.gz) and verified — the unpacked and the tar-extracted binary both run the shell's own --selftest green.</p>
+    </div>
+    <div class="feature">
+      <h4 data-i18n="desk.f3T">Windows</h4>
+      <p data-i18n="desk.f3B">Portable zip on the GitHub Release: extract and run, then it attaches to your WSL2 console over localhost. Selftest-verified on Windows; unsigned by design.</p>
+    </div>
+    <div class="feature">
+      <h4 data-i18n="desk.f4T">macOS</h4>
+      <p data-i18n="desk.f4B">The product itself runs on macOS (verified 2026-11-12); the macOS shell is not built yet — stated plainly rather than implied.</p>
+    </div>
+  </div>
+  <p class="section-sub reveal">
+    <a class="btn btn-ghost" href="https://github.com/AiDog-im/AiDog/releases" target="_blank" rel="noopener" data-i18n="desk.dl">Download the portable shell</a>
+    <a class="btn btn-ghost" href="https://github.com/AiDog-im/AiDog/blob/main/docs/features/desktop_client.md" target="_blank" rel="noopener" data-i18n="desk.doc">Read the technical notes</a>
+  </p>
+</section>
+
 <!-- ============================================ SNIFF -->
 <section class="section" id="sniff">
   <div class="section-head reveal">
-    <span class="section-index">05</span>
+    <span class="section-index">06</span>
     <h2 data-i18n="sniff.title">Sniff — the nose that speaks first</h2>
     <p class="section-sub" data-i18n="sniff.sub">A read-only sweep smells health, home, vehicle and web signals, turns them into findings with provenance, and speaks first only when one earns it.</p>
     <p class="smell-line" data-i18n="sniff.smellLine">Sniffing the room — the part of a dog that notices before you do.</p>
@@ -389,7 +421,7 @@
 <!-- ============================================ CONSOLE -->
 <section class="section" id="console">
   <div class="section-head reveal">
-    <span class="section-index">06</span>
+    <span class="section-index">07</span>
     <h2 data-i18n="console.title">Console</h2>
     <p class="section-sub" data-i18n="console.sub">Local Web Console Preview — see the panel you get after installing, before you download anything.</p>
   </div>
@@ -543,7 +575,7 @@
 <!-- ============================================ MODELS -->
 <section class="section" id="models">
   <div class="section-head reveal">
-    <span class="section-index">07</span>
+    <span class="section-index">08</span>
     <h2 data-i18n="models.title">Models &amp; Transparency</h2>
     <p class="section-sub" data-i18n="models.sub">We will publish how this product actually runs — which models serve it and how much compute it consumes. No estimates, no marketing charts: only what the software itself reports.</p>
   </div>
@@ -605,7 +637,7 @@
 <!-- ============================================ SECURITY -->
 <section class="section" id="security">
   <div class="section-head reveal">
-    <span class="section-index">08</span>
+    <span class="section-index">09</span>
     <h2 data-i18n="security.title">Security &amp; Trust</h2>
     <p class="section-sub" data-i18n="security.sub">Local-first by construction — the quiet guarantees, stated plainly.</p>
   </div>
@@ -706,7 +738,7 @@
 <!-- ============================================ GITHUB PULSE (car G, #7) -->
 <section class="section" id="pulse">
   <div class="section-head reveal">
-    <span class="section-index">09</span>
+    <span class="section-index">10</span>
     <h2 data-i18n="gh.title">GitHub pulse</h2>
     <p class="section-sub" data-i18n="gh.sub">The repository behind the product — release, stars, forks, watchers and discussions, from a dated snapshot taken when this site was deployed. A missing snapshot hides this card; it never shows a made-up number.</p>
   </div>
