@@ -11801,6 +11801,24 @@ function renderPipeline() {
   if (draftCount) draftCount.textContent = String(
     (Number(counts.drafted) || 0) + (Number(counts.approved) || 0));
   const draftBox = document.getElementById("pipeDrafts");
+  // The drafting brain's own meter: how many model drafts today and what
+  // they cost. An incomplete usage reads '?', never a made-up number.
+  const meter = (d && d.brain_metering) || null;
+  const meterBox = document.getElementById("pipeBrainMeter");
+  if (meterBox) {
+    if (meter && Number(meter.drafts || 0) > 0) {
+      meterBox.hidden = false;
+      const tok = meter.tokens === null || meter.tokens === undefined
+        ? "?" : String(meter.tokens);
+      meterBox.textContent = t("pipe.brainMeter",
+        "model brain today: {d} draft(s) · {t} tokens · cap {c}")
+        .replace("{d}", String(meter.drafts)).replace("{t}", tok)
+        .replace("{c}", String(d.model_drafts_per_day ?? 0));
+    } else {
+      meterBox.hidden = true;
+      meterBox.textContent = "";
+    }
+  }
   if (draftBox) {
     const live = drafts.filter(x => ["draft", "approved", "failed"].includes(String(x.status)));
     draftBox.innerHTML = live.length ? live.map(x => {
@@ -11808,11 +11826,20 @@ function renderPipeline() {
       const status = String(x.status || "");
       const canSend = status === "approved" || status === "failed";
       const body = String(x.body || "");
+      const brain = String(x.brain || "template");
+      const brainNote = brain === "model"
+        ? `<span class="pipe-dim">${escapeHtml(t("pipe.brainModel",
+            "model brain"))}${x.usage && typeof x.usage.total_tokens === "number"
+            ? ` · ${escapeHtml(t("pipe.brainTokens", "{n} tokens").replace("{n}",
+                String(x.usage.total_tokens)))}` : ""}</span>`
+        : (brain === "template" ? "" : `<span class="pipe-dim">${escapeHtml(t(
+            "pipe.brainTemplate", "template"))} — ${escapeHtml(brain)}</span>`);
       return `<div class="pipe-draft" data-draft="${escapeHtml(id)}">
         <div class="pipe-row-main">
           <span class="pipe-id">${escapeHtml(id)}</span>
           ${pipeBadge(status)}
           <span class="pipe-who">${escapeHtml(String(x.subject || ""))}</span>
+          ${brainNote}
           ${x.edited ? `<span class="pipe-dim">${escapeHtml(t("pipe.edited", "edited"))}</span>` : ""}
         </div>
         <textarea class="pipe-body" rows="4" data-draft-body="${escapeHtml(id)}">${escapeHtml(body)}</textarea>
@@ -11885,6 +11912,8 @@ function renderPipeControls() {
   set("pipeFromName", String(d.from_name || cfg.from_name || ""));
   set("pipeAddress", String(cfg.physical_address || ""));
   set("pipeOptOut", String(cfg.opt_out_note || ""));
+  set("pipeDrafting", cfg.drafting === "model" ? "model" : "template");
+  set("pipeModelCap", String(Number(cfg.model_drafts_per_day) || 0));
 }
 
 async function pipePost(payload, okText) {
@@ -12092,6 +12121,19 @@ function wirePipeline() {
   text("pipeFromName", "from_name", t("pipe.fromName", "Signature"));
   text("pipeAddress", "physical_address", t("pipe.address", "Postal address"));
   text("pipeOptOut", "opt_out_note", t("pipe.optOut", "Opt-out line"));
+  // The drafting brain: a select (not a checkbox) because the third option
+  // does not exist yet — "template" and "model" are the only modes.
+  const drafting = document.getElementById("pipeDrafting");
+  if (drafting) {
+    drafting.addEventListener("change", async () => {
+      const val = drafting.value === "model" ? "model" : "template";
+      await pipeCfgWrite(b => { b.drafting = val; },
+        t("pipe.saved", "{what} saved").replace("{what}",
+          t("pipe.drafting", "Drafting")));
+    });
+  }
+  num("pipeModelCap", 0, 50, "model_drafts_per_day",
+    t("pipe.modelCap", "Model drafts per day"));
   // delegated row actions (the lists re-render, so the handlers bind once)
   const view = document.getElementById("view-pipeline");
   if (view) view.addEventListener("click", async e => {

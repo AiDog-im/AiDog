@@ -79,6 +79,9 @@ DEFAULT_SETTINGS = {
     "from_name": "",           # signature name (owner's own wording)
     "physical_address": "",    # CAN-SPAM postal address — required before any send
     "opt_out_note": "",        # override for the standard English opt-out line
+    # The drafting brain (design: docs/design/pipeline_drafting_brain_design.md)
+    "drafting": "template",    # "template" (today) | "model" (one call per draft)
+    "model_drafts_per_day": 5,  # money-burn cap, independent of daily_cap (0..50)
 }
 
 ENABLED_MIN, ENABLED_MAX = 5, 1440
@@ -328,6 +331,13 @@ def normalize(settings: dict | None) -> dict:
     out["from_name"] = _clip(block.get("from_name"), FROM_NAME_MAX)
     out["physical_address"] = _clip(block.get("physical_address"), ADDRESS_MAX)
     out["opt_out_note"] = _clip(block.get("opt_out_note"), OPT_OUT_MAX)
+    mode = block.get("drafting")
+    out["drafting"] = (mode if isinstance(mode, str)
+                       and mode in ("template", "model")
+                       else DEFAULT_SETTINGS["drafting"])
+    out["model_drafts_per_day"] = _int_in(block.get("model_drafts_per_day"),
+                                           DEFAULT_SETTINGS["model_drafts_per_day"],
+                                           0, CAP_MAX)
     return out
 
 
@@ -571,6 +581,15 @@ def render_body(lead: dict, block: dict) -> str:
     approving; the model-brain seam is deliberately unwired (§9). The body
     always carries the opt-out line and the postal address — `send_approved`
     refuses to send without the address, so the footer is never half-empty."""
+    return with_footer(render_message(lead, block), lead, block)
+
+
+def render_message(lead: dict, block: dict) -> str:
+    """The MESSAGE part only — no opt-out line, no signature, no address.
+
+    The drafting brain writes exactly this part, and the product appends
+    the footer itself (compliance is the product's obligation, never the
+    model's prose)."""
     name = (lead.get("name") or "").strip()
     greeting = f"Hi {name}," if name else "Hi,"
     lines = [greeting, ""]
@@ -588,8 +607,15 @@ def render_body(lead: dict, block: dict) -> str:
         "and the docs are public.",
         "",
     ]
+    return _clip("\n".join(lines).strip(), BODY_MAX)
+
+
+def with_footer(message: str, lead: dict, block: dict) -> str:
+    """Append the compliance footer: the opt-out line, the signature and the
+    postal address. This is the product's job — a drafted body never carries
+    it, so a model cannot drop it."""
     opt_out = block.get("opt_out_note") or DEFAULT_OPT_OUT
-    lines += [opt_out, ""]
+    lines = [str(message or "").strip(), "", opt_out, ""]
     signature = (block.get("from_name") or "").strip()
     address = (block.get("physical_address") or "").strip()
     if signature:
@@ -605,8 +631,12 @@ def draft_ready(doc: dict, settings: dict | None, now: float | None = None,
 
     Bounded by the remaining daily budget (cap − sent today − already-approved),
     so drafting can never build a backlog the cap forbids sending. The `brain`
-    seam is accepted and unused in v1 (see §9); passing one changes nothing
-    today, which is asserted by the core suite."""
+    seam is the OPT-IN drafting brain (design D1–D9 in
+    docs/design/pipeline_drafting_brain_design.md): it is used only when
+    `pipeline.drafting` is "model" AND the money-burn cap allows; ANY failure
+    (model error, rule violation, cap reached) falls back to the template, so
+    a model can never stall the pipeline. With the default settings (or no
+    brain at all) the output is byte-identical to the template's."""
     now = _now(now)
     block = normalize(settings)
     cap = block["daily_cap"]
@@ -633,12 +663,54 @@ def draft_ready(doc: dict, settings: dict | None, now: float | None = None,
                "status": "draft", "created_at": now, "decided_at": 0.0,
                "sent_at": 0.0, "error": "",
                "edited": False, "brain": "template"}
+        # The drafting brain (opt-in): one call per draft, the footer is
+        # appended by the product either way, and ANY failure falls back to
+        # the template — a model must never stall the pipeline.
+        if brain is not None and block.get("drafting") == "model":
+            if _brain_cap_allows(doc, block, now):
+                result = brain(lead, block)
+                if isinstance(result, dict) and result.get("ok"):
+                    row["body"] = with_footer(str(result.get("body") or ""),
+                                              lead, block)
+                    row["brain"] = "model"
+                    row["usage"] = result.get("usage") or {}
+                    row["day"] = _beijing_day(now)
+                else:
+                    reason = ""
+                    if isinstance(result, dict):
+                        reason = str(result.get("reason") or "")[:120]
+                    row["brain"] = f"template (fallback: {reason})" if reason \
+                        else "template (fallback)"
+            else:
+                # the money-burn cap is reached: the draft is still made (the
+                # template is a perfectly good draft) and the row says why it
+                # is not a model draft.
+                row["brain"] = "template (model cap reached)"
         doc.setdefault("drafts", []).append(row)
         lead["status"] = "drafted"
         lead["updated_at"] = now
         made += 1
         _event(doc, "draft", lead.get("id") or "", f"draft {row['id']}", now)
     return made
+
+
+def _brain_cap_allows(doc: dict, block: dict, now: float) -> bool:
+    """The money-burn cap for model drafts (design D2). Kept here as a thin
+    wrapper so the pipeline module does not import the brain module (no
+    cycle, and the brain stays optional)."""
+    cap = int(block.get("model_drafts_per_day") or 0)
+    if cap <= 0:
+        return False
+    day = _beijing_day(now)
+    used = 0
+    for row in doc.get("drafts") or []:
+        if not isinstance(row, dict):
+            continue
+        if str(row.get("brain") or "").split(" ")[0] != "model":
+            continue
+        if str(row.get("day") or "") == day:
+            used += 1
+    return used < cap
 
 
 def require_draft(doc: dict, draft_id: str) -> dict:
@@ -929,6 +1001,16 @@ REPLIES_PAGE = 20
 EVENTS_PAGE = 30
 
 
+def _brain_metering(doc: dict, now: float | None = None) -> dict:
+    """Today's model drafts and their tokens. An incomplete usage reads `?`
+    (None) — never a partial sum that pretends to be exact."""
+    try:
+        from mycore import pipeline_brain
+        return pipeline_brain.metering(doc, now=now)
+    except Exception:  # noqa: BLE001 — the view must always answer
+        return {"drafts": 0, "tokens": None, "day": ""}
+
+
 def collect(settings: dict | None, doc: dict | None = None) -> dict:
     """GET /api/pipeline read model. Counters are derived from records; a stage
     with nothing recorded reports 0 and the view renders `—` for the derived
@@ -970,6 +1052,9 @@ def collect(settings: dict | None, doc: dict | None = None) -> dict:
         "from_name": block["from_name"],
         "physical_address_set": bool(block["physical_address"]),
         "opt_out_note": block["opt_out_note"],
+        "drafting": block["drafting"],
+        "model_drafts_per_day": block["model_drafts_per_day"],
+        "brain_metering": _brain_metering(doc, now),
         "qualify_min": QUALIFY_MIN,
         "stages": list(STAGES),
         "counts": counts,

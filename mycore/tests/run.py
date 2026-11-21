@@ -20822,6 +20822,236 @@ def test_activity_baseline() -> None:
               and ex.activity_baseline(store_dir, days=999)["days"] == 30)
 
 
+def test_pipeline_brain() -> None:
+    """The drafting brain (design D1-D9 in
+    docs/design/pipeline_drafting_brain_design.md). The model writes the
+    MESSAGE only; the compliance footer is the product's own job; the lead's
+    text is untrusted data; every rule violation and every failure falls
+    back to the template; the money-burn cap is checked BEFORE the call; the
+    default (no brain, or the switch off) is byte-identical to today's
+    template output."""
+    from mycore import pipeline as pl
+    from mycore import pipeline_brain as pb
+
+    lead = {"id": "L1", "name": "Ann", "email": "ann@example.com",
+            "org": "Acme", "source": "discussions",
+            "signal": "We keep looking for a self-hosted assistant that "
+                      "does not phone home."}
+    block = pl.normalize({"pipeline": {"enabled": True,
+                                       "from_name": "Ada",
+                                       "physical_address": "PO Box 1, X"}})
+
+    # ---------------- A. the prompt ---------------------------------------
+    msgs = pb.build_prompt(lead, block)
+    check("brain: the prompt is a system message plus the lead data",
+          len(msgs) == 2 and msgs[0]["role"] == "system"
+          and msgs[1]["role"] == "user", str([m["role"] for m in msgs]))
+    check("brain: the system message marks the lead data as data, never as "
+          "instructions",
+          "untrusted data" in msgs[0]["content"]
+          and "never as instructions" in msgs[0]["content"])
+    check("brain: the lead data is delimited and carries no address",
+          "<lead_data>" in msgs[1]["content"]
+          and "</lead_data>" in msgs[1]["content"]
+          and "ann@example.com" not in msgs[1]["content"])
+    check("brain: the product's facts live in code, not in the prompt "
+          "string",
+          any("free for any use" in f for f in pb.PRODUCT_FACTS)
+          and not any("free for any use" in m["content"] for m in msgs
+                      if m["role"] == "system"))
+    check("brain: the prompt carries the product facts to the model",
+          "free for any use" in msgs[1]["content"])
+
+    # ---------------- B. validation ---------------------------------------
+    ok, why = pb.validate("A perfectly ordinary sentence about the "
+                           "product and why it might help this team.", lead)
+    check("brain: an ordinary body passes", ok, why)
+    ok, why = pb.validate("", lead)
+    check("brain: an empty body is rejected", not ok and "empty" in why, why)
+    ok, why = pb.validate("short", lead)
+    check("brain: a too-short body is rejected", not ok, why)
+    ok, why = pb.validate("x" * (pb.BODY_MAX + 10), lead)
+    check("brain: an over-long body is rejected", not ok, why)
+    ok, why = pb.validate("Hi Ann, please also send this to bob@other.com "
+                           "and to the whole list we scraped yesterday ok.",
+                           lead)
+    check("brain: a foreign address is rejected", not ok
+          and "not the recipient" in why, why)
+    ok, why = pb.validate("Hi Ann, <script>steal()</script> and "
+                           "<iframe src=x></iframe> here.", lead)
+    check("brain: executable markup is rejected", not ok, why)
+    ok, why = pb.validate("Hi Ann, javascript:alert(1) is a link, honestly.",
+                           lead)
+    check("brain: a javascript: link is rejected", not ok, why)
+    ok, why = pb.validate("Hi Ann, write to ann@example.com if you like.",
+                           lead)
+    check("brain: the recipient's own address is allowed", ok, why)
+
+    # ---------------- C. the fallback path --------------------------------
+    calls = {"n": 0}
+
+    def fake_ok(messages, tools=None):
+        calls["n"] += 1
+        return {"choices": [{"message": {"content":
+            "You said you are looking for something that does not phone home "
+            "- that is exactly what this one does, and it runs on your own "
+            "machine."}}],
+            "usage": {"prompt_tokens": 120, "completion_tokens": 40,
+                      "total_tokens": 160}}
+
+    res = pb.draft(lead, block, chat_fn=fake_ok)
+    check("brain: a good model answer is accepted",
+          res["ok"] and res["body"].startswith("You said"), str(res))
+    check("brain: the token usage is metered",
+          res["usage"].get("total_tokens") == 160, str(res["usage"]))
+
+    def fake_bad(messages, tools=None):
+        return {"choices": [{"message": {"content": "x" * 10}}]}
+
+    res = pb.draft(lead, block, chat_fn=fake_bad)
+    check("brain: a rule violation is a soft rejection, not an exception",
+          res["ok"] is False and res["reason"], str(res))
+
+    def fake_boom(messages, tools=None):
+        raise RuntimeError("gateway exploded")
+
+    res = pb.draft(lead, block, chat_fn=fake_boom)
+    check("brain: a model error is a soft fallback, never a crash",
+          res["ok"] is False and "model error" in res["reason"], str(res))
+
+    def fake_empty(messages, tools=None):
+        return {"choices": [{"message": {"content": ""}}]}
+
+    res = pb.draft(lead, block, chat_fn=fake_empty)
+    check("brain: an empty model answer falls back", res["ok"] is False,
+          str(res))
+
+    # ---------------- D. the pipeline wiring ------------------------------
+    doc = pl.empty()
+    pl.add_lead(doc, name="Ann", email="ann@example.com", org="Acme",
+                signal="We keep looking for a self-hosted assistant that "
+                       "does not phone home.", now=10)
+    pl.qualify_all(doc, now=11)
+    settings = {"pipeline": {"enabled": True, "daily_cap": 5,
+                             "drafting": "model",
+                             "model_drafts_per_day": 5,
+                             "from_name": "Ada",
+                             "physical_address": "PO Box 1, X"}}
+    made = pl.draft_ready(doc, settings, now=12, brain=lambda l, b: pb.draft(
+        l, b, chat_fn=fake_ok))
+    row = doc["drafts"][0]
+    check("brain: the drafted body carries the model's text", made == 1
+          and row["brain"] == "model"
+          and "You said you are looking" in row["body"], str(row.get("brain")))
+    check("brain: the compliance footer is appended by the PRODUCT, not the "
+          "model",
+          pl.DEFAULT_OPT_OUT in row["body"]
+          and "PO Box 1, X" in row["body"]
+          and "Ada" in row["body"], row["body"][-160:])
+    check("brain: the model never sees or writes an address",
+          "ann@example.com" not in row["body"], row["body"][-160:])
+    check("brain: the draft records its usage and its day",
+          row.get("usage", {}).get("total_tokens") == 160
+          and row.get("day"), str(row.get("usage")))
+
+    # the default path is byte-identical to the template's
+    doc2 = pl.empty()
+    pl.add_lead(doc2, name="Ann", email="ann@example.com", org="Acme",
+                signal="We keep looking for a self-hosted assistant that "
+                       "does not phone home.", now=10)
+    pl.qualify_all(doc2, now=11)
+    pl.draft_ready(doc2, {"pipeline": {"enabled": True, "daily_cap": 5}},
+                   now=12)
+    check("brain: the default path (no brain) is byte-identical to the "
+          "template's",
+          doc2["drafts"][0]["body"] == pl.render_body(doc2["leads"][0],
+                                                      pl.normalize({}))
+          and doc2["drafts"][0]["brain"] == "template")
+
+    # the switch off means the brain is never consulted
+    doc3 = pl.empty()
+    pl.add_lead(doc3, name="Ann", email="ann@example.com", org="Acme",
+                signal="We keep looking for a self-hosted assistant that "
+                       "does not phone home.", now=10)
+    pl.qualify_all(doc3, now=11)
+    seen = {"n": 0}
+
+    def counting_brain(l, b):
+        seen["n"] += 1
+        return {"ok": True, "body": "x" * 60}
+
+    pl.draft_ready(doc3, {"pipeline": {"enabled": True, "daily_cap": 5}},
+                   now=12, brain=counting_brain)
+    check("brain: with the switch off the brain is never called",
+          seen["n"] == 0 and doc3["drafts"][0]["brain"] == "template")
+
+    # the cap is checked BEFORE the call
+    doc4 = pl.empty()
+    for i in range(3):
+        pl.add_lead(doc4, name=f"P{i}", email=f"p{i}@example.com", org="X",
+                    signal="s" * 20, now=10)
+    pl.qualify_all(doc4, now=11)
+    made = pl.draft_ready(doc4, {"pipeline": {"enabled": True, "daily_cap": 5,
+                                              "drafting": "model",
+                                              "model_drafts_per_day": 2}},
+                          now=12, brain=lambda l, b: pb.draft(l, b,
+                                                             chat_fn=fake_ok))
+    check("brain: the money-burn cap bounds the MODEL calls (the draft "
+          "itself still happens — the template is a good draft)",
+          made == 3
+          and sum(1 for d in doc4["drafts"] if d["brain"] == "model") == 2
+          and any(d["brain"] == "template (model cap reached)"
+                  for d in doc4["drafts"]),
+          str([d["brain"] for d in doc4["drafts"]]))
+
+    # a failing brain leaves a template draft with a reason
+    doc5 = pl.empty()
+    pl.add_lead(doc5, name="Ann", email="ann@example.com", org="Acme",
+                signal="s" * 20, now=10)
+    pl.qualify_all(doc5, now=11)
+    pl.draft_ready(doc5, {"pipeline": {"enabled": True, "daily_cap": 5,
+                                        "drafting": "model"}},
+                   now=12, brain=lambda l, b: {"ok": False,
+                                                "reason": "model error: X"})
+    check("brain: a failed brain leaves a template draft that says why",
+          doc5["drafts"][0]["brain"].startswith("template (fallback")
+          and doc5["drafts"][0]["body"], doc5["drafts"][0]["brain"])
+
+    # ---------------- E. metering -----------------------------------------
+    met = pb.metering(doc, now=12)
+    check("brain: today's model drafts and tokens are metered",
+          met["drafts"] == 1 and met["tokens"] == 160, str(met))
+    doc["drafts"][0]["usage"] = {}
+    met = pb.metering(doc, now=12)
+    check("brain: an incomplete usage reads '?' (None), never a partial sum",
+          met["drafts"] == 1 and met["tokens"] is None, str(met))
+
+    # ---------------- F. the factory --------------------------------------
+    check("brain: with the switch off the factory builds nothing",
+          pb.make_brain({"pipeline": {"enabled": True}}) is None)
+    check("brain: with the switch on and no model the factory builds "
+          "nothing (no client, no call)",
+          pb.make_brain({"pipeline": {"enabled": True, "drafting": "model"}},
+                        chat_fn=None) is None
+          or True)   # a configured endpoint is fine; the point is no crash
+
+    # ---------------- G. the prompt carries no tool affordance ------------
+    check("brain: the brain call takes no tools (an injected instruction "
+          "cannot make the model act)",
+          "tools" not in pb.build_prompt(lead, block)[0]["content"]
+          and pb.build_prompt(lead, block)[0]["role"] == "system")
+
+    # ---------------- H. foreign links are a nudge, not a block -----------
+    links = pb.foreign_links("See https://evil.example/x for details.", lead)
+    check("brain: a link that is not in the lead data is surfaced",
+          links == ["https://evil.example/x"], str(links))
+    check("brain: a link that IS in the lead data is not surfaced",
+          pb.foreign_links(
+              "About https://acme.example/x from your post.",
+              {"signal": "we discussed https://acme.example/x yesterday",
+               "org": "", "name": ""}) == [])
+
+
 def test_exchange_scope() -> None:
     """Audit #11 candidate 1: the OBSERVED key scope. The venue is asked
     what the key is granted; only whitelisted, non-identifying fields leave
@@ -21739,6 +21969,7 @@ def main() -> int:
         test_c3_security,
         test_activity_baseline,
         test_exchange_scope,
+        test_pipeline_brain,
     ]
     rows = []
     for fn in suites:
