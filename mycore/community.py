@@ -37,6 +37,7 @@ import urllib.request
 from pathlib import Path
 
 from lib import profile_paths as pp  # noqa: E402  (profile path seam)
+from . import envslots  # noqa: E402  (E2: the one store reader)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -93,7 +94,7 @@ def read_token() -> str:
     if env:
         return env
     try:
-        text = pp.secrets_path(REPO).read_text(encoding="utf-8")
+        text = envslots.secrets_text(pp.secrets_path(REPO))
     except OSError:
         return ""
     m = re.search(rf"(?m)^{re.escape(SLOT)}=(\S[^\r\n]*)$", text)

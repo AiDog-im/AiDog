@@ -12,13 +12,26 @@
 //   R7..R9  the CKX SDK (vendored, SRI-verified) round trip: encryptToText ->
 //       decrypt -> byte-identical plaintext + meta round trip; a WRONG
 //       passphrase is refused; encryptToFile -> decrypt -> byte-identical;
-//   R10..R13  restore of the DECRYPTED artifact (not the in-memory object):
+//   R10..R12  restore of the DECRYPTED artifact (not the in-memory object):
 //       settings + memory + secrets land and read back; restore without a
 //       token changes nothing; a schema mismatch is refused with 400;
-//   R14  a per-slot refusal is a HONEST PARTIAL: 503, the good slot still
+//   R13  a per-slot refusal is a HONEST PARTIAL: 503, the good slot still
 //       lands, the reason word names the slot and never the value;
-//   R15  neither the console's own stderr (captured) nor this script's output
+//   R14  neither the console's own stderr (captured) nor this script's output
 //       ever carries a credential value.
+//   R15..R19  E2 runtime secrets.env round trip (opt-in static encryption),
+//       driven entirely through the env seams (AIDOG_PROFILE /
+//       AIDOG_PROFILES_DIR / AIDOG_SECRETS_PASSPHRASE_FILE — the passphrase
+//       file lives INSIDE this throwaway profile dir and dies with it):
+//       R15  `aidog_secrets.py enable` encrypts the real profile store in
+//            place (SAFE magic; `status --state` = unlocked);
+//       R16  the live catalog unlocks on first read (store unlocked, the
+//            pre-seeded slots still set);
+//       R17  a live POST /api/secrets write lands RE-encrypted (plaintext
+//            never on disk) and reads back set;
+//       R18  `disable` restores the byte-identical plaintext, removes the
+//            passphrase file, the catalog reports store plain;
+//       R19  the write sentinel and the passphrase reach no output.
 //
 // The passphrase is a fixed test fixture; no production secret is read and no
 // value is ever printed (comparisons happen in-process).
@@ -29,6 +42,7 @@
 import { createRequire } from "node:module";
 import { spawn } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import net from "node:net";
 import { fileURLToPath } from "node:url";
@@ -43,6 +57,7 @@ const TOKEN = "E2E-CKX-WEB-TOKEN-SENTINEL";
 const SECRET_A = "E2E-CKX-SECRET-SENTINEL-A";   // pre-seeded slot value
 const SECRET_B = "E2E-CKX-SECRET-SENTINEL-B";   // written by the restore
 const SECRET_BAD = "not-a-numeric-allowlist";   // must be refused by shape
+const E2_WRITE_SENTINEL = "E2E-E2-WRITE-SENTINEL";  // R17 live write; never printed
 const MEMORY_FIXTURE = "# ckx round-trip fixture memory\n";
 const MEMORY_UPDATED = "# ckx round-trip fixture memory (restored)\n";
 
@@ -104,7 +119,13 @@ let root = null;
 let childStderr = "";
 
 (async () => {
-  root = path.join(REPO, "tmp", `ckx_roundtrip_${process.pid}`);
+  // The fixture root lives on the NATIVE fs (os.tmpdir()), not <repo>/tmp:
+  // this machine mounts the repo drive as 9p/drvfs where every file reports
+  // mode 0777, and mycore.secrets_store._passphrase() refuses a passphrase
+  // file that is group/other accessible — E2 enable/unlock would always fail
+  // under the repo tree. Still one-shot (rmSync in finally); the passphrase
+  // file stays inside the throwaway profile dir as required.
+  root = path.join(os.tmpdir(), `ckx_roundtrip_${process.pid}`);
   const profiles = path.join(root, "profiles");
   const profile = path.join(profiles, "ckxr");
   fs.mkdirSync(path.join(profile, "body", "memory"), { recursive: true });
@@ -115,6 +136,12 @@ let childStderr = "";
                    MEMORY_FIXTURE);
   fs.copyFileSync(path.join(REPO, "web", "settings.json"),
                   path.join(profile, "settings.json"));
+  // E2 seams: the passphrase file lives INSIDE the throwaway profile dir
+  // (removed in `finally` — never ~/.config, never elsewhere in the tree).
+  // The console receives only the PATH; the value is read in-process once
+  // after enable and never printed, never put in an assertion detail.
+  const SECRETS_FILE = path.join(profile, "secrets.env");
+  const PW_FILE = path.join(profile, "secrets.passphrase");
 
   const port = await freePort();
   const base = `http://127.0.0.1:${port}`;
@@ -122,6 +149,7 @@ let childStderr = "";
     cwd: path.join(REPO, "web"),
     env: Object.assign({}, process.env, {
       AIDOG_PROFILES_DIR: profiles, AIDOG_PROFILE: "ckxr",
+      AIDOG_SECRETS_PASSPHRASE_FILE: PW_FILE,
       AIDOG_MC_STATE: path.join(profile, "state"),
       AIDOG_WEB_PORT: String(port),
     }),
@@ -290,6 +318,130 @@ let childStderr = "";
     check("R14 no credential value reached this script's own output",
           [SECRET_A, SECRET_B, TOKEN]
             .every((v) => printed.join("\n").indexOf(v) === -1), "stdout leak");
+
+    /* ------------------------------------- E2 runtime secrets.env legs ---- */
+    // R15..R19 run while the isolated console above is still serving: the
+    // real profile store is encrypted in place, read and written through the
+    // live API, then decrypted back. Every assertion detail below is only
+    // words / rc / booleans / lengths — values (the write sentinel, the
+    // passphrase) stay inside this process and are checked for absence from
+    // the output, never printed.
+    const e2env = {
+      AIDOG_PROFILE: "ckxr",
+      AIDOG_PROFILES_DIR: profiles,
+      AIDOG_SECRETS_PASSPHRASE_FILE: PW_FILE,
+    };
+    const runSecretsCli = (args) => new Promise((resolve) => {
+      const p = spawn("python3",
+                      [path.join(REPO, "deploy", "aidog_secrets.py"), ...args],
+                      { cwd: REPO,
+                        env: Object.assign({}, process.env, e2env),
+                        stdio: ["ignore", "pipe", "pipe"] });
+      let out = "";
+      p.stdout.on("data", (d) => { out += String(d); });
+      p.on("close", (rc) => resolve({ rc, out }));
+    });
+    const stateWord = (out) => {
+      const lines = String(out).trim().split("\n").filter((l) => l.trim());
+      return lines.length ? lines[lines.length - 1].trim() : "";
+    };
+    const headIsSafe = (buf) =>
+      buf.length >= 4 &&
+      Buffer.compare(buf.subarray(0, 4), Buffer.from("SAFE", "latin1")) === 0;
+    const slotSet = (rows, name) => {
+      const row = rows.find((x) => x && x.name === name);
+      return !!(row && row.set);
+    };
+
+    // R15 — enable: encrypt the REAL profile store in place (CLI side runs
+    // on the same env seams the console already uses + the passphrase path).
+    const beforeBytes = fs.readFileSync(SECRETS_FILE);
+    let cli = await runSecretsCli(["enable"]);
+    let encMagic = false;
+    try { encMagic = headIsSafe(fs.readFileSync(SECRETS_FILE)); }
+    catch (e) { encMagic = false; }
+    check("R15 enable rc==0 and secrets.env now carries the SAFE magic",
+          cli.rc === 0 && encMagic, `rc=${cli.rc} safe=${encMagic}`);
+    cli = await runSecretsCli(["status", "--state"]);
+    const wordUnlocked = stateWord(cli.out);
+    check("R15 status --state reports unlocked",
+          cli.rc === 0 && wordUnlocked === "unlocked",
+          wordUnlocked || `rc=${cli.rc}`);
+    // The passphrase, read ONCE in-process for the R19 scan — never printed.
+    let pwFixture = "";
+    try { pwFixture = fs.readFileSync(PW_FILE, "utf8").trim(); }
+    catch (e) { pwFixture = ""; }
+
+    // R16 — live read: the console never caches plaintext for a plain store,
+    // so this first post-enable read really unlocks the file in-process.
+    r = await api(base, "GET", "/api/secrets", { token: TOKEN });
+    const store1 = (r.json || {}).store || {};
+    check("R16 the live store reports unlocked / encrypted / not locked",
+          r.status === 200 && store1.state === "unlocked" &&
+          store1.encrypted === true && store1.locked === false,
+          `${r.status} ${store1.state || "none"}`);
+    const rows1 = (r.json || {}).slots || [];
+    check("R16 the pre-seeded slots are still set after encryption",
+          slotSet(rows1, "LINEAR_API_KEY") && slotSet(rows1, "NOTION_API_KEY") &&
+          slotSet(rows1, "TTS_API_KEY"), "slot unset");
+
+    // R17 — live WRITE while encrypted: the new value must land re-encrypted
+    // (ciphertext only on disk), then read back as set.
+    r = await api(base, "POST", "/api/secrets",
+                  { token: TOKEN,
+                    body: { name: "TTS_API_KEY", value: E2_WRITE_SENTINEL } });
+    const encBytes = fs.readFileSync(SECRETS_FILE);
+    const encSafe = headIsSafe(encBytes);
+    const plainOnDisk =
+      encBytes.indexOf(Buffer.from(E2_WRITE_SENTINEL, "utf8")) !== -1;
+    check("R17 the live write lands 200 with the store still ciphertext",
+          r.status === 200 && r.json && r.json.ok === true && encSafe &&
+          !plainOnDisk,
+          `${r.status} safe=${encSafe} plaintext=${plainOnDisk}`);
+    r = await api(base, "GET", "/api/secrets", { token: TOKEN });
+    const rows2 = (r.json || {}).slots || [];
+    // Second live write: restore the original slot value so R18 can prove the
+    // enable -> disable cycle is byte-identical to the pre-enable snapshot
+    // (the sentinel itself was verified above, mid-flight, as ciphertext).
+    const restoreSlot = await api(base, "POST", "/api/secrets",
+                                  { token: TOKEN,
+                                    body: { name: "TTS_API_KEY",
+                                            value: SECRET_B } });
+    check("R17 the written slot reads back set (value restored for R18)",
+          r.status === 200 && slotSet(rows2, "TTS_API_KEY") &&
+          restoreSlot.status === 200 && restoreSlot.json &&
+          restoreSlot.json.ok === true,
+          `${r.status} set=${slotSet(rows2, "TTS_API_KEY")} ` +
+          `restore=${restoreSlot.status}`);
+
+    // R18 — disable: decrypt back byte-identical, drop the passphrase file.
+    const dis = await runSecretsCli(["disable"]);
+    const afterBytes = fs.readFileSync(SECRETS_FILE);
+    const pwGone = !fs.existsSync(PW_FILE);
+    const stPlain = await runSecretsCli(["status", "--state"]);
+    const wordPlain = stateWord(stPlain.out);
+    check("R18 disable rc==0, passphrase file removed, state plain",
+          dis.rc === 0 && pwGone && wordPlain === "plain",
+          `rc=${dis.rc} pw=${pwGone} state=${wordPlain || "none"}`);
+    check("R18 the decrypted bytes equal the pre-enable snapshot",
+          Buffer.compare(beforeBytes, afterBytes) === 0,
+          `${beforeBytes.length} vs ${afterBytes.length}`);
+    r = await api(base, "GET", "/api/secrets", { token: TOKEN });
+    const store2 = (r.json || {}).store || {};
+    check("R18 the live catalog reports store plain / not encrypted",
+          r.status === 200 && store2.state === "plain" &&
+          store2.encrypted === false,
+          `${r.status} ${store2.state || "none"}`);
+
+    // R19 — zero leak: the R17 write sentinel and the passphrase (read once,
+    // in-process, right after enable) appear in neither this script's own
+    // output nor the console's captured stderr.
+    const e2Leak = [E2_WRITE_SENTINEL, pwFixture]
+      .filter((v) => v &&
+              (printed.join("\n").indexOf(v) !== -1 ||
+               childStderr.indexOf(v) !== -1));
+    check("R19 no write sentinel or passphrase reached any output",
+          e2Leak.length === 0, "leak");
   } catch (e) {
     check("suite ran to completion", false, String(e && e.stack ? e.stack : e).slice(0, 300));
   } finally {

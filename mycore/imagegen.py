@@ -28,6 +28,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings/secrets)
+from . import envslots  # noqa: E402  (E2: the one store reader)
 SIZE_RE = re.compile(r"^\d{2,5}x\d{2,5}$")
 ERR_SNIPPET = 160          # upstream error text cap (honest, bounded)
 
@@ -57,7 +58,7 @@ def _slot(name: str) -> str:
     if val:
         return val
     try:
-        text = pp.secrets_path(REPO).read_text(encoding="utf-8")
+        text = envslots.secrets_text(pp.secrets_path(REPO))
     except OSError:
         return ""
     m = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", text)

@@ -61,6 +61,7 @@ from pathlib import Path
 from typing import Callable
 
 from lib import profile_paths as pp  # noqa: E402  (per-profile secrets)
+from . import envslots  # noqa: E402  (E2: the one store reader)
 
 ERR_SNIPPET = 160          # upstream error text cap (honest, bounded)
 MAX_LINES = 40             # output cap (context budget discipline)
@@ -166,7 +167,7 @@ def _slot(name: str) -> str:
     try:
         from pathlib import Path
         repo = Path(__file__).resolve().parent.parent
-        text = pp.secrets_path(repo).read_text(encoding="utf-8")
+        text = envslots.secrets_text(pp.secrets_path(repo))
     except OSError:
         return ""
     m = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", text)
