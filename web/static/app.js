@@ -2202,33 +2202,42 @@ function renderSelf(doc) {
   const chip = (k, label, v) => `<div><div class="k">${escapeHtml(t(k, label))}</div>` +
     `<div class="v">${escapeHtml(v)}</div></div>`;
   const num = n => Number(n || 0).toLocaleString("en-US");
-  let costTxt = "—";
-  const pricing = (doc.pricing && typeof doc.pricing === "object") ? doc.pricing : {};
-  if (pricing.configured && pricing.total_cny != null) {
-    const cny = Number(pricing.total_cny);
+  const fmtCost = (cnyVal) => {
+    if (cnyVal == null) return "—";
+    const cny = Number(cnyVal);
     if (d && d.currency !== "CNY" && rate > 0) {
       const v = cny / rate;
-      costTxt = (d.symbol || "") + (v >= 100 ? Math.round(v).toLocaleString()
+      return (d.symbol || "") + (v >= 100 ? Math.round(v).toLocaleString()
         : v >= 1 ? v.toFixed(1) : v.toFixed(2));
-    } else {
-      costTxt = (d && d.currency === "CNY" ? "¥" : "") +
-        (cny >= 100 ? Math.round(cny).toLocaleString()
-          : cny >= 1 ? cny.toFixed(1) : cny.toFixed(2));
     }
-  }
+    return (d && d.currency === "CNY" ? "¥" : "") +
+      (cny >= 100 ? Math.round(cny).toLocaleString()
+        : cny >= 1 ? cny.toFixed(1) : cny.toFixed(2));
+  };
+  let costTxt = "—";
+  const pricing = (doc.pricing && typeof doc.pricing === "object") ? doc.pricing : {};
+  if (pricing.configured && pricing.total_cny != null) costTxt = fmtCost(pricing.total_cny);
+  // car B (mass-market 5.3): the cost-transparency pair — THIS month from
+  // the same local meter; an unpriced table keeps the honest dash.
+  const m = (doc.month && typeof doc.month === "object") ? doc.month : null;
   grid.innerHTML =
     chip("usage.selfReq", "REQUESTS 7D", num(doc.requests)) +
     chip("usage.selfOk", "OK", num(doc.ok)) +
     chip("usage.selfFail", "FAIL", num(doc.fail)) +
     chip("usage.selfIn", "IN TOKENS", num(doc.in_tokens)) +
     chip("usage.selfOut", "OUT TOKENS", num(doc.out_tokens)) +
-    chip("usage.selfCost", "COST 7D", costTxt);
+    chip("usage.selfCost", "COST 7D", costTxt) +
+    (m ? chip("usage.selfMonthReq", "REQUESTS THIS MONTH", num(m.requests)) : "") +
+    (m ? chip("usage.selfMonthCost", "COST THIS MONTH",
+       fmtCost(m.total_cny)) : "");
   const bits = [];
-  if (Array.isArray(doc.unpriced) && doc.unpriced.length &&
-      pricing.total_cny == null) {
+  // the server groups the unpriced list under `pricing` (D2 contract);
+  // reading a top-level `doc.unpriced` made this note dead code (car B fix)
+  const unpriced = Array.isArray(pricing.unpriced) ? pricing.unpriced : [];
+  if (unpriced.length && pricing.total_cny == null) {
     bits.push(t("usage.selfNoPrice",
       "no price configured for {m} — cost stays unknown")
-      .replace("{m}", doc.unpriced.slice(0, 4).join(", ")));
+      .replace("{m}", unpriced.slice(0, 4).join(", ")));
   }
   if (Number(doc.no_usage) > 0) {
     bits.push(t("usage.selfNoUsage",
@@ -3300,6 +3309,27 @@ async function saveSettings() {
   // any non-success outcome below must leave nothing repaintable behind
   delete state.dataset.saveKind;
   delete state.dataset.restartHint;
+  // car B (#17): lightweight CLIENT-side shape checks — instant feedback,
+  // no round trip. The server stays the authority on every grammar rule
+  // (its 400 detail still renders verbatim); this only catches the two
+  // shapes a human can spot without a request: a non-http(s) URL in a
+  // URL field.
+  const urlBad = ["mycUrl", "imgBaseUrl", "ttsBaseUrl", "usageMetricsUrl",
+                  "decUrl"].find(id => {
+    const el = document.getElementById(id);
+    const v = el ? String(el.value || "").trim() : "";
+    return v !== "" && !/^https?:\/\/\S+$/i.test(v);
+  });
+  if (urlBad) {
+    const el = document.getElementById(urlBad);
+    const row = el && el.closest(".ctl-row");
+    const lab = row && row.querySelector("label");
+    state.className = "save-state err";
+    state.textContent = t("save.badUrl",
+      "not a valid URL — expected http://… (check: {f})")
+      .replace("{f}", lab ? lab.textContent.trim() : urlBad);
+    return;
+  }
   if (input.value) localStorage.setItem(TOKEN_KEY, input.value.trim());
   const token = localStorage.getItem(TOKEN_KEY) || "";
   const payload = {
@@ -4949,6 +4979,10 @@ function renderControl() {
     let txt = t(map[doc.tail_state] || "tail.idle", doc.tail_state || "idle");
     if (doc.tail_state === "paused" && doc.reason) txt += " · " + doc.reason;
     tail.textContent = txt;
+    // car B (D3): the mood rides NEXT to the words, never instead of them —
+    // the text stays the accessible truth; the glyph only adds color+motion.
+    const mood = document.getElementById("tailMood");
+    if (mood) mood.dataset.state = doc.tail_state || "idle";
   }
   const pbtn = document.getElementById("ctlPauseBtn");
   if (pbtn) {
@@ -5179,7 +5213,79 @@ function paintSaveBar() {                        // language switch (loadLang)
   if (kind === "dirty") state.textContent = t("save.dirty", "unsaved changes");
   else if (kind === "ok") state.textContent = t("save.ok", "saved ✓");
   else if (kind === "same") state.textContent = t("save.same", "no change ✓");
+  else if (kind === "cancel") state.textContent =
+    t("save.discarded", "changes discarded ✓");
   // kind === "err": the server's own detail stays verbatim, like repaintSaveState
+}
+
+/* car B (#17): CANCEL = discard every pending edit and repaint the form
+   from the SERVER's truth — the exact boot prefill path (loadSettings ->
+   initSettingsPanels resets every block flag), never a locally guessed
+   "previous value". The bar briefly confirms, then steps aside. */
+async function saveBarCancel() {
+  document.querySelectorAll(".set-grid > .card[data-dirty='1']")
+    .forEach(c => delete c.dataset.dirty);
+  const state = document.getElementById("saveState");
+  if (state) {                       // a stale error dies with the edits
+    state.className = "save-state";
+    state.textContent = "";
+    delete state.dataset.saveKind;
+    delete state.dataset.restartHint;
+  }
+  try { await loadSettings(); initSettingsPanels(); } catch (e) { /* keep */ }
+  saveBarShow(saveBarCardEl, "cancel",
+    t("save.discarded", "changes discarded ✓"));
+  saveBarHide(1400);
+}
+
+/* car B: three one-click model presets (mass-market onboarding 4.1). They
+   only FILL #mycUrl (+#mycModel when a matching local server was detected
+   by the server-side loopback probe in GET /api/capabilities) and dispatch
+   one `input` event each — dirty tracking, the sticky bar and the existing
+   saveSettings() stay the single writer, exactly like the D1 discovery
+   ADD. Nothing is written until the operator presses SAVE.
+   Detection kinds come from mycore.localmodels: ollama / llamacpp /
+   lmstudio. "OpenAI-compatible" has no loopback probe (it is the shipped
+   local gateway default, or any URL the operator brings). */
+const PRESET_DEFAULTS = {
+  ollama: "http://127.0.0.1:11434/v1",
+  lmstudio: "http://127.0.0.1:1234/v1",
+  openai: "http://127.0.0.1:3460/v1",
+};
+let presetMsgState = null;      // {hit:bool, label:string} | null — relang
+
+function paintPresetMsg() {                        // settingsRelang + apply
+  const msg = document.getElementById("presetMsg");
+  if (!msg || !presetMsgState) return;
+  msg.className = "save-state";
+  msg.textContent = presetMsgState.hit
+    ? t("myc.presetApplied", "endpoint filled — press SAVE to keep it")
+    : t("myc.presetNone",
+        "no local {k} server detected — default address filled anyway")
+        .replace("{k}", presetMsgState.label);
+}
+
+function presetApply(kind, labelKey) {
+  const urlEl = document.getElementById("mycUrl");
+  const modelEl = document.getElementById("mycModel");
+  if (!urlEl) return;
+  const detected = (capsData && capsData.local_models &&
+    Array.isArray(capsData.local_models.detected))
+    ? capsData.local_models.detected : [];
+  // "openai" maps to no probe kind on purpose: the shipped gateway default
+  // is what an OpenAI-compatible operator starts from.
+  const hit = kind === "openai" ? null
+    : (detected.find(e => e && e.kind === kind) || null);
+  const base = hit ? String(hit.base_url || "") : PRESET_DEFAULTS[kind];
+  if (!base) return;
+  urlEl.value = base;
+  urlEl.dispatchEvent(new Event("input", { bubbles: true }));
+  if (hit && modelEl && hit.model) {
+    modelEl.value = String(hit.model);
+    modelEl.dispatchEvent(new Event("input", { bubbles: true }));
+  }
+  presetMsgState = { hit: !!hit, label: t(labelKey, kind) };
+  paintPresetMsg();
 }
 
 function wireRoundC() {
@@ -5200,6 +5306,8 @@ function wireRoundC() {
     ["input", "change"].forEach(ev => view.addEventListener(ev, saveBarDirty));
     const barBtn = document.getElementById("saveBarBtn");
     if (barBtn) barBtn.addEventListener("click", () => saveSettings());
+    const barCancel = document.getElementById("saveBarCancelBtn");
+    if (barCancel) barCancel.addEventListener("click", () => saveBarCancel());
     const src = document.getElementById("saveState");
     if (src && "MutationObserver" in window) {
       new MutationObserver(() => {
@@ -5262,6 +5370,7 @@ function settingsRelang() {
   renderFileFace();            // round C: file face text follows the pack
   renderModelChips();          // D1: chip remove labels follow the pack
   paintLedgerStatus();        // D2: ledger card dynamic rows follow the pack too
+  paintPresetMsg();           // car B: preset status line follows the pack
   discPaintMsg();              // D1: discovery status line repaints
   discPaintAdd();              // D1: ADD label repaints with the selection
 }
@@ -6025,7 +6134,14 @@ function renderSetup() {
         "endpoint. Fix each row below, or run in a terminal:")) + " " +
         `<code style="font-family:Consolas,monospace;font-size:12.5px;` +
         `color:var(--blue-ink);border:1px dashed var(--line);` +
-        `padding:1px 6px;border-radius:6px;">aidog setup</code>`;
+        `padding:1px 6px;border-radius:6px;">aidog setup</code>` +
+        // car B (mass-market 4.1): point step 3 at the one-click presets —
+        // same checklist, just an easier door
+        `<div class="stat-note" style="margin-top:4px;">` +
+        `${escapeHtml(t("act.startTip",
+          "Tip: the Model card has one-click presets — OpenAI-compatible / " +
+          "Ollama / LM Studio — with local-server auto-detection " +
+          "(a local server needs no API key)."))}</div>`;
     }
   }
   const items = Array.isArray(setupData.items) ? setupData.items : [];
@@ -8721,6 +8837,15 @@ async function savePort() {
   const btn = document.getElementById("portSaveBtn");
   if (!input || !state) return;
   const port = parseInt(input.value, 10);
+  // car B (#17): the same range the server enforces, checked first — instant
+  // feedback, no round trip; the server stays the authority (bind probe,
+  // env-override refusal, atomic pin).
+  if (!Number.isInteger(port) || port < 1024 || port > 65535) {
+    state.className = "save-state err";
+    state.textContent = t("save.badPort",
+      "port must be a whole number 1024–65535");
+    return;
+  }
   const token = localStorage.getItem(TOKEN_KEY) || "";
   if (!token) { state.className = "save-state err";
     state.textContent = t("save.needToken", "token required"); return; }
@@ -8857,6 +8982,17 @@ if (upTestBtnEl) upTestBtnEl.addEventListener("click", upstreamTest);
 /* D1 (round D car 1): discovery panel + the whitelist chips' field mirror */
 const discBtnEl = document.getElementById("discBtn");
 if (discBtnEl) discBtnEl.addEventListener("click", runDiscover);
+/* car B: model presets — fill the endpoint fields, then the normal
+   dirty -> SAVE path does every write (see presetApply above). */
+const presetOaiEl = document.getElementById("presetOaiBtn");
+if (presetOaiEl) presetOaiEl.addEventListener("click", () =>
+  presetApply("openai", "myc.presetOpenai"));
+const presetOllamaEl = document.getElementById("presetOllamaBtn");
+if (presetOllamaEl) presetOllamaEl.addEventListener("click", () =>
+  presetApply("ollama", "myc.presetOllama"));
+const presetLmEl = document.getElementById("presetLmBtn");
+if (presetLmEl) presetLmEl.addEventListener("click", () =>
+  presetApply("lmstudio", "myc.presetLmstudio"));
 const discAddBtnEl = document.getElementById("discAddBtn");
 if (discAddBtnEl) discAddBtnEl.addEventListener("click", discAdd);
 const mycModelsEl = document.getElementById("mycModels");
