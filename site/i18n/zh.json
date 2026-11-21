@@ -275,7 +275,7 @@
   "sniff.howto1": "装好后打开控制台 → SENSE：先加数据源（Home Assistant 地址 + token 槽位、URL + 提取正则，或 mycore.mcp 里的桥名），再加一条规则，例如 sensor.temp > 30 for 10m。",
   "sniff.howto2": "点 SWEEP NOW（或等扫描间隔）：命中进入 FINDINGS 时间线、留在你机器上 —— 标了 speak 的规则由你先收到，何时开口由安静时段、摘要上限与 PAUSE 说了算。",
   "hero.lead": "一个跑在你自己机器上的私人 AI：在 Telegram 或控制台和它说话，它记得住要紧的事，你排的活它按时跑完。",
-  "start.done": "然后打开 http://127.0.0.1:8790 —— 控制台已经在跑了。",
+  "start.done": "然后打开 http://127.0.0.1:19167 —— 控制台已经在跑了。",
   "start.docsCta": "完整安装指南——前置条件、每个配置槽、排障",
   "skills.curationNote": "刻意只放信得过的——每个条目都过机器闸（结构、格式、泄漏扫描）与人工评审。没有公开市场，没有意外代码。",
   "skills.moreCta": "在技能目录里看全部十二个",

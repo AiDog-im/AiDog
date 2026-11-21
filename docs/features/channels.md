@@ -103,7 +103,7 @@ run() loop → _maybe_poll_channels()
 
 ## 4. Webhook inbound (console endpoint)
 
-`POST /api/channels/webhook` on the loopback console (`127.0.0.1:8790`):
+`POST /api/channels/webhook` on the loopback console (`127.0.0.1:19167`):
 
 1. `Authorization: Bearer <CHANNEL_WEBHOOK_SECRET>` — slot absent → **503**
    naming the slot; wrong/absent bearer → **401**; comparison is

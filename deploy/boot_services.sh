@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Idempotent starter for the AiDog runtime tmux sessions (post-swap P5-5 view):
-#   aidog_web - situational web console (127.0.0.1:8790)
+#   aidog_web - situational web console (127.0.0.1:19167 — car A2 port
+#               standard; AIDOG_WEB_PORT env > web/port.local > 19167)
 #   aidog_svc - mycore chat service (P5-2; gated fail-closed until the
 #               dedicated bot token + allowlist are provisioned)
 #   aidog_mwd - mycore watchdog loop (--execute per owner authorization
@@ -39,7 +40,13 @@ else
   GWLOG=""
 fi
 WEB_LOG=$REPO/deploy/web_console.log
-WEB_PORT=${AIDOG_WEB_PORT:-8790}
+# Car A2 (port standard 2026-11-01): env override > web/port.local (settings
+# card pin) > 19167 (product default). Mirrors web/server.py _resolve_web_port.
+WEB_PORT="${AIDOG_WEB_PORT:-}"
+if [ -z "$WEB_PORT" ] && [ -f "$REPO/web/port.local" ]; then
+  WEB_PORT="$(tr -cd '0-9' < "$REPO/web/port.local")"
+fi
+WEB_PORT="${WEB_PORT:-19167}"
 
 # Post-reboot egress fix (owner-approved, 2026-10-17): direct Telegram API egress
 # is unreachable from this host after a reboot, and tmux children inherit the

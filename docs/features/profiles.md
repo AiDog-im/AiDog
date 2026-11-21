@@ -118,8 +118,8 @@ re-checked once more after all legs.
 - **`aidog setup`, doctor, update and the watchdog still operate on the
   default profile only.** The watchdog monitors the default target
   port/paths; profile instances are not watched. Not hidden, not claimed.
-- **Desktop shell attach on 8790 = default profile.** The console it windows
-  into is whatever serves 8790 (see [desktop_client.md](desktop_client.md)).
+- **Desktop shell attach on 19167 = default profile.** The console it windows
+  into is whatever serves 19167 (see [desktop_client.md](desktop_client.md)).
 - **Second-bot dual live chat = pending.** Requires a second bot token; the
   E2E prints `SKIP (pending second bot)` rather than faking the leg.
 - **Profile console writes answer 503 while `WEB_TOKEN` is empty** — the

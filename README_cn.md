@@ -15,7 +15,7 @@
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="最新版本"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-2081%2F2081-brightgreen?style=flat-square" alt="核心测试 2081/2081">
-  <img src="https://img.shields.io/badge/console_smoke-432%2F432-brightgreen?style=flat-square" alt="控制台冒烟 432/432">
+  <img src="https://img.shields.io/badge/console_smoke-438%2F438-brightgreen?style=flat-square" alt="控制台冒烟 438/438">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
 
@@ -145,7 +145,7 @@ aidog setup                   # 交互向导：逐槽引导填写
 
 然后：
 
-1. 打开控制台 **http://127.0.0.1:8790**
+1. 打开控制台 **http://127.0.0.1:19167**
 2. 设置面板 → 填模型端点 + 密钥、Telegram bot token + allowlist
    （或直接跑 `aidog setup`）
 3. 聊天卡片发一句话——流式回复即模型链路通
@@ -176,7 +176,7 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 | 套件 | 结果 |
 |---|---|
 | `mycore` 核心套件 | **2081/2081** |
-| 控制台冒烟（真实 HTTP） | **432/432**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
+| 控制台冒烟（真实 HTTP） | **438/438**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
 | 技能路由 | **30/30** |
 | 记忆持久化 | **58/58** |
 | 安装向导 | **99/99** |

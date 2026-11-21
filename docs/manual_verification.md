@@ -25,7 +25,7 @@ top**: install path, console walk-through, chat, Telegram, upgrade.
 
 ## 1. Fresh-machine install (the GitHub download path)
 
-Prerequisites: Linux with `python3` ≥ 3.10, `tmux`, `git`; free port 8790.
+Prerequisites: Linux with `python3` ≥ 3.10, `tmux`, `git`; free port 19167.
 
 ```bash
 git clone https://github.com/AiDog-im/AiDog.git aidog && cd aidog
@@ -78,7 +78,7 @@ WARN (`telegram.api=pending`) — that is by design, never a fake PASS.
 
 ## 3. Console walk-through (browser)
 
-Open **http://127.0.0.1:8790** (loopback only — a remote machine must fail
+Open **http://127.0.0.1:19167** (loopback only — a remote machine must fail
 to connect; that is part of the test).
 
 | # | Step | Expected |
@@ -109,9 +109,9 @@ is set.
 
 ```bash
 # console route table — every route carries honest status text
-curl -s http://127.0.0.1:8790/api/channels | python3 -m json.tool
+curl -s http://127.0.0.1:19167/api/channels | python3 -m json.tool
 # capability catalog — names/counts only, never secrets
-curl -s http://127.0.0.1:8790/api/capabilities | python3 -m json.tool
+curl -s http://127.0.0.1:19167/api/capabilities | python3 -m json.tool
 ```
 
 Expected: 9 route rows; unconfigured routes say *why* (missing slot / not
@@ -148,7 +148,7 @@ Win/macOS builds are honestly **not built yet**.
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `install.sh` rc=2 forever | slots still empty | `aidog setup`, fill the named slots |
-| console not opening | port busy / service down | `boot_services.sh status`, free port 8790 |
+| console not opening | port busy / service down | `boot_services.sh status`, free port 19167 |
 | doctor WARN `telegram.api=pending` | host egress down | environment issue; known-honest state |
 | chat card no reply | model endpoint/key invalid | Settings → model section; check slot names |
 | settings not applied after locale change | console process caches locale packs | restart web session: `tmux kill-session -t aidog_web && bash deploy/boot_services.sh start` |

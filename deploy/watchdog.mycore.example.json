@@ -19,7 +19,7 @@
     {
       "name": "console",
       "kind": "http",
-      "value": "http://127.0.0.1:8790/api/health",
+      "value": "http://127.0.0.1:19167/api/health",
       "restart": [
         "bash",
         "-c",

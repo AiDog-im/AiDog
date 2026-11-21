@@ -20,7 +20,7 @@ tier of any kind is touched — no auto-update service, no telemetry).
 ```
   Electron shell  (desktop/main.js)
   +--------------------------------------------------------------+
-  | main window 1280x860  -->  http://127.0.0.1:8790/  (console) |
+  | main window 1280x860  -->  http://127.0.0.1:19167/  (console) |
   | HUD window 460x64     -->  /static/hud.html (frameless,      |
   |                            transparent, always-on-top)       |
   | tray: open console / show HUD / pin / quit (only tray quits) |
@@ -36,7 +36,7 @@ tier of any kind is touched — no auto-update service, no telemetry).
   +-----------------------------+--------------------------------+
                                 v
   +--------------------------------------------------------------+
-  | local console server  (web/server.py)  :8790                 |
+  | local console server  (web/server.py)  :19167                 |
   +--------------------------------------------------------------+
 
   repo lookup (desktop/repo.js):
@@ -78,7 +78,7 @@ the HUD bridge exists and an IPC opacity roundtrip works
 
 | Mode | Trigger | Observed result |
 |---|---|---|
-| **attach** | console already serving on 8790 | probe succeeds → `console:"attached"`; that server is left running on exit |
+| **attach** | console already serving on 19167 | probe succeeds → `console:"attached"`; that server is left running on exit |
 | **spawn** | no server, repo found (`AIDOG_WEB_PORT=18790` trial) | spawns `python3 server.py` in `{repo}/web` → `console:"spawned"`; child killed on exit — no leak |
 | **no repo** | fresh `XDG_CONFIG_HOME`, cwd outside the repo, no `AIDOG_REPO` | `SELFTEST {"ok":false,"stage":"repo","repo":null}` rc=1; `error.html` shown with honest guidance |
 

@@ -604,6 +604,22 @@ def _profile_web_port(root: Path) -> int | None:
     return port if isinstance(port, int) else None
 
 
+def _default_web_port() -> int:
+    """Car A2 port chain: AIDOG_WEB_PORT env > web/port.local > 19167
+    (mirrors web/server.py _resolve_web_port — the default profile row and
+    new-profile allocation both stand on this)."""
+    env = os.environ.get("AIDOG_WEB_PORT", "").strip()
+    if env.isdigit():
+        return int(env)
+    try:
+        pinned = int((REPO / "web" / "port.local").read_text(encoding="utf-8").strip())
+        if 1024 <= pinned <= 65535:
+            return pinned
+    except (OSError, ValueError):
+        pass
+    return 19167
+
+
 def _profile_dirs() -> list[tuple[str, Path]]:
     """(name, path) for every validly-named profile dir under profiles_root,
     sorted by name. Invalidly-named dirs are listed but never adopted."""
@@ -639,7 +655,7 @@ def cmd_profile_list(_args: argparse.Namespace) -> int:
     rows.append(f"{_DEFAULT_PROFILE_LABEL:<12} {state_default.relative_to(REPO)} "
                 f"secrets={'yes' if (REPO / 'secrets.env').is_file() else 'no'} "
                 f"settings={'yes' if (REPO / 'web' / 'settings.json').is_file() else 'no'} "
-                "web_port=8790")
+                f"web_port={_default_web_port()}")
     for name, root in _profile_dirs():
         port = _profile_web_port(root)
         rows.append(f"{name:<12} profiles/{name}/state "
@@ -705,7 +721,9 @@ def cmd_profile_create(args: argparse.Namespace) -> int:
             notes.append(f"body           <- {label} missing in overlay (skipped)")
 
     used = {p for _n, p in _profile_dirs()}
-    port = 8791
+    # Car A2 (port standard): profile ports allocate above the NEW default
+    # (19167 -> first profile 19168), never colliding with the console.
+    port = _default_web_port() + 1
     while any(_profile_web_port(p) == port for p in used):
         port += 1
     meta = {"name": name, "created": datetime.now(timezone.utc).isoformat(timespec="seconds"),
