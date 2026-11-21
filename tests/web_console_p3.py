@@ -1312,8 +1312,8 @@ def main() -> int:
               f"got {s} {body}")
         s, secs = get("/api/secrets")
         _rows = secs.get("slots") if isinstance(secs, dict) else None
-        check("GET /api/secrets catalog UNCHANGED (38 rows, no model slots)",
-              isinstance(_rows, list) and len(_rows) == 38
+        check("GET /api/secrets catalog UNCHANGED (39 rows, no model slots)",
+              isinstance(_rows, list) and len(_rows) == 39
               and not any(str(r.get("name", "")).startswith("MODEL_UP_K")
                           for r in _rows),
               f"rows={len(_rows) if isinstance(_rows, list) else _rows}")
@@ -2507,10 +2507,10 @@ def main() -> int:
         and isinstance(r.get("set"), bool)
         and isinstance(r.get("writable"), bool)
         for r in _rows)
-    check("GET /api/secrets shape (38 rows, name/group/set/length/writable)",
+    check("GET /api/secrets shape (39 rows, name/group/set/length/writable)",
           s == 200 and isinstance(secs, dict)
-          and isinstance(_rows, list) and len(_rows) == 38
-          and len(set(_row_names)) == 38 and _row_keys_ok
+          and isinstance(_rows, list) and len(_rows) == 39
+          and len(set(_row_names)) == 39 and _row_keys_ok
           and isinstance(secs.get("writable"), bool),
           f"s={s} rows={len(_rows) if isinstance(_rows, list) else _rows} "
           f"keys_ok={_row_keys_ok}")
@@ -2694,7 +2694,7 @@ def main() -> int:
         _grows = _g[1].get("slots") if _g else None
         check("secrets GET (in-process, temp file) reports presence, no values",
               _g is not None and _g[0] == 200
-              and isinstance(_grows, list) and len(_grows) == 38
+              and isinstance(_grows, list) and len(_grows) == 39
               and all(r.get("length") is None for r in _grows)
               and _g[1].get("writable") is True
               and "p3-again" not in json.dumps(_g[1])
@@ -4009,9 +4009,9 @@ def main() -> int:
             if isinstance(_rows_all, list) else []
         _live_levels = {x.get("name") for x in (_rows_all or [])
                         if isinstance(x, dict) and x.get("level") == "live"}
-        check("in-process verify all -> 38 rows (37 editable + WEB_TOKEN)",
-              _r is not None and _r[0] == 200 and len(_rows_all) == 38
-              and len(set(_all_names)) == 38, f"n={len(_rows_all or [])}")
+        check("in-process verify all -> 39 rows (38 editable + WEB_TOKEN)",
+              _r is not None and _r[0] == 200 and len(_rows_all) == 39
+              and len(set(_all_names)) == 39, f"n={len(_rows_all or [])}")
         check("in-process verify all -> only probe slots claim live",
               {"AIDOG_COMMUNITY_PAT", "AIDOG_GH_PAT", "MYCORE_TG_TOKEN",
                "MODEL_API_KEY"} <= _live_levels

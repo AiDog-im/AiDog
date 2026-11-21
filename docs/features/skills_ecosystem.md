@@ -1,7 +1,9 @@
 # Feature spec — Skills ecosystem (official skill catalog and the dual gates)
 
 Status: **assets landed** (release 0.5.47, car 4 lane M: standalone repo bootstrap + first-batch intake +
-official catalog page + catalog schema validation E2E).
+official catalog page + catalog schema validation E2E); **console install surface landed in car H**
+(one-click install / switch / remove + the outbound-proxy card — design:
+`docs/design/ecosystem_car_design.md`).
 Design anchors: `docs/design/autonomous_ops_design.md` §4 (three-layer structure / standalone repo /
 source migration / official catalog endpoint) and §5, car 4 row. This page is **the 33rd capability document**, covering
 the three-layer structure, the standalone repo and its dual gates, the first-batch list, the official catalog page and its
@@ -22,7 +24,7 @@ matrix).
 ## 1. Three-layer structure
 
 ```
-Layer 1  this repo, overlay/skills/            core skills shipped with the product (5, all passing lint + skill_route pre-filter)
+Layer 1  this repo, overlay/skills/            core skills shipped with the product (6, all passing lint + skill_route pre-filter)
 Layer 2  the standalone skills repo (public GitHub)   single source of truth for officially recommended skills: catalog + category directories + dual gates + versions
 Layer 3  the aidog.im catalog page             static JSON catalog: browsable by users; the product reads the same JSON
 ```
@@ -99,6 +101,7 @@ aligns it with the capability manifest (a skill installed without its tools just
 | 10 | `analysis-pipeline` | content | desensitized recreation | Long-form deep-analysis pipeline: worthiness scorecard, evidence archiving, anti-poisoning iron rules, bilingual, lint, publish package |
 | 11 | `voice-reply` | reporting | desensitized recreation | Voice only on explicit request: free TTS, text always attached, inbound voice transcribed first, silent fallback to plain text on failure |
 | 12 | `webapp-testing` | dev | upstream recreation | Playwright local web-testing toolkit (**Apache-2.0**, per-skill license file + attribution in `THIRD_PARTY.md`) |
+| 13 | `outbound-proxy` | automation-ops | first-party (car H, owner item #8) | Self-hosted outbound-proxy seam: configure, test and diagnose routing aidog's own `http_fetch` through an endpoint you host |
 
 **Recreation policy** (for the sibling project's operational-engineering skills): semantic porting + rewriting in
 generic first person; per piece, strip local absolute paths, personal identity and persona fields, real handles, credentials, internal codenames,
@@ -122,6 +125,30 @@ and any changes (if any) are declared item by item in `THIRD_PARTY.md`.
   valid, the page renders the same number of entries as the copy, and leaks score 0 hits. **Manual cp + E2E assertions**
   is the current policy (a scripted sync can be a small later improvement; it needs the parent's nod before a new file is added).
 
+### 5.1 One-click install (car H — owner rulings Q1=A staged source, Q2=A no ceremony)
+
+- **Staged packages**: every `install_status: "catalog"` package ships as a byte-copy at
+  `site/skills/packages/<slug>/` — install is a **local file copy, zero network, no execution**
+  (which is also how the red-line tension in §7.1 resolves: user-initiated, single official
+  source, instantly reversible).
+- **Endpoints** (all `Bearer WEB_TOKEN`, deny-by-default on the slug):
+  `POST /api/skills/install {slug}` → 404 not-in-catalog / 409 bundled, already-installed or
+  package-missing / 400 malformed slug — success copies into `<repo>/data/skills/<slug>/`;
+  `POST /api/skills/uninstall {slug}` deletes **only** under `data/skills` (root-checked — the
+  shipped overlay is untouchable by construction);
+  `POST /api/skills/toggle {slug, enabled}` writes the settings block `skills.disabled`
+  through the settings grammar and the single file writer.
+- **Router contract**: `lib/skill_route.skill_roots()` gained the `data/skills` rung and
+  filters `skills.disabled` fail-soft (absent/corrupt settings = stock routing
+  byte-identical); `GET /api/skills` resolves from the SAME ladder and reports
+  `source ∈ body|external|learned|installed` + `enabled`, so the gallery shows exactly
+  what routes.
+- **Truth parity**: `tmp/e2e_skills_parity.py` asserts site catalog ≡ L2 master, staged ≡ L2
+  per skill, bundled ≡ L2 per skill (byte-level); a missing sibling clone is an honest SKIP,
+  an out-of-sync one is a failure.
+- **Contract probes**: `tmp/e2e_car_h.py` (API, isolated console) · `tmp/e2e_skills_ui.js`
+  (browser: chips, install/switch/remove, honest unavailable banner, proxy card).
+
 ## 6. `GET /api/skills/remote` (**implemented in release 0.5.47 lane M2**; documentation preview only here)
 
 - **Shape (preview, finalized at M2)**: `GET /api/skills/remote` →
@@ -137,6 +164,9 @@ and any changes (if any) are declared item by item in `THIRD_PARTY.md`.
 
 1. **Land files only, never execution**: skills land as text; installation = copying files into the skill directory;
    never auto-execute, never pull down remote code, never introduce app-store-style auto-installation.
+   **Car H reading (owner brief 5.2)**: "installation" is the human-initiated one-click copy of an
+   OFFICIAL staged package — single source, zero network, no execution, reversible by one more click —
+   still never automatic, still never a third-party marketplace.
 2. **Trusted sources read-only**: skills and the catalog are read only from the official repo; the existing red line of
    permanently disabling community MCPs carries over to the skills surface.
 3. **Zero credential echo**: skill copy mentions only slot names and `len > 0`; the catalog holds no values, no
@@ -152,8 +182,11 @@ and any changes (if any) are declared item by item in `THIRD_PARTY.md`.
 never part of a user install.*
 
 ```bash
-cd aidog-skills && python3 tools/lint.py   # standalone repo: === 300/300 PASS === (including 0 leak hits)
+cd aidog-skills && python3 tools/lint.py   # standalone repo: === 324/324 PASS === (including 0 leak hits)
 python3 tmp/e2e_skills_catalog.py  # catalog schema + page rendering + site gate regression (PASS n/n)
+python3 tmp/e2e_skills_parity.py   # car H: L2 ≡ site catalog ≡ staged ≡ bundled (68/68, honest SKIP without the clone)
+python3 tmp/e2e_car_h.py           # car H: install/toggle/uninstall + proxy contract (65/65, isolated console)
+PW_PATH=… node tmp/e2e_skills_ui.js # car H: browser legs incl. honest unavailable + zero-echo (23/23)
 node tmp/shoot_site.js             # 62 (existing site gate, must not be broken by the new page)
 node tmp/e2e_site_redesign.js      # 59 (existing site gate)
 python3 tests/source_lang_check.py # 0 violations (this lane added no .py sources)
