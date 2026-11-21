@@ -18,7 +18,8 @@ import os
 import sys
 from pathlib import Path
 
-from .assembly import build_system_stack, resolve_context_dirs, stack_digest
+from .assembly import (build_system_stack, resolve_capability_path,
+                         resolve_context_dirs, stack_digest)
 from .modeltier import parse_upstreams, parse_endpoints, MAX_RPM, MAX_TPM
 from .loop import run_turn
 from .model import ChatClient, ModelConfig, ModelError
@@ -139,7 +140,8 @@ def main(argv: list[str] | None = None) -> int:
 
     body: list[dict] = []
     if not args.no_body:
-        body = build_system_stack(context_dirs=resolve_context_dirs())
+        body = build_system_stack(context_dirs=resolve_context_dirs(),
+                                   capability_path=resolve_capability_path())
     system_msgs = body + ([{"role": "system", "content": args.system}]
                           if args.system else [])
     # Session files never persist system messages (the body stack is rebuilt

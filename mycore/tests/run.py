@@ -83,7 +83,8 @@ def expected_tool_names() -> frozenset[str]:
     to a dead path — so every count assertion derives from this, never a
     literal."""
     out = set(CORE_TOOLS) | {"generate_image", "exchange_markets",
-                             "community_post", "backup_run"}
+                             "community_post", "backup_run",
+                             "settings"}   # car C: propose-only settings tool
     try:
         from mycore import browser as _br
         if _br.available():
@@ -9203,15 +9204,17 @@ def test_tools_toggle() -> None:
     saved_env = os.environ.get("MYCORE_TOOLS_OFF")
     try:
         # catalog sanity: 11 core + backup_run (car 8) + generate_image
-        # + connector_search + 6 browser + 3 exchange_* (W1) + 3 exchange_* (W2)
+        # + connector_search + 6 browser + 3 exchange_* (W1) + 3 exchange_*
+        # (W2) + settings (car C, propose-only)
         check("tools_off: KNOWN_TOOL_NAMES covers core + conditional",
               {"read_file", "run_bash", "cron", "delegate", "execute_code",
                "backup_run",
                "generate_image", "connector_search", "browser_open",
                "browser_close", "exchange_markets", "exchange_portfolio",
                "exchange_orders", "exchange_prepare_order",
-               "exchange_execute_order", "exchange_plans"} <= KNOWN_TOOL_NAMES
-              and len(KNOWN_TOOL_NAMES) == 27,
+               "exchange_execute_order", "exchange_plans",
+               "settings"} <= KNOWN_TOOL_NAMES
+              and len(KNOWN_TOOL_NAMES) == 28,
               str(sorted(KNOWN_TOOL_NAMES)))
 
         # 1) settings dict path disables a core tool
@@ -15806,6 +15809,202 @@ def test_ledger() -> None:
     mtr.deactivate()
 
 
+def test_agent_plan() -> None:
+    """Car C (agent foundation): the `settings` tool + the owner-approval
+    plan store + the capability-map slot + the configurable sub-agent
+    bounds. Hermetic: a dedicated temp state dir (env save/restore), zero
+    network, zero credentials."""
+    import json as _json
+    from mycore import agentplan as ap
+    from mycore import assembly
+
+    tmp = tempfile.mkdtemp(prefix="agentplan_")
+    saved_state = os.environ.get("AIDOG_MC_STATE")
+    os.environ["AIDOG_MC_STATE"] = tmp
+    try:
+        # ---------------------------- store basics -------------------------
+        check("agentplan: fresh store reads empty", ap.load_plans() == [])
+        check("agentplan: fresh summarize is empty", ap.summarize() == [])
+
+        # ---------------------------- propose bounds -----------------------
+        plan, err = ap.propose(None)
+        check("agentplan: non-dict patch refused",
+              plan is None and "non-empty" in err, err)
+        plan, err = ap.propose({})
+        check("agentplan: empty patch refused",
+              plan is None and "non-empty" in err, err)
+        plan, err = ap.propose({"x": "y" * (ap.MAX_PATCH_CHARS + 10)})
+        check("agentplan: oversized patch refused",
+              plan is None and "too large" in err, err[:60])
+        plan, err = ap.propose({"refresh_sec": 15})
+        check("agentplan: valid patch filed as pending",
+              plan is not None and plan["status"] == "pending"
+              and err == "" and str(plan["id"]).startswith("p"),
+              f"{plan} {err}")
+        pid = str(plan["id"])
+        check("agentplan: pending plan visible in summarize",
+              any(r["id"] == pid and r["status"] == "pending"
+                  for r in ap.summarize()))
+        plan, err = ap.propose({"refresh_sec": 15})
+        check("agentplan: identical pending patch deduped",
+              plan is None and "identical" in err, err[:60])
+        # fill the pending queue to the cap
+        extra: list[dict] = []
+        cap_err = ""
+        while True:
+            p, e = ap.propose({"refresh_sec": 100 + len(extra)})
+            if p is None:
+                cap_err = e
+                break
+            extra.append(p)
+        check("agentplan: pending cap refuses overflow",
+              len(extra) == ap.MAX_PENDING - 1 and "too many pending" in cap_err,
+              f"{len(extra)} {cap_err[:60]}")
+
+        # ---------------------------- withdraw -----------------------------
+        ok, err = ap.withdraw(pid)
+        check("agentplan: withdraw own pending plan", ok and err == "", err)
+        ok, err = ap.withdraw(pid)
+        check("agentplan: second withdraw refused (not pending)",
+              not ok and "withdrawn" in err, err)
+        ok, err = ap.withdraw("p-nope")
+        check("agentplan: unknown-id withdraw refused",
+              not ok and "unknown" in err, err)
+
+        # ---------------------------- record (console side) ---------------
+        ok, err = ap.record("p-nope", "approved")
+        check("agentplan: record unknown id refused",
+              not ok and "unknown" in err, err)
+        ok, err = ap.record(extra[0]["id"], "bogus")
+        check("agentplan: record bogus status refused",
+              not ok and "approved or rejected" in err, err)
+        ok, err = ap.record(extra[0]["id"], "approved", result="changed")
+        check("agentplan: approve records + closes", ok, err)
+        ok, err = ap.record(extra[0]["id"], "rejected")
+        check("agentplan: closed plan cannot be re-decided",
+              not ok and "approved" in err, err)
+
+        # ---------------------------- terminal ring ------------------------
+        for i in range(ap.TERMINAL_KEEP + 6):
+            p, _e = ap.propose({"voice_volume": i % 100})
+            if p:
+                ap.record(p["id"], "rejected")
+        rows = ap.load_plans()
+        terminal = [p for p in rows if p.get("status") in ap.TERMINAL]
+        pending = [p for p in rows if p.get("status") == "pending"]
+        check("agentplan: terminal ring bounded at TERMINAL_KEEP",
+              len(terminal) == ap.TERMINAL_KEEP, str(len(terminal)))
+        # the approve above closed one extra row, so the live queue holds
+        # MAX_PENDING - 2 pending plans when the ring loop settles
+        check("agentplan: pending rows survive the trim",
+              len(pending) == ap.MAX_PENDING - 2, str(len(pending)))
+
+        # ---------------------------- corrupt store ------------------------
+        ap._path().write_text("{corrupt", encoding="utf-8")
+        check("agentplan: corrupt store reads empty (fail-soft)",
+              ap.load_plans() == [])
+        plan, err = ap.propose({"sound": False})
+        check("agentplan: next propose rebuilds the store",
+              plan is not None and len(ap.load_plans()) == 1, err)
+
+        # ---------------------------- the tool itself ---------------------
+        reg = build_registry()
+        names = reg.names()
+        check("agentplan: settings tool registered", "settings" in names)
+        out = reg.dispatch("settings", {"action": "propose",
+                                        "patch": {"sound": True}})
+        check("agentplan: tool propose files a plan",
+              out.startswith("plan p") and "nothing was written" in out, out[:80])
+        out = reg.dispatch("settings", {"action": "list"})
+        check("agentplan: tool list returns the plan rows",
+              "pending" in out and "plans" in out, out[:80])
+        out = reg.dispatch("settings", {"action": "get",
+                                        "keys": ["mycore.model"]})
+        check("agentplan: tool get returns the filtered value",
+              "mycore.model" in out, out[:80])
+        out = reg.dispatch("settings", {"action": "get",
+                                        "keys": ["no.such.key"]})
+        check("agentplan: tool get omits an absent key honestly",
+              out == "{}", out[:80])
+        out = reg.dispatch("settings", {"action": "withdraw",
+                                        "id": "p-nope"})
+        check("agentplan: tool withdraw surfaces the honest error",
+              out.startswith("ERROR:"), out[:80])
+        out = reg.dispatch("settings", {"action": "bogus"})
+        check("agentplan: tool refuses an unknown action",
+              out.startswith("ERROR:"), out[:80])
+        reg_off = build_registry(disabled=frozenset({"settings"}))
+        check("agentplan: settings honours the kill switch",
+              "settings" not in reg_off.names()
+              and all(t["function"]["name"] != "settings"
+                      for t in reg_off.schema()))
+
+        # ---------------------------- sub-agent bounds (car C) ------------
+        saved_sp = subagent.pp.settings_path
+        try:
+            cfg = Path(tmp) / "limits.json"
+            cfg.write_text(_json.dumps(
+                {"mycore": {"subagent": {"max_parallel": 5,
+                                          "max_iters": 3}}}), encoding="utf-8")
+            subagent.pp.settings_path = lambda repo: cfg
+            check("agentplan: subagent limits read from settings",
+                  subagent._limits() == (5, 3), str(subagent._limits()))
+            cfg.write_text(_json.dumps(
+                {"mycore": {"subagent": {"max_parallel": 9,
+                                          "max_iters": True}}}),
+                encoding="utf-8")
+            check("agentplan: out-of-range/bool limits clamp to defaults",
+                  subagent._limits() == (3, 12), str(subagent._limits()))
+            cfg.write_text("{corrupt", encoding="utf-8")
+            check("agentplan: unreadable settings -> shipped defaults",
+                  subagent._limits() == (3, 12), str(subagent._limits()))
+        finally:
+            subagent.pp.settings_path = saved_sp
+        saved_lim = subagent._limits
+        try:
+            subagent._limits = lambda: (2, 4)
+            reg2 = build_registry()
+            out = reg2.dispatch("delegate", {"tasks": ["a", "b", "c"]})
+            check("agentplan: delegate honours the configured cap",
+                  "at most 2 tasks" in out, out[:80])
+        finally:
+            subagent._limits = saved_lim
+
+        # ---------------------------- capability-map slot ------------------
+        body = Path(tmp) / "body.md"
+        body.write_text("# SOUL", encoding="utf-8")
+        mem = Path(tmp) / "mem.md"
+        mem.write_text("memory fact", encoding="utf-8")
+        capmap = Path(tmp) / "CAP.md"
+        capmap.write_text("product can do X", encoding="utf-8")
+        base = assembly.build_system_stack(
+            constitution_path=body, memory_paths=(mem,), learned_path=None,
+            capability_path=None)
+        with_map = assembly.build_system_stack(
+            constitution_path=body, memory_paths=(mem,), learned_path=None,
+            capability_path=capmap)
+        check("agentplan: capability map appends exactly one slot",
+              len(with_map) == len(base) + 1
+              and "capability map" in with_map[-2]["content"]
+              and "product can do X" in with_map[-2]["content"],
+              str(len(with_map) - len(base)))
+        missing = assembly.build_system_stack(
+            constitution_path=body, memory_paths=(mem,), learned_path=None,
+            capability_path=Path(tmp) / "nope.md")
+        check("agentplan: absent capability map is silent (stack unchanged)",
+              [m["content"] for m in missing] == [m["content"] for m in base])
+        resolved = assembly.resolve_capability_path()
+        check("agentplan: shipped CAPABILITY_MAP.md resolves",
+              resolved is not None and resolved.is_file()
+              and resolved.name == "CAPABILITY_MAP.md", str(resolved))
+    finally:
+        if saved_state is None:
+            os.environ.pop("AIDOG_MC_STATE", None)
+        else:
+            os.environ["AIDOG_MC_STATE"] = saved_state
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -15880,6 +16079,7 @@ def main() -> int:
         test_wave3,
         test_delta2,
         test_ledger,
+        test_agent_plan,
     ]
     rows = []
     for fn in suites:

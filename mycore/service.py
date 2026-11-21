@@ -126,7 +126,8 @@ from . import leash
 from . import mission as mission_mod
 from . import scheduler
 from . import sniff
-from .assembly import build_system_stack, resolve_context_dirs, resolve_user_rules
+from .assembly import (build_system_stack, resolve_capability_path,
+                         resolve_context_dirs, resolve_user_rules)
 from .loop import run_turn
 from .model import ChatClient
 from .session import Session
@@ -1240,7 +1241,8 @@ class ChatService:
         cfg = cli.resolve_model_config()
         chat_fn = self.chat or ChatClient(cfg).chat
         messages = build_system_stack(context_dirs=resolve_context_dirs(),
-                                      user_rules=resolve_user_rules()) \
+                                      user_rules=resolve_user_rules(),
+                                      capability_path=resolve_capability_path()) \
             + [{"role": "user",
                 "content": job.get("text", "")}]
         stop_base = leash.stop_baseline()   # car 7: STOP can kill this turn too
@@ -1566,7 +1568,8 @@ class ChatService:
         # ever enters the USER layer (design 3.3). Car 7: operator rules ride
         # the same stack (a slice obeys the same priority order as a chat).
         messages = build_system_stack(context_dirs=resolve_context_dirs(),
-                                      user_rules=resolve_user_rules()) \
+                                      user_rules=resolve_user_rules(),
+                                      capability_path=resolve_capability_path()) \
             + [{"role": "user", "content": prompt}]
         chat_fn = self.chat or ChatClient(cli.resolve_model_config()).chat
         try:
@@ -1878,7 +1881,8 @@ class ChatService:
         history = [m for m in history if m.get("role") != "system"]
 
         stack = build_system_stack(context_dirs=resolve_context_dirs(),
-                                   user_rules=resolve_user_rules())
+                                   user_rules=resolve_user_rules(),
+                                   capability_path=resolve_capability_path())
         messages = stack + history
         pre_ids = {id(m) for m in messages}
         messages.append({"role": "user", "content": text})
