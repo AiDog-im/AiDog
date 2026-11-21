@@ -775,16 +775,20 @@ def main() -> int:
           s == 200 and ctl3.get("paused") is False
           and ctl3.get("gate", {}).get("allowed") is True,
           str(ctl3.get("gate")))
-    # STOP only moves the counter (no turn running -> no side effect beyond it)
+    # Console STOP is per-request and cannot touch the shared TG/service
+    # stop counter. No active console turn in this smoke process -> 409.
     s0 = ctl3.get("stop_seq")
-    s, body = post("/api/control", {"action": "stop"}, token)
-    s, ctl4 = get("/api/control")
-    check("POST /api/control stop bumps stop_seq (baseline semantics)",
-          s == 200 and isinstance(body, dict) and body.get("ok") is True
-          and ctl4.get("stop_seq") == s0 + 1,
-          f"seq {s0} -> {ctl4.get('stop_seq')}")
-    check("stop alone never pauses (stop != pause)",
-          ctl4.get("paused") is False, str(ctl4.get("paused")))
+    stop_status, stop_body = post("/api/control", {"action": "stop"}, token)
+    after_stop, ctl4 = get("/api/control")
+    check("POST /api/control stop without active console chat -> 409",
+          stop_status == 409 and isinstance(stop_body, dict)
+          and "no active console chat turn" in str(stop_body.get("error", ""))
+          and after_stop == 200 and ctl4.get("stop_seq") == s0,
+          f"stop={stop_status} read={after_stop} seq {s0} -> {ctl4.get('stop_seq')} {stop_body}")
+    check("console STOP does not pause or increment global service STOP",
+          ctl4.get("paused") is False and ctl4.get("stop_seq") == s0,
+          str(ctl4))
+
 
     # --- car 7: guardrails settings block (grammar in mycore.leash) --------
     s, body = post("/api/settings", {"guardrails": {"usd_day": 5,
@@ -1466,6 +1470,18 @@ def main() -> int:
     check("POST mycore valid mcp server -> 200", s == 200, f"got {s} {body}")
     s, body = post("/api/settings", {"mycore": {"mcp": ""}}, token)
     check("POST mycore mcp back to off -> 200", s == 200, f"got {s} {body}")
+
+    # --- Need-B P0: local-only fleet board, no Bearer on GET --------------
+    s, body = get("/api/fleet")
+    check("GET /api/fleet answers without a token with the honest board shape",
+          s == 200 and isinstance(body, dict)
+          and isinstance(body.get("fleets"), list)
+          and isinstance(body.get("count"), int)
+          and isinstance(body.get("clones"), int)
+          and isinstance(body.get("failed"), int)
+          and body.get("clone_tokens") is None
+          and body.get("local_only") is True,
+          f"got {s} {str(body)[:240]}")
 
     # --- Need-A: the owner-profiling partition + the OWNER ANALYSIS board
     # (grammar in mycore.profiling; local-only analysis, zero model tokens) ---

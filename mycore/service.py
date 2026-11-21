@@ -135,6 +135,7 @@ from . import envslots
 from . import evolution
 from . import hooks as hooks_mod
 from . import ledger as ledger_mod
+from . import fleet as fleet_mod
 from . import leash
 from . import mission as mission_mod
 from . import pipeline as pipeline_mod
@@ -198,7 +199,7 @@ INBOX_MAX_BYTES = 5_000_000             # document download cap before save
 #     the console can never offer a command the service does not answer).
 BOT_COMMANDS: tuple = ("help", "reset", "rewind", "model", "status", "lang",
                        "learn", "reflect", "evolution", "cron", "checkpoint",
-                       "sniff", "version")
+                       "sniff", "fleet", "version")
 
 # Honest one-line replies. The English constants stay importable (tests and
 # tooling compare against them); live replies resolve the SAME keys through
@@ -1551,9 +1552,38 @@ class ChatService:
             return self._checkpoint_command(chat_id, arg)
         if name == "sniff":
             return self._sniff_command(chat_id, arg)
+        if name == "fleet":
+            return self._fleet_command(arg)
         if name == "version":
             return self._version_command()
         return self._t("cmd.unknown")
+
+    def _fleet_command(self, arg: str) -> str:
+        """`/fleet` — read-only summary of recent clone fleets."""
+        if arg.strip().lower() not in ("", "status"):
+            return self._t("cmd.fleet.usage")
+        try:
+            rows = fleet_mod.summary()
+        except Exception:  # noqa: BLE001 — report an honest empty board
+            return self._t("fleet.unavailable")
+        if not rows.get("fleets"):
+            return self._t("cmd.fleet.empty")
+        out = []
+        for item in rows["fleets"][:5]:
+            clones = item.get("clones") or []
+            ok = sum(1 for c in clones if not c.get("failed"))
+            failed = len(clones) - ok
+            known = bool(clones) and all(c.get("usage_complete") is True
+                                         for c in clones)
+            total = 0
+            if known:
+                for c in clones:
+                    total += int(c.get("in_tok") or 0) + int(c.get("out_tok") or 0)
+            tokens = fleet_mod._token_text(total) if known else "?"
+            out.append(self._t("cmd.fleet.line", fleet=item.get("id", ""),
+                               clones=len(clones), ok=ok, failed=failed,
+                               tokens=tokens))
+        return "\n".join(out)
 
     def _sniff_command(self, chat_id: int | str, arg: str) -> str:
         """`/sniff` — the SNIFF board's reopen surface in any chat session.
@@ -2164,6 +2194,7 @@ class ChatService:
         """kind=prompt: run ONE fresh model turn (constitution stack + the
         stored text; tools enabled, no session persistence) and return the
         reply — honest short lines on any stop, same mapping as _pipeline."""
+        fleet_mod.begin_turn()
         cfg = cli.resolve_model_config()
         chat_fn = self.chat or ChatClient(cfg).chat
         messages = build_system_stack(
@@ -2183,15 +2214,20 @@ class ChatService:
                            f"err={type(e).__name__}")
             return self._t("err.internal")
         if res.stop == "final":
-            return res.text.strip() or self._t("err.no_output")
-        if res.stop == "max_iters":
-            return self._t("err.max_iters", n=res.iterations)
-        if res.stop == "aborted":           # car 7: operator STOP, honest line
+            text = res.text.strip() or self._t("err.no_output")
+        elif res.stop == "max_iters":
+            text = self._t("err.max_iters", n=res.iterations)
+        elif res.stop == "aborted":           # car 7: operator STOP, honest line
             self.log.write("CRON_ABORT", f"id={job.get('id', '?')}")
-            return self._t("err.stopped")
-        self.log.write("CRON_ERR", f"id={job.get('id', '?')}",
-                       "err=model", f"detail={res.text[:160]}")
-        return self._t("err.model")
+            text = self._t("err.stopped")
+        else:
+            self.log.write("CRON_ERR", f"id={job.get('id', '?')}",
+                           "err=model", f"detail={res.text[:160]}")
+            text = self._t("err.model")
+        return fleet_mod.attach_receipt(
+            text, "cron", self._t, on_fleets=self._fleet_report,
+            parent_usage={"in_tok": res.in_tok, "out_tok": res.out_tok,
+                           "usage_complete": res.usage_complete})
 
     def _maybe_fire_cron(self) -> None:
         """Scheduler leg (Phase B2 + car C1 A-3): throttled to CRON cadence
@@ -2616,6 +2652,7 @@ class ChatService:
             self.log.write("MISSION_SEAL", f"id={rec['id']}",
                            f"guard={guard}", f"delivered={label}")
             return
+        fleet_mod.begin_turn()
         # mark first: slice count + tick stamp persisted BEFORE execution
         counters = rec.setdefault("counters", {})
         counters["slices"] = int(counters.get("slices") or 0) + 1
@@ -2652,6 +2689,13 @@ class ChatService:
         mission_mod.note_model_calls(rec, res.iterations, nowt)
         rec["last_progress_at"] = nowt   # heartbeat: the slice DID work (car 3)
         output = res.text or ""
+        mission_fleets = fleet_mod.take_fleets("mission")
+        report_receipt = fleet_mod.receipt_text(
+            mission_fleets, self._t,
+            {"in_tok": res.in_tok, "out_tok": res.out_tok,
+             "usage_complete": res.usage_complete})
+        if mission_fleets:
+            self._fleet_report(mission_fleets, mission=rec["id"])
         marks = mission_mod.parse_slice(output)
         events = mission_mod.apply_slice(rec, marks, nowt, mode=mode)
         if res.stop == "model_error":
@@ -2671,6 +2715,10 @@ class ChatService:
         # paused_approve while every other subtask keeps ticking (F4). The
         # decision report (kind=decision: all tiers, throttle/quiet bypass)
         # tells the owner to approve in the console's exchange panel.
+        if report_receipt:
+            events.append({"kind": "fleet", "level": "INFO",
+                           "fact": report_receipt, "impact": "",
+                           "next": ""})
         if mode == "exec" and cur_id:
             plan_ids = mission_mod.approval_plan_ids(res.tool_log)
             pending = [p for p in plan_ids
@@ -2699,9 +2747,11 @@ class ChatService:
             mission_mod.append_event(path, rec["id"], "state",
                                      {"to": "done", "via": "slice"})
         deliver = lambda text: self._mission_deliver(rec, text)  # noqa: E731
-        for ev in events:
-            label = mission_mod.emit(rec, ev["kind"],
-                                     mission_mod.fmt_event(rec["id"], ev),
+        for ev_index, ev in enumerate(events):
+            report_body = mission_mod.fmt_event(rec["id"], ev)
+            if report_receipt and ev_index == 0:
+                report_body = report_body.rstrip() + "\n\n" + report_receipt
+            label = mission_mod.emit(rec, ev["kind"], report_body,
                                      deliver, nowt,
                                      quiet_hours=quiet_hours,
                                      min_interval=min_interval)
@@ -3011,6 +3061,22 @@ class ChatService:
         except Exception:  # noqa: BLE001 — a hook problem never breaks a turn
             pass
 
+    def _fleet_report(self, fleets: list, chat_id: int | str | None = None,
+                      mission: str | None = None) -> None:
+        """One `FLEET` service-log line (the console Live Stream renders it)
+        plus the `fleet` hook event — fired once per turn that dispatched
+        sub-agent clones, exactly where the split receipt is delivered.
+        Never raises: reporting must never break a reply."""
+        try:
+            clones = sum(len(f.get("clones") or []) for f in fleets)
+            facts = [f"fleets={len(fleets)}", f"clones={clones}"]
+            if mission:
+                facts.append(f"mission={mission}")
+            self.log.write("FLEET", *facts)
+            self._fire_hooks("fleet", chat_id, mission=mission)
+        except Exception:  # noqa: BLE001 — a report problem never breaks a turn
+            pass
+
     def _pipeline(self, chat_id: int | str, text: str,
                   session_key: int | str | None = None, *,
                   thread_id: int | None = None, stream: bool = False) -> str:
@@ -3066,6 +3132,7 @@ class ChatService:
         # hold or an exception between turns can never leak a stale preview
         # into a later delivery.
         self._tw = None
+        fleet_mod.begin_turn()
         cfg = self._model_for_chat(chat_id)
         path = self._session_path(session_key if session_key is not None
                                   else chat_id)
@@ -3158,16 +3225,21 @@ class ChatService:
         except Exception:  # noqa: BLE001 — reporting never breaks a turn
             pass
         if res.stop == "final":
-            return res.text.strip() or self._t("err.no_output")
-        if res.stop == "max_iters":
-            return self._t("err.max_iters", n=res.iterations)
-        if res.stop == "aborted":           # car 7: operator STOP, honest line
-            return self._t("err.stopped")
-        # model_error: detail goes to the log only — the chat gets one honest
-        # line with no engine name, exception internals, or paths.
-        self.log.write("MODEL_ERR", f"chat={redact_chat(chat_id)}",
-                       f"detail={res.text[:160]}")
-        return self._t("err.model")
+            text = res.text.strip() or self._t("err.no_output")
+        elif res.stop == "max_iters":
+            text = self._t("err.max_iters", n=res.iterations)
+        elif res.stop == "aborted":           # car 7: operator STOP, honest line
+            text = self._t("err.stopped")
+        else:
+            self.log.write("MODEL_ERR", f"chat={redact_chat(chat_id)}",
+                           f"detail={res.text[:160]}")
+            text = self._t("err.model")
+        origin = "channel" if isinstance(chat_id, str) and ":" in chat_id else "chat"
+        return fleet_mod.attach_receipt(
+            text, origin, self._t,
+            on_fleets=lambda fs: self._fleet_report(fs, chat_id=chat_id),
+            parent_usage={"in_tok": res.in_tok, "out_tok": res.out_tok,
+                          "usage_complete": res.usage_complete})
 
 
 # ------------------------------------------------------------------ CLI -----
@@ -3222,7 +3294,9 @@ def main(argv: list[str] | None = None) -> int:
     # D2: the anonymous daily usage ledger (inert until activated; the
     # settings gate inside makes a no-block settings document send nothing).
     from . import ledger as ledger_mod
+    from . import fleet as fleet_mod
     ledger_mod.activate(state)
+    fleet_mod.activate(state / "fleet")
 
     # Gate 2: single instance (one getUpdates consumer per token).
     pidfile = state / PIDFILE_NAME

@@ -196,6 +196,8 @@ def main(argv: list[str] | None = None) -> int:
     # their meter rows to the day's anonymous report).
     from . import ledger as _ledger
     _ledger.activate()
+    from . import fleet as _fleet
+    _fleet.activate()
 
     # ---- message stack: persisted history + body layer + extra system + user ----
     sess: Session | None = None

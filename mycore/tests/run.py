@@ -2756,10 +2756,10 @@ def test_service() -> None:
                                 transport=fake_m, chat=ok_chat,
                                 repo=menu_repo, now=nowf)
             svc_m.run(once=True)
-            check("menu: absent block -> the full 13-command menu published",
+            check("menu: absent block -> the full 14-command menu published",
                   len(fake_m.menus) == 1
                   and fake_m.menus[0][0] == "setMyCommands"
-                  and len(fake_m.menus[0][1]) == 13,
+                  and len(fake_m.menus[0][1]) == 14,
                   str(fake_m.menus)[:200])
             menu_entries = fake_m.menus[0][1] if fake_m.menus else []
             check("menu: every entry is {command, description} from menu.<cmd>",
@@ -14135,16 +14135,16 @@ def test_delta2() -> None:
     _help_names = [ln.split()[0].lstrip("/")
                    for ln in (_en_pack.get("cmd.help.body") or "").split("\n")
                    if ln.strip()]
-    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (13)",
+    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (14)",
           tuple(_help_names) == tuple(_svc_menu.BOT_COMMANDS)
           and set(_branches) == set(_svc_menu.BOT_COMMANDS)
-          and len(_svc_menu.BOT_COMMANDS) == 13,
+          and len(_svc_menu.BOT_COMMANDS) == 14,
           f"help={_help_names} branches={_branches}")
     check("menu lock: web.server validates against the SAME constant",
           ws.BOT_COMMANDS is _svc_menu.BOT_COMMANDS, str(ws.BOT_COMMANDS))
     _no_desc = [n for n in _svc_menu.BOT_COMMANDS
                 if "menu." + n not in _en_pack or "menu." + n not in _zh_pack]
-    check("menu lock: menu.<cmd> exists in both packs for all 13",
+    check("menu lock: menu.<cmd> exists in both packs for all 14",
           not _no_desc, str(_no_desc))
     _too_long = [n for n in _svc_menu.BOT_COMMANDS
                  if len(_en_pack.get("menu." + n, "")) > 120
@@ -20120,6 +20120,335 @@ def test_macos_report() -> None:
         srv.shutdown()
 
 
+def test_fleet() -> None:
+    """Need-B P0 (docs/design/swarm_clones_design.md 4.2): the visible fleet
+    — per-clone ledger, credential-linted excerpts, exact attribution, the
+    three honesty fixes (G-a STOP / G-b budget share / G-g deadline) and the
+    SYSTEM-generated split receipt the model cannot omit (R2)."""
+    import ast as _ast
+    import threading
+    from mycore import fleet
+    from mycore.service import ChatService
+    import web.server as _web_srv
+
+    # ---------------- A. ledger lifecycle (the meter's contract) ------------
+
+    fleet.deactivate()
+    check("fleet: inert by default -> record dropped, honest empty board",
+          not fleet.active() and fleet.active_dir() is None
+          and fleet.record_clone({"fleet": "x", "clone": "c1"}) is False
+          and fleet.summary()["fleets"] == []
+          and fleet.summary()["local_only"] is True
+          and fleet.summary()["clone_tokens"] is None)
+    with tempfile.TemporaryDirectory() as td:
+        d = fleet.activate(Path(td) / "fleet")
+        check("fleet: activate -> active + directory created",
+              fleet.active() and fleet.active_dir() == d and d.is_dir())
+        check("fleet: one bounded row written",
+              fleet.record_clone({"fleet": "f1", "clone": "c1",
+                                  "stop": "final", "tool_calls": 2,
+                                  "in_tok": 7, "out_tok": 3,
+                                  "usage_complete": True}) is True
+              and len(fleet.read_rows()) == 1)
+        check("fleet: an oversized row is dropped, never bloats the log",
+              fleet.record_clone({"fleet": "f1", "clone": "c2",
+                                  "task_excerpt": "x" * 4000}) is False
+              and len(fleet.read_rows()) == 1)
+        fleet._counts.clear()                # the day-cap leg starts at zero
+        old_cap = fleet.MAX_ROWS_PER_DAY
+        fleet.MAX_ROWS_PER_DAY = 2
+        try:
+            a = fleet.record_clone({"fleet": "f3", "clone": "c1",
+                                    "in_tok": 0, "out_tok": 0,
+                                    "usage_complete": True})
+            b = fleet.record_clone({"fleet": "f3", "clone": "c2",
+                                    "in_tok": 0, "out_tok": 0,
+                                    "usage_complete": True})
+            c = fleet.record_clone({"fleet": "f3", "clone": "c3"})
+            check("fleet: the per-day row cap drops the overflow",
+                  a and b and not c, f"{a} {b} {c}")
+        finally:
+            fleet.MAX_ROWS_PER_DAY = old_cap
+            fleet._counts.clear()
+
+        # ---------------- B. board: grouping, totals, whitelist -------------
+        board = fleet.summary()
+        check("fleet: the board groups rows by fleet id",
+              board["count"] == 2 and board["clones"] == 3
+              and board["failed"] == 0 and board["clone_tokens"] == 10,
+              str({k: board[k] for k in ("count", "clones", "failed",
+                                         "clone_tokens")}))
+        pub = fleet.public_clone({"fleet": "f1", "clone": "c9",
+                                  "secret": "SENTINEL-LEAK",
+                                  "chat_id": 123, "stop": "final"})
+        check("fleet: the board whitelist never echoes a raw row",
+              "secret" not in pub and "chat_id" not in pub
+              and "SENTINEL-LEAK" not in json.dumps(pub)
+              and set(pub) == {"clone", "fleet", "origin", "stop",
+                               "tool_calls", "in_tok", "out_tok", "model",
+                               "tools", "task_digest", "lint", "failed",
+                               "usage_complete"},
+              str(sorted(pub)))
+        populated = fleet.public_clone({"clone": "c1", "fleet": "f1",
+                                        "tools": ["read_file", "grep", "write_file"],
+                                        "model": "mimo-v2.6-flash",
+                                        "stop": "final", "in_tok": 2,
+                                        "out_tok": 3, "usage_complete": True})
+        check("fleet: populated clone rows produce a bounded public view",
+              populated["tools"] == ["read_file", "grep"]
+              and populated["model"] == "mimo-v2.6-flash"
+              and "task_excerpt" not in populated
+              and populated["usage_complete"] is True, str(populated))
+        check("fleet: the digest is stable and short",
+              fleet.digest("abc") == fleet.digest("abc")
+              and len(fleet.digest("abc")) == 12)
+        from mycore import evolution as _evolution_mod
+        from mycore import evolution as _evolution_mod
+        original_lint = _evolution_mod.lint_text
+        _evolution_mod.lint_text = lambda _text: (_ for _ in ()).throw(
+            RuntimeError("lint failure"))
+        try:
+            _d, fail_excerpt, fail_lint = fleet.task_excerpt(
+                "secret-token-should-not-be-written")
+        finally:
+            _evolution_mod.lint_text = original_lint
+        check("fleet: lint failure fails closed and stores no task excerpt",
+              fail_excerpt == "" and fail_lint == "lint-unavailable")
+
+        # ---------------- D. the system receipt (R2) ------------------------
+        check("fleet: no fleets -> no receipt line",
+              fleet.receipt_text([]) == "")
+        fleet.begin_turn()
+        fleet.note_fleet({"id": "fX", "clones": [
+            {"clone": "c1", "stop": "final", "in_tok": 7, "out_tok": 3,
+             "usage_complete": True},
+            {"clone": "c2", "stop": "model_error", "in_tok": 0,
+             "out_tok": 0, "usage_complete": True}]})
+        got = fleet.attach_receipt(
+            "answer", "test", parent_usage={"in_tok": 20, "out_tok": 30,
+                                         "usage_complete": True})
+        check("fleet: the receipt is appended to the owner's reply",
+              got.startswith("answer\n\n") and "fleet fX" in got
+              and "2 clone(s)" in got and "1 ok / 1 failed" in got
+              and "parent 50 tokens" in got and "clones 10 tokens" in got
+              and "combined 60 tokens" in got and "self-reported" in got, got)
+        check("fleet: the receipt pops the turn's fleets (no double stamp)",
+              fleet.attach_receipt("answer", "test") == "answer")
+        fleet.note_fleet({"id": "fY", "clones": [{"clone": "c1",
+                                                   "stop": "final"}]})
+        fleet.begin_turn()
+        check("fleet: begin_turn drops a stale pending fleet (thread guard)",
+              fleet.attach_receipt("clean", "test") == "clean")
+        check("fleet: an unknown token count stays null, never 0",
+              fleet.fleet_totals([{"clones": [{"stop": "final"}]}])
+              ["tokens"] is None)
+        summary = fleet.fleet_totals(
+            [{"id": "f", "clones": [
+                {"stop": "final", "in_tok": 2, "out_tok": 3,
+                 "usage_complete": True}]}],
+            {"in_tok": 7, "out_tok": 11, "usage_complete": True})
+        check("fleet: parent, clone and combined usage are distinct exact totals",
+              summary["parent_tokens"] == 18
+              and summary["clone_tokens"] == 5 and summary["tokens"] == 23,
+              str(summary))
+        check("fleet: any incomplete parent usage makes combined unknown",
+              fleet.fleet_totals([{"clones": [
+                  {"stop": "final", "in_tok": 2, "out_tok": 3,
+                   "usage_complete": True}]}],
+                  {"usage_complete": False})["tokens"] is None)
+        check("fleet: read_rows clamps caller limits",
+              len(fleet.read_rows(999999)) <= fleet.READ_MAX_ROWS)
+        _read_rows = fleet.read_rows
+        fleet.read_rows = lambda limit=400: [{"fleet": "fpart", "clone": "c1",
+                                               "clone_total": 3, "stop": "final",
+                                               "in_tok": 1, "out_tok": 1,
+                                               "origin": "test", "ts": 1}]
+        try:
+            partial = fleet.summary()
+        finally:
+            fleet.read_rows = _read_rows
+        check("fleet: a truncated fleet is marked incomplete",
+              partial["fleets"][0]["incomplete"]
+              and partial["fleets"][0]["expected_clones"] == 3
+              and partial["incomplete"] is True)
+
+        # ---------------- E. attribution + honesty fixes ---------------------
+        reg = build_registry(allowed_roots=[td])
+        captured: dict = {}
+        orig_rt = subagent.run_turn
+
+        def stub(messages, chat, registry, **kw):
+            captured.update(kw)
+            doc = chat(messages=messages, tools=None)
+            return TurnResult(text="stub", iterations=1, tool_calls=0,
+                              stop="final")
+
+        def counted(messages=None, tools=None, **kw):
+            return {"choices": [{"message": {"role": "assistant",
+                                              "content": "ok"},
+                                 "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 11,
+                              "completion_tokens": 5}}
+
+        subagent.run_turn = stub
+        try:
+            stop_flags: list = []
+            fleet.begin_turn()
+            subagent.run_tasks(["a", "b"], reg, None, counted, 100,
+                               should_stop=lambda: stop_flags.append(1),
+                               run_deadline=5.0)
+            check("fleet: G-b the fan-out SHARES the context budget"
+                  " (not one full budget per clone)",
+                  captured.get("budget_chars") == 50,
+                  str(captured.get("budget_chars")))
+            check("fleet: G-a the parent's STOP predicate reaches the clone",
+                  callable(captured.get("should_stop")),
+                  str(captured.get("should_stop")))
+            check("fleet: G-g the parent's REMAINING deadline reaches the clone",
+                  isinstance(captured.get("run_deadline"), float)
+                  and 0 < captured["run_deadline"] <= 5.0,
+                  str(captured.get("run_deadline")))
+            fleets = fleet.take_fleets("test")
+            rows = fleets[0]["clones"] if fleets else []
+            check("fleet: per-clone tokens come from the provider usage block"
+                  " (exact, no estimate)",
+                  len(rows) == 2
+                  and all(r["in_tok"] == 11 and r["out_tok"] == 5
+                          and r["usage_complete"] is True for r in rows), str(rows))
+            check("fleet: the clone's task excerpt is linted before it lands",
+                  all("/mnt/" not in (r.get("task_excerpt") or "")
+                      for r in rows))
+        finally:
+            subagent.run_turn = orig_rt
+
+        # G-a with the REAL loop: STOP at the clone's first iteration top
+        fleet.begin_turn()
+
+        def never_call(messages=None, tools=None, **kw):
+            raise AssertionError("the model must never be called after STOP")
+
+        fold = subagent.run_tasks(["x"], reg, None, never_call, None,
+                                  should_stop=lambda: True)
+        stop_rows = fleet.take_fleets("test")
+        check("fleet: G-a the operator's STOP aborts a running clone"
+              " (honest note, no model call)",
+              "aborted" in fold and "operator" in fold
+              and stop_rows[0]["clones"][0]["stop"] == "aborted",
+              fold[:200])
+
+        # ---------------- F. per-surface STOP isolation --------------------
+        from mycore import leash as _leash
+        before_state = _leash.read_state(ttl=0)
+        try:
+            before_seq = before_state["stop_seq"]
+            _web_srv._console_turns.clear()
+            check("console chat turn id uses its imported secrets module",
+                  "secrets" in _web_srv.__dict__
+                  and len(_web_srv.secrets.token_hex(8)) == 16)
+            cancel_event = threading.Event()
+            _web_srv.register_console_turn("test-console", cancel_event)
+            check("console STOP sets only the active console request event",
+                  _web_srv.stop_console_turn() is True and cancel_event.is_set()
+                  and _leash.stop_baseline() == before_seq)
+            _web_srv.finish_console_turn("test-console")
+            check("console STOP with no active chat is a no-op",
+                  _web_srv.stop_console_turn() is False
+                  and _leash.stop_baseline() == before_seq)
+            _leash.request_stop()
+            service_baseline = _leash.stop_baseline() - 1
+            check("global STOP remains a separate service-only signal",
+                  _leash.stop_requested(service_baseline))
+        finally:
+            _leash._write(before_state)
+            _leash._cache["ts"] = 0
+
+        # ---------------- G. the /fleet TG command ---------------------------
+        fleet.deactivate()
+        from mycore.tg import POLL_BOT_ENV as _POLL_ENV
+        saved_tok = os.environ.get(_POLL_ENV)
+        os.environ[_POLL_ENV] = "second-bot-TEST-token"
+        svc_repo = Path(td) / "repo_fleet"
+        (svc_repo / "web").mkdir(parents=True)
+        (svc_repo / "web" / "settings.json").write_text("{}",
+                                                         encoding="utf-8")
+        try:
+            svc_f = ChatService(Path(td) / "st_fleet", frozenset({111}),
+                                transport=FakeTgTransport(), chat=counted,
+                                repo=svc_repo, now=lambda: 0.0)
+        finally:
+            if saved_tok is None:
+                os.environ.pop(_POLL_ENV, None)
+            else:
+                os.environ[_POLL_ENV] = saved_tok
+        empty_line = svc_f._fleet_command("")
+        check("/fleet: an empty ledger answers one honest line",
+              bool(empty_line) and "fleet" in empty_line.lower()
+              and "ERROR" not in empty_line, empty_line)
+        check("/fleet: an unknown action -> the usage line",
+              svc_f._fleet_command("destroy")
+              == svc_f._t("cmd.fleet.usage"))
+        fleet.activate(Path(td) / "fleet2")
+        fleet.record_clone({"fleet": "fTEST", "clone": "c1",
+                            "stop": "final", "in_tok": 7, "out_tok": 3,
+                            "usage_complete": True})
+        fleet.record_clone({"fleet": "fTEST", "clone": "c2",
+                            "stop": "model_error"})
+        line = svc_f._fleet_command("")
+        check("/fleet: one fleet renders id + counts + honest unknown tokens",
+              "fTEST" in line and "2 clone(s)" in line
+              and "1 completed" in line and "1 failed" in line
+              and "? clone tokens" in line, line)
+        fleet.deactivate()
+        fleet.begin_turn()
+
+        check("fleet: the sniff read model is still registered",
+              callable(getattr(_web_srv, "collect_sniff", None)))
+        check("fleet: service and console use the same state/fleet directory",
+              "fleet_mod.activate(state / \"fleet\")" in Path(
+                  REPO, "mycore/service.py").read_text(encoding="utf-8")
+              and _web_srv.MYCORE_STATE_DIR / "fleet"
+                  == fleet.pp.state_dir(REPO) / "fleet")
+
+        # Console STOP is a local event, not the shared TG/service counter.
+        from mycore import leash as _leash
+        before_state = _leash.read_state(ttl=0)
+        try:
+            before_seq = before_state["stop_seq"]
+            _web_srv._console_turns.clear()
+            cancel_event = threading.Event()
+            _web_srv.register_console_turn("test-console", cancel_event)
+            check("console STOP sets the active console turn only",
+                  _web_srv.stop_console_turn() is True
+                  and cancel_event.is_set()
+                  and _leash.stop_baseline() == before_seq)
+            _web_srv.finish_console_turn("test-console")
+            check("console STOP with no active turn is a no-op",
+                  _web_srv.stop_console_turn() is False
+                  and _leash.stop_baseline() == before_seq)
+            _leash.request_stop()
+            check("service STOP remains an independent global control",
+                  _leash.stop_requested(before_seq))
+        finally:
+            _leash._write(before_state)
+            _leash._cache["ts"] = 0
+
+    # ---------------- G. source walls (P0 is local + telemetry-free) -----
+    src = Path(fleet.__file__).read_text(encoding="utf-8")
+    tree = _ast.parse(src)
+    imports: set = set()
+    for node in _ast.walk(tree):
+        if isinstance(node, _ast.Import):
+            imports.update(a.name.split(".")[0] for a in node.names)
+        elif isinstance(node, _ast.ImportFrom) and node.module:
+            imports.add(node.module.split(".")[0])
+    check("fleet: no transport, socket or delivery path in the module",
+          not (imports & {"urllib", "socket", "http", "requests", "ssl",
+                          "asyncio"})
+          and "send_message" not in src and "_origin_deliver" not in src
+          and "ChatClient" not in src and "run_turn" not in src,
+          str(sorted(imports)))
+
+
 def test_pipeline() -> None:
     """Pipeline car (acquiring customers automatically, owner concept): the six
     stages are pure functions over ONE document, every send gate is re-checked
@@ -20812,6 +21141,7 @@ def main() -> int:
         test_usage_range,
         test_macos_report,
         test_pipeline,
+        test_fleet,
     ]
     rows = []
     for fn in suites:

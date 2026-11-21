@@ -239,7 +239,7 @@
           <span class="stat-note" id="tailState" role="status">–</span>
           <button class="btn" id="ctlStopBtn" type="button"
                   data-i18n="ctl.stop" data-i18n-t="ctl.stopHint"
-                  title="abort the turn that is running right now">STOP</button>
+                  title="stop the active console chat reply only">STOP CHAT</button>
           <button class="btn" id="ctlPauseBtn" type="button"
                   data-i18n="ctl.pause" data-i18n-t="ctl.pauseHint"
                   title="hold new turns and automatic legs">PAUSE</button>
@@ -1084,6 +1084,10 @@
       <section class="card">
         <h2><span data-i18n="sec.artifacts">ARTIFACTS</span><span class="chat-badge" id="artBadge">–</span></h2>
         <div class="art-grid" id="artList"></div>
+      </section>
+      <section class="card">
+        <h2><span data-i18n="sec.fleets">FLEETS</span><span class="chat-badge" id="fleetBadge">–</span></h2>
+        <div id="fleetList"></div>
       </section>
     </section>
 

@@ -30,6 +30,9 @@ class TurnResult:
     tool_calls: int                   # tool dispatches performed
     stop: str                         # "final" | "max_iters" | "model_error"
     tool_log: list[dict] = field(default_factory=list)   # {name, ok, preview}
+    in_tok: int | None = None
+    out_tok: int | None = None
+    usage_complete: bool = False
 
 
 def _tool_result_message(call_id: str, name: str, result: str) -> dict:
@@ -160,11 +163,18 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
         except Exception:                      # noqa: BLE001 — never break a turn
             run_deadline = None
     t_start = time.monotonic() if run_deadline else None
+    deadline_remaining = (lambda: max(0.0, float(run_deadline) -
+                                      (time.monotonic() - t_start))
+                          if run_deadline and t_start is not None else None)
     emit = on_event or (lambda kind, data: None)
     tool_log: list[dict] = []
     tools = registry.schema()
     iters = 0
     total_calls = 0
+    total_in = 0
+    total_out = 0
+    usage_calls = 0
+    usage_complete = True
     from .compact import (chars_for_tokens, compact,  # local import: optional path
                           measure)
     # Car 5-D7 item 2: token-denominated fold trigger + its calibration.
@@ -180,12 +190,18 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
     # a tool dispatched in iteration 1 already sees a bound turn.
     bind = getattr(registry, "bind_turn", None)
     if callable(bind):
-        bind(chat, budget_chars)
+        bind(chat, budget_chars, should_stop, deadline_remaining,
+             lambda: {"in_tok": total_in if usage_complete else None,
+                     "out_tok": total_out if usage_complete else None,
+                     "usage_complete": usage_complete and usage_calls > 0})
 
     def stop(reason: str, text: str) -> TurnResult:
         emit("stop", {"reason": reason, "iterations": iters})
         return TurnResult(text=text, iterations=iters, tool_calls=total_calls,
-                          stop=reason, tool_log=tool_log)
+                          stop=reason, tool_log=tool_log,
+                          in_tok=total_in if usage_complete else None,
+                          out_tok=total_out if usage_complete else None,
+                          usage_complete=usage_complete and usage_calls > 0)
 
     for it in range(1, max_iters + 1):
         iters = it
@@ -248,11 +264,13 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
         try:
             doc = chat(**chat_kw)
         except StopRequested:
+            usage_complete = False
             note = ("[mycore: turn stopped by the operator (STOP) "
                     "mid-stream]")
             messages.append({"role": "assistant", "content": note})
             return stop("aborted", note)
         except Exception as e:  # noqa: BLE001 — contract: honest stop, no raise
+            usage_complete = False
             from .model import ModelError as _ModelError
             # ModelError text is vetted (status codes / class names / endpoint
             # urls — never keys), and the failover chain annotates its final
@@ -272,16 +290,26 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
         # turn, so it cancels out); one observation is not a slope, so the
         # ratio stays None and the fold rule stays exactly as it was.
         usage = doc.get("usage") if isinstance(doc, dict) else None
+        usage_calls += 1
         if isinstance(usage, dict):
-            tok = next((usage[k] for k in ("prompt_tokens", "input_tokens")
-                        if type(usage.get(k)) is int), None)
-            if tok is not None:
+            in_value = next((usage[k] for k in ("prompt_tokens", "input_tokens")
+                             if type(usage.get(k)) is int), None)
+            out_value = next((usage[k] for k in ("completion_tokens", "output_tokens")
+                              if type(usage.get(k)) is int), None)
+            if in_value is None or out_value is None:
+                usage_complete = False
+            else:
+                total_in += max(0, in_value)
+                total_out += max(0, out_value)
+            if in_value is not None:
                 if obs is not None:
                     dc = chars_before - obs[0]
-                    dt = tok - obs[1]
+                    dt = in_value - obs[1]
                     if dc >= 400 and dt > 0:
                         ratio = max(0.05, min(3.0, dt / dc))
-                obs = (chars_before, tok)
+                obs = (chars_before, in_value)
+        else:
+            usage_complete = False
         calls = extract_calls(doc)
         text = first_choice_text(doc)
 

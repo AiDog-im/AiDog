@@ -7,7 +7,7 @@ Run a local command on agent lifecycle events — notifications, metrics
 pings, audit trails — without forking the agent and without giving a hook
 any way to block or break a conversation.
 
-## Event whitelist (seven, nothing else)
+## Event whitelist (eight, nothing else)
 
 | Event | Fires when |
 |---|---|
@@ -18,6 +18,7 @@ any way to block or break a conversation.
 | `cron_fire` | A scheduled job is delivered. |
 | `mission_tick` | The mission leg ticked with an active mission (car 3, 0.5.46) — fires once per active mission per leg tick, after the tick; no active mission = no fire. |
 | `error` | The turn pipeline hit an error path. |
+| `fleet` | A turn dispatched sub-agent clones and its split receipt entered the owner's reply/report path (need-B P0) — fires once per turn that ran `delegate`; no delegation = no fire. The same turn writes one `FLEET` line to the service log, which is what the console's Live Stream shows. |
 
 Any other key is refused **at settings-write time** (HTTP 400 naming the
 whitelist) — unknown events never persist and never fire. `checkpoint` is
