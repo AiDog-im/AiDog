@@ -77,6 +77,7 @@ async function loadLang(lang) {
   renderOvTech();              // round C (P4): technical rows follow the pack
   paintOvTechBtn();            // round C (P4): disclosure label follows the pack
   paintSaveBar();              // round C (P6): bar state follows the pack
+  applyRegion();               // car I: region tier (dim notes / TG row / exchange gate)
   setView(currentView, false);    // re-resolve the view title in the new language
 }
 
@@ -3630,6 +3631,11 @@ async function saveSettings() {
     const ledTog = document.getElementById("ledToggle");
     payload.ledger = { enabled: !!(ledTog && ledTog.checked) };
   }
+  // Car I (owner #16): feature-visibility region — one enum, never detected
+  if (regionDirty) {
+    const regSel = document.getElementById("regionSel");
+    payload.region = { code: (regSel && regSel.value === "cn") ? "cn" : "global" };
+  }
   const hookPatch = hooksPayload();
   if (hookPatch) payload.hooks = hookPatch;
   const hookMsg = document.getElementById("hookMsg");
@@ -3640,6 +3646,8 @@ async function saveSettings() {
   if (chanMsg) { chanMsg.className = "save-state"; chanMsg.textContent = ""; }
   if (bridgeMsg) { bridgeMsg.className = "save-state"; bridgeMsg.textContent = ""; }
   if (ledMsgClear) { ledMsgClear.className = "save-state"; ledMsgClear.textContent = ""; }
+  const regionMsgClear = document.getElementById("regionMsg");
+  if (regionMsgClear) { regionMsgClear.className = "save-state"; regionMsgClear.textContent = ""; }
   if (!token) {
     state.className = "save-state err";
     state.textContent = t("save.needToken", "token required");
@@ -3696,6 +3704,14 @@ async function saveSettings() {
           ledMsg.textContent = ledErrs.join("; ");
         }
       }
+      const regionMsg = document.getElementById("regionMsg");
+      if (regionMsg) {
+        const regErrs = details.filter(d => String(d).includes("region"));
+        if (regErrs.length) {
+          regionMsg.className = "save-state err";
+          regionMsg.textContent = regErrs.join("; ");
+        }
+      }
       if (obMsg && obErrs.length) {
         obMsg.className = "save-state err";
         obMsg.textContent = obErrs.join("; ");
@@ -3726,7 +3742,13 @@ async function saveSettings() {
     proxyDirty = false;
     guardDirty = false; obedDirty = false;
     ledDirty = false;
+    regionDirty = false;
     if (payload.ledger) loadLedgerStatus();
+    if (payload.region) {
+      const rm = document.getElementById("regionMsg");
+      if (rm) { rm.className = "save-state"; rm.textContent = ""; }
+      applyRegion();                 // engine repaints the tier immediately
+    }
     // v0.5.55: the endpoint manager re-reads the server-normalized chain
     // (source/rows/presence may all have changed) and drops its edit flag.
     epDirty = false;
@@ -3812,6 +3834,8 @@ let chanDirty = false, usageDirty = false, mycDirty = false, toolsDirty = false;
 let guardDirty = false, obedDirty = false;
 // D2 ledger car: the opt-out switch follows the same dirty-block contract.
 let ledDirty = false, _ledgerWired = false;
+// Car I (owner #16): the region select rides the same dirty-block contract
+let regionDirty = false;
 // activation car: only the keys the chat service reads AT START raise this
 // flag (tools_off / mcp / shell / context_dirs) — a models/budget edit must
 // never nag for a restart it does not need.
@@ -4790,6 +4814,12 @@ function renderChannels() {
     note.dataset.chanInbound = route;
     note.hidden = true;
     blk.appendChild(note);
+    /* car I: the per-route region note (shape-hidden outside the cn tier) */
+    const rnote = document.createElement("div");
+    rnote.className = "stat-note chan-region";
+    rnote.dataset.chanRegion = route;
+    rnote.hidden = true;
+    blk.appendChild(rnote);
     CHAN_SCHEMA[route].forEach(([key, kind]) =>
       blk.appendChild(chanField(key, kind, sub[key])));
     if (route === "webhook") {
@@ -4802,6 +4832,7 @@ function renderChannels() {
     list.appendChild(blk);
   });
   paintChanChips();
+  paintRegionNotes();            // car I: cn-tier dim/notes for the fresh rows
 }
 
 function paintChanChips() {
@@ -5869,6 +5900,23 @@ function initSettingsPanels() {
   ledDirty = false;
   wireLedger();
   loadLedgerStatus();
+  // Car I: region select prefill + immediate cn-note preview; the change
+  // marks dirty like every other block (sticky bar owns the write)
+  const regSel = document.getElementById("regionSel");
+  if (regSel) {
+    regSel.value = regionCode();
+    regionDirty = false;
+    const cnNoteEl = document.getElementById("regionCnNote");
+    if (cnNoteEl) cnNoteEl.hidden = regSel.value !== "cn";
+    if (!regSel.dataset.wired) {
+      regSel.dataset.wired = "1";
+      regSel.addEventListener("change", () => {
+        regionDirty = true;
+        const n = document.getElementById("regionCnNote");
+        if (n) n.hidden = regSel.value !== "cn";
+      });
+    }
+  }
   // Car 4 (D6): decision endpoint row (raw stored strings; empty = default)
   const dec = (myc.decision && typeof myc.decision === "object")
     ? myc.decision : {};
@@ -6447,7 +6495,7 @@ function renderCronList() {
   }
   if (!cronData.jobs.length) {
     el.innerHTML = `<div class="stat-note">${escapeHtml(t("cron.empty",
-      "no cron jobs yet — ask in chat, the CLI or Telegram to create one"))}</div>`;
+      "no cron jobs yet — ask in chat, the CLI or any connected channel to create one"))}</div>`;
     return;
   }
   el.innerHTML = cronData.jobs.map(j => {
@@ -6862,6 +6910,7 @@ function actChipText(state) {
 }
 
 function renderSetup() {
+  paintChanTgRow();             // car I: the Channels TG row tracks setupData
   const card = document.getElementById("actCard");
   if (!card) return;
   if (!setupData) {                // no endpoint / bad shape: hide, honestly
@@ -6886,10 +6935,16 @@ function renderSetup() {
   if (start) {
     start.hidden = ready;
     if (!ready) {
-      start.innerHTML = escapeHtml(t("act.start",
-        "Welcome — 3 steps to activate: 1) set the console access token, " +
-        "2) set the bot token and the owner allowlist, 3) point the model " +
-        "endpoint. Fix each row below, or run in a terminal:")) + " " +
+      const startCn = regionCode() === "cn";
+      start.innerHTML = escapeHtml(t(startCn ? "act.start.cn" : "act.start",
+        startCn
+          ? "Welcome — 3 steps to activate: 1) set the console access token, " +
+            "2) connect a chat channel — Feishu, DingTalk, WeChat or Telegram " +
+            "(Telegram needs a route you provide here), 3) point the model " +
+            "endpoint. Fix each row below, or run in a terminal:"
+          : "Welcome — 3 steps to activate: 1) set the console access token, " +
+            "2) connect a chat channel — bot token and owner allowlist, " +
+            "3) point the model endpoint. Fix each row below, or run in a terminal:")) + " " +
         `<code style="font-family:Consolas,monospace;font-size:12.5px;` +
         `color:var(--blue-ink);border:1px dashed var(--line);` +
         `padding:1px 6px;border-radius:6px;">aidog setup</code>` +
@@ -9643,6 +9698,9 @@ async function sniffAddRule() {
 
 function setView(name, fromUser) {
   if (!VIEWS.includes(name)) name = "overview";
+  // car I Q3: under region cn the Exchange view never activates — deep
+  // links, journey buttons and orchestrator jumps all resolve to Overview
+  if (name === "exchange" && regionCode() === "cn") name = "overview";
   currentView = name;
   document.querySelectorAll(".view").forEach(v =>
     v.classList.toggle("is-active", v.dataset.view === name));
@@ -10549,6 +10607,7 @@ function exNavMode() {
 }
 
 function exNavVisible() {
+  if (regionCode() === "cn") return false;   // car I Q3: region gate > preference
   const mode = exNavMode();
   if (mode === "show") return true;
   if (mode === "hide") return false;
@@ -10587,6 +10646,91 @@ function wireExNav() {
       applyExNav();            // the flip rule above owns any walk-off
     });
   }
+}
+
+/* --- car I (owner #16): region visibility engine ---------------------- *
+   One explicit local setting (never detected) drives three faces: the
+   Exchange hard gate (Q3: hide-all, the gate sits ABOVE the personal exNav
+   preference), the restricted-route dim + honest note in Channels (Q2), and
+   the region copy tier (act.start / TG-card note). global == the shipped
+   behavior byte-for-byte: every branch below is a no-op outside cn. */
+function regionCode() {
+  const r = (settings && settings.region && typeof settings.region === "object")
+    ? settings.region : {};
+  return r.code === "cn" ? "cn" : "global";
+}
+
+function paintChanTgRow() {
+  const row = document.getElementById("chanTgRow");
+  if (!row) return;
+  const items = (setupData && Array.isArray(setupData.items)) ? setupData.items : [];
+  if (!items.length) { row.hidden = true; return; }   // honest shape-hide
+  row.hidden = false;
+  const tok = items.find(i => i && i.id === "tg_token");
+  const alw = items.find(i => i && i.id === "tg_allowlist");
+  const both = !!(tok && tok.state === "set" && alw && alw.state === "set");
+  const chip = document.getElementById("chanTgChip");
+  if (chip) {
+    chip.textContent = both
+      ? t("chan.st.enabled", "enabled") + " · " +
+        t("chan.st.configured", "configured")
+      : t("chan.st.unconfigured", "not configured");
+    chip.title = "";                 // presence words only, never a value
+  }
+  if (!row.dataset.wired) {
+    row.dataset.wired = "1";
+    row.addEventListener("click", () => {
+      setView("settings", true);     // equal row, same deep-link posture
+      requestAnimationFrame(() => {
+        const card = document.getElementById("tgCard");
+        if (card) { card.scrollIntoView({ block: "center" }); actFocusEl(card); }
+      });
+    });
+  }
+  paintRegionNotes();
+}
+
+function paintRegionNotes() {
+  const routes = ["telegram", "discord", "slack", "whatsapp", "signal"];
+  const cn = regionCode() === "cn";
+  const noteTxt = t("region.routeNote",
+    "may need a network route you provide yourself in this region");
+  document.querySelectorAll("#chanList [data-chan-region]").forEach(note => {
+    const route = note.dataset.chanRegion;
+    const on = cn && routes.indexOf(route) !== -1;
+    note.hidden = !on;
+    if (on) note.textContent = noteTxt;
+    const blk = note.closest("[data-chan-route]");
+    if (blk) blk.classList.toggle("is-region-dim", on);
+  });
+  const tgNote = document.getElementById("chanTgNote");
+  const tgRow = document.getElementById("chanTgRow");
+  if (tgNote) {
+    tgNote.textContent = cn
+      ? t("region.tgNote",
+          "this region: Telegram needs a network route you provide yourself — " +
+          "the Feishu/DingTalk/WeChat/Webhook routes in Channels need none.")
+      : t("chan.tgNote",
+          "the bot channel — token, allowlist and restart live in Bot & Service");
+    tgNote.hidden = false;
+  }
+  if (tgRow) tgRow.classList.toggle("is-region-dim", cn);
+  const tgCardNote = document.getElementById("tgRegionNote");
+  if (tgCardNote) {
+    tgCardNote.hidden = !cn;
+    if (cn) tgCardNote.textContent = t("region.tgNote",
+      "this region: Telegram needs a network route you provide yourself — " +
+      "the Feishu/DingTalk/WeChat/Webhook routes in Channels need none.");
+  }
+}
+
+function applyRegion() {
+  const cn = regionCode() === "cn";
+  applyExNav();                                   // nav item honors the gate
+  if (cn && currentView === "exchange") setView("overview", true);
+  paintRegionNotes();
+  paintChanTgRow();
+  if (setupData && typeof renderSetup === "function") renderSetup();
 }
 
 /* --- 3. Backup & Restore card (CKX-P1, car 3) ------------------------- */

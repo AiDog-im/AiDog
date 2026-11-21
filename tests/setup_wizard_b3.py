@@ -32,6 +32,12 @@ Contracts locked here (regression wall):
     expected closed here) print one honest miss line and the prompt sequence
     stays byte-compatible with the manual flow above; probes must stay fast
     (<3s wall for the whole wizard run)
+  - feature region (car I, owner #16): the interactive wizard asks ONE
+    explicit region question after settings.json exists (ENTER = keep the
+    current value, default global; never detected) and writes
+    web/settings.json region.code; --check reports the region and drops the
+    two Telegram slots from pending under region cn (Q5); --yes/--check
+    themselves never prompt; invalid region answers retry then keep
 English output per repo i18n policy.
 """
 from __future__ import annotations
@@ -152,9 +158,12 @@ def no_leak(out: str, *values: str) -> bool:
 
 def full_answers(*, web: str = TOK_WEB, tg: str = TOK_TG, allow: str = TOK_ALLOW,
                  api: str = "", gh: str = TOK_GH, wd: str = TOK_WD,
-                 base: str = "", model: str = "", boot: str = "n") -> str:
-    """Exact stdin sequence for a fresh fake repo (all 6 slots empty)."""
-    return "\n".join([web, tg, allow, api, gh, wd, base, model, boot]) + "\n"
+                 region: str = "", base: str = "", model: str = "",
+                 boot: str = "n") -> str:
+    """Exact stdin sequence for a fresh fake repo (all 6 slots empty, then
+    the car-I region prompt — "" = keep global, then endpoint/model/boot)."""
+    return "\n".join([web, tg, allow, api, gh, wd, region, base,
+                      model, boot]) + "\n"
 
 
 # --------------------------------------------------------------------- tests
@@ -300,9 +309,10 @@ def test_wizard_no_overwrite(t: Path) -> None:
            "MYCORE_TG_TOKEN=\n")
     (t2 / "secrets.env").write_text(pre, encoding="utf-8")
     before = (t2 / "secrets.env").read_bytes()
-    # WEB_TOKEN is filled -> NOT prompted; remaining prompts: tg, allow, api, gh,
-    # wd, base, model, boot
-    stdin = "\n".join([TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD, "", "", "n"]) + "\n"
+    # WEB_TOKEN is filled -> NOT prompted; remaining prompts: tg, allow, api,
+    # gh, wd, region, base, model, boot
+    stdin = "\n".join([TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
+                       "", "", "", "n"]) + "\n"
     rc, out = run(setup_py(t2), [], stdin=stdin)
     after_line = own_line(t2 / "secrets.env", "WEB_TOKEN")
     check("prefilled WEB_TOKEN kept byte-identical", after_line == TOK_WEB,
@@ -327,7 +337,8 @@ def test_wizard_validation_retries(t: Path) -> None:
     # 3 invalid WEB_TOKEN answers -> skipped, stays empty (fail-closed)
     bad1, bad2, bad3 = "short", "also bad", "tiny_9chars"  # all <16 or spaced
     stdin = "\n".join([bad1, bad2, bad3,          # WEB_TOKEN: 3 strikes
-                       TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD, "", "", "n"]) + "\n"
+                       TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
+                       "", "", "", "n"]) + "\n"
     rc, out = run(setup_py(t2), [], stdin=stdin)
     check("3 invalid answers -> exit pending 2", rc == 2, f"rc={rc} {out[-300:]}")
     check("invalid reason shown with attempt counter",
@@ -368,8 +379,9 @@ def test_wizard_eof_graceful(t: Path) -> None:
 def test_wizard_endpoint_and_boot_yes(t: Path) -> None:
     t2 = make_repo(sub(t, "ep"))
     # endpoint: invalid then change; model: change; boot: y (stub install.sh)
+    # — region answer "" keeps global between the slot block and the endpoint
     stdin = "\n".join([TOK_WEB, TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
-                       "ftp://bad-endpoint", TOK_ENDPOINT,
+                       "", "ftp://bad-endpoint", TOK_ENDPOINT,
                        TOK_MODEL, "y"]) + "\n"
     rc, out = run(setup_py(t2), [], stdin=stdin, extra_env={"FAKE_RC": "0"})
     st = json.loads((t2 / "web" / "settings.json").read_text(encoding="utf-8"))
@@ -385,10 +397,11 @@ def test_wizard_endpoint_and_boot_yes(t: Path) -> None:
     check("wizard output still zero-echo",
           no_leak(out, TOK_WEB, TOK_TG, TOK_ALLOW, TOK_GH, TOK_WD))
 
-    # --no-boot skips the final question entirely (8 lines, no boot line)
+    # --no-boot skips the final question entirely (region + base + model,
+    # no boot line)
     t4 = make_repo(sub(t, "nb"))
     stdin = "\n".join([TOK_WEB, TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
-                       "", "", ]) + "\n"
+                       "", "", "", ]) + "\n"
     rc, _ = run(setup_py(t4), ["--no-boot"], stdin=stdin)
     check("--no-boot wizard: exit 0 without boot question",
           rc == 0 and not (t4 / "deploy" / "install.marker").exists(),
@@ -434,9 +447,10 @@ def test_local_model_detected_adopt(t: Path) -> None:
     url = f"http://127.0.0.1:{srv.server_address[1]}/v1"
     try:
         t2 = make_repo(sub(t, "local_hit"))
-        # slots (api key empty) + "use which?" answer (Enter = 1) + boot n
+        # slots (api key empty) + region keep + "use which?" answer
+        # (Enter = 1) + boot n
         stdin = "\n".join([TOK_WEB, TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
-                           "", "n"]) + "\n"
+                           "", "", "n"]) + "\n"
         t0 = time.monotonic()
         rc, out = run(setup_py(t2), [], stdin=stdin,
                       extra_env={"AIDOG_LOCAL_MODEL_PROBES": url})
@@ -498,6 +512,69 @@ def test_local_model_miss_default(t: Path) -> None:
     check("B: wizard run fast (<3s)", elapsed < 3.0, f"{elapsed:.2f}s")
 
 
+def test_region_prompt_and_check(t: Path) -> None:
+    """Car I (owner #16): the interactive region prompt (explicit choice,
+    never detected) + the region-aware --check pending derivation (Q5)."""
+    # A: fresh wizard answers "cn" -> settings region.code == cn + read-back
+    t2 = make_repo(sub(t, "region_cn"))
+    stdin = "\n".join([TOK_WEB, TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
+                       "cn", "", "", "n"]) + "\n"
+    rc, out = run(setup_py(t2), [], stdin=stdin)
+    st = json.loads((t2 / "web" / "settings.json").read_text(encoding="utf-8"))
+    check("region prompt: 'cn' written to settings region.code",
+          rc == 0 and (st.get("region") or {}).get("code") == "cn",
+          f"rc={rc} region={st.get('region')}")
+    check("region prompt: write read-back line printed",
+          "region set to cn" in out and "JSON re-parsed ok" in out,
+          out[-600:])
+    check("region prompt: summary reports settings region: cn",
+          "settings region: cn" in out, out[-400:])
+    check("region prompt: ENTER-default never required a value",
+          "region: kept global" not in out, out[:600])
+
+    # B: invalid answers retried with the reason, then kept (never written)
+    t3 = make_repo(sub(t, "region_bad"))
+    stdin = "\n".join([TOK_WEB, TOK_TG, TOK_ALLOW, "", TOK_GH, TOK_WD,
+                       "usa", "EU", "cn-ish", "", "", "n"]) + "\n"
+    rc, out = run(setup_py(t3), [], stdin=stdin)
+    st = json.loads((t3 / "web" / "settings.json").read_text(encoding="utf-8"))
+    check("region prompt: 3 invalid answers -> kept, never written",
+          rc == 0 and st.get("region") is None
+          and out.count("region: invalid") == 3
+          and "region: kept (invalid answers" in out,
+          f"rc={rc} region={st.get('region')} {out[-300:]}")
+
+    # C: --check under region cn drops the two TG slots from pending (Q5);
+    #    the same files under global pending them again (byte-identical rule)
+    t4 = make_repo(sub(t, "region_check"))
+    shutil.copy2(REPO / "secrets.env.example", t4 / "secrets.env")
+    sec = t4 / "secrets.env"
+    sec.write_text(sec.read_text(encoding="utf-8")
+                   .replace("WEB_TOKEN=", "WEB_TOKEN=" + TOK_WEB),
+                   encoding="utf-8")
+    st4 = json.loads((REPO / "web" / "settings.example.json")
+                     .read_text(encoding="utf-8"))
+    st4["region"] = {"code": "cn"}
+    (t4 / "web" / "settings.json").write_text(json.dumps(st4), encoding="utf-8")
+    rc, out = run(setup_py(t4), ["--check"])
+    pend = out.split("pending:")[-1] if "pending:" in out else ""
+    check("cn: --check ready without the TG slots (Q5)",
+          rc == 0 and "settings region: cn" in out
+          and "all required slots filled" in out
+          and "pending:" not in out
+          and "MYCORE_TG_TOKEN            empty (optional)" in out,
+          f"rc={rc} {out[-300:]}")
+    st4["region"] = {"code": "global"}
+    (t4 / "web" / "settings.json").write_text(json.dumps(st4), encoding="utf-8")
+    rc, out = run(setup_py(t4), ["--check"])
+    pend = out.split("pending:")[-1] if "pending:" in out else ""
+    check("global: --check requires the TG slots again",
+          rc == 2 and "settings region: global" in out
+          and "MYCORE_TG_TOKEN" in pend
+          and "AIDOG_TG_ALLOWED_USERS" in pend,
+          f"rc={rc} {out[-300:]}")
+
+
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="aidog_b3_", dir=str(TMP)) as td:
         base = Path(td)
@@ -514,6 +591,7 @@ def main() -> int:
         test_wizard_validation_retries(base)
         test_wizard_eof_graceful(base)
         test_wizard_endpoint_and_boot_yes(base)
+        test_region_prompt_and_check(base)
         test_dispatch_flags(base)
 
         test_local_model_detected_adopt(base)

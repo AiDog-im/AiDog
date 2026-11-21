@@ -659,12 +659,20 @@ DEFAULT_SETTINGS: dict = {
     # preset example is inert until adopted). Empty = the shipped Finance
     # tab only; the console renders the composer without an absence check.
     "extensions": {"categories": []},
+    # Car I (owner #16): the explicit feature-visibility region. Absent ==
+    # global == shipped behavior byte-for-byte; only the console Region card
+    # and the setup wizard write it, and the value never leaves the machine
+    # (zero detection, zero upload — owner ruling 2026-11-03).
+    "region": {"code": "global"},
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media", "web3", "mission",
                "bridge", "guardrails", "obedience", "ledger", "extensions",
-               "skills", "outbound_proxy")
+               "skills", "outbound_proxy", "region")
+# Car I: the only legal region.code values (explicit owner choice, never a
+# detected value — see the DEFAULT_SETTINGS note).
+REGION_CODES = ("global", "cn")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
@@ -821,6 +829,12 @@ SLOT_PATTERNS: dict = {
 }
 # The wizard's required set (aidog_setup --check pending semantics).
 REQUIRED_SLOTS = ("WEB_TOKEN", "MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS")
+# Car I (Q5 ruling): under region.code == "cn" these two Telegram slots drop
+# OUT of the required set (a Feishu/DingTalk-only install reaches ready).
+# REQUIRED_SLOTS itself stays untouched so every pre-car-I probe keeps pinning
+# the same tuple — requiredness is DERIVED per request in collect_setup and
+# mirrored by the wizard's --check.
+TG_SLOTS_OPTIONAL_UNDER_CN = ("MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS")
 # Fixed checklist order: (item id, slot name, i18n hint key, English fallback).
 # The server sends the KEY for the locale pack plus a short English fallback so
 # the row is readable even before the pack carries the translation.
@@ -1454,6 +1468,22 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
             errors.append("fx_rate must be a number in 0..100000 (0 = auto, else CNY per display unit)")
         else:
             clean["fx_rate"] = float(val)
+    if "region" in patch:
+        # Car I (owner #16): the feature-visibility region — a one-key enum
+        # partition. Refusals name the field and the allowed set only (the
+        # word-only contract every other leg follows).
+        reg = patch["region"]
+        if not isinstance(reg, dict):
+            errors.append("region must be an object")
+        elif set(reg) - {"code"}:
+            errors.append("unknown region key: "
+                          + ", ".join(sorted(set(reg) - {"code"})))
+        elif not isinstance(reg.get("code"), str) or \
+                reg.get("code") not in REGION_CODES:
+            errors.append("region.code must be one of: "
+                          + "|".join(REGION_CODES))
+        else:
+            clean["region"] = {"code": reg["code"]}
     if "mycore" in patch:
         mc = patch["mycore"]
         if not isinstance(mc, dict):
@@ -6129,13 +6159,20 @@ def collect_setup() -> dict:
     value (the credential values stay inside read_env_slot). Item order is
     fixed (SETUP_ITEMS + model_endpoint + service) and `ready` = every
     REQUIRED row ok + the model endpoint reachable — the wizard's own
-    `aidog setup --check` pending semantics, mirrored. The service row is not
-    part of `ready`: a bot may be deliberately off (fail-closed pending).
+    `aidog setup --check` pending semantics, mirrored. Car I: under
+    region.code == "cn" the two Telegram slots report required=False (Q5 —
+    a Feishu/DingTalk-only install can reach ready); global is byte-identical
+    to the pre-car-I behavior. The service row is not part of `ready`: a bot
+    may be deliberately off (fail-closed pending).
     """
+    settings = load_settings()
+    region_code = str((settings.get("region") or {}).get("code") or "global")
+    tg_optional = region_code == "cn"
     items: list[dict] = []
     for item_id, slot, hint_key, hint_en in SETUP_ITEMS:
         value = read_env_slot(slot)
-        required = slot in REQUIRED_SLOTS
+        required = slot in REQUIRED_SLOTS and not (
+            tg_optional and slot in TG_SLOTS_OPTIONAL_UNDER_CN)
         present = bool(value)
         # An EMPTY value is pending (not a format violation); a non-empty value
         # that breaks the mirrored wizard pattern is invalid (fmt False).
@@ -6145,7 +6182,7 @@ def collect_setup() -> dict:
         items.append({"id": item_id, "required": required, "ok": ok,
                       "fmt": fmt, "state": state,
                       "hint": hint_key, "hint_en": hint_en})
-    base = str((load_settings().get("mycore") or {}).get("base_url") or "")
+    base = str((settings.get("mycore") or {}).get("base_url") or "")
     url_fmt = bool(re.match(r"^https?://\S+$", base))
     reachable = endpoint_reachable(base) if url_fmt else False
     if not base:
