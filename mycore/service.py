@@ -1515,9 +1515,11 @@ class ChatService:
         reply — honest short lines on any stop, same mapping as _pipeline."""
         cfg = cli.resolve_model_config()
         chat_fn = self.chat or ChatClient(cfg).chat
-        messages = build_system_stack(context_dirs=resolve_context_dirs(),
-                                      user_rules=resolve_user_rules(),
-                                      capability_path=resolve_capability_path()) \
+        messages = build_system_stack(
+            context_dirs=resolve_context_dirs(),
+            user_rules=resolve_user_rules(),
+            capability_path=resolve_capability_path(),
+            runtime_facts=cli.resolve_runtime_facts(cfg.model)) \
             + [{"role": "user",
                 "content": job.get("text", "")}]
         stop_base = leash.stop_baseline()   # car 7: STOP can kill this turn too
@@ -1842,9 +1844,11 @@ class ChatService:
         # constitution stack: assembly puts SOUL.md first; the goal text only
         # ever enters the USER layer (design 3.3). Car 7: operator rules ride
         # the same stack (a slice obeys the same priority order as a chat).
-        messages = build_system_stack(context_dirs=resolve_context_dirs(),
-                                      user_rules=resolve_user_rules(),
-                                      capability_path=resolve_capability_path()) \
+        messages = build_system_stack(
+            context_dirs=resolve_context_dirs(),
+            user_rules=resolve_user_rules(),
+            capability_path=resolve_capability_path(),
+            runtime_facts=cli.resolve_runtime_facts()) \
             + [{"role": "user", "content": prompt}]
         chat_fn = self.chat or ChatClient(cli.resolve_model_config()).chat
         try:
@@ -2163,20 +2167,25 @@ class ChatService:
             history = []
         history = [m for m in history if m.get("role") != "system"]
 
-        stack = build_system_stack(context_dirs=resolve_context_dirs(),
-                                   user_rules=resolve_user_rules(),
-                                   capability_path=resolve_capability_path())
-        messages = stack + history
-        pre_ids = {id(m) for m in messages}
-        messages.append({"role": "user", "content": text})
-
         # Car 4 (D6) call site 4 — the model router (TG interactive leg).
         # A stored /model override is the operator's explicit choice and
         # wins; every other non-success outcome leaves cfg untouched, so a
         # turn never fails (or even notices) because of a decision request.
+        # Hotfix 0.5.76: runs BEFORE the stack build so the injected
+        # [runtime facts] slot names the ROUTED model, not the pre-router
+        # one (router only rewrites cfg — messages/history untouched).
         if not self._read_override(chat_id):
             decision.apply_router(cfg, {"source": "telegram",
                                         "chars": len(text or "")})
+
+        stack = build_system_stack(
+            context_dirs=resolve_context_dirs(),
+            user_rules=resolve_user_rules(),
+            capability_path=resolve_capability_path(),
+            runtime_facts=cli.resolve_runtime_facts(cfg.model))
+        messages = stack + history
+        pre_ids = {id(m) for m in messages}
+        messages.append({"role": "user", "content": text})
 
         chat_fn = self.chat or ChatClient(cfg).chat
         self.log.write("TURN_START", f"chat={redact_chat(chat_id)}",

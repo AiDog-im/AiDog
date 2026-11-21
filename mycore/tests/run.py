@@ -496,6 +496,85 @@ def test_assembly() -> None:
         check("assembly: legacy profile SOUL identity (shim/profile absent — N/A)",
               True, "post-swap: no profile copy to compare")
 
+    # --- hotfix 0.5.76: the [runtime facts] slot --------------------------
+    # SOUL tells the model to answer identity/version questions from its
+    # runtime context ONLY — but the stack used to carry no such fact, so the
+    # model went filesystem-diving and reported a stale upstream config.
+    from mycore import cli as _cli
+    with tempfile.TemporaryDirectory() as td:
+        tdp = Path(td)
+        cons = tdp / "SOUL.md"
+        cons.write_text("# SOUL", encoding="utf-8")
+        mem = tdp / "MEMORY_curated.md"
+        mem.write_text("- fact", encoding="utf-8")
+        base = build_system_stack(cons, (mem,), learned_path=None)
+        check("runtime facts: default stack carries no facts slot",
+              not any("[runtime facts" in m["content"] for m in base))
+        block = _cli.resolve_runtime_facts("m-x")
+        with_facts = build_system_stack(cons, (mem,), learned_path=None,
+                                        runtime_facts=block)
+        check("runtime facts: slot sits immediately before the skill hint",
+              len(with_facts) == len(base) + 1
+              and with_facts[-2]["content"] == block
+              and with_facts[-1]["content"] == base[-1]["content"])
+        ver = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+        check("runtime facts: block carries the on-disk VERSION",
+              f"version {ver}" in block, block[:120])
+        check("runtime facts: block demands ONLY-this-block answers",
+              "model: m-x" in block and "ONLY from this block" in block
+              and "stale" in block)
+        # explicit model id wins over config resolution
+        real_resolve = _cli.resolve_model_config
+        try:
+            _cli.resolve_model_config = lambda: type(
+                "Cfg", (), {"model": "cfg-model"})()
+            explicit = _cli.resolve_runtime_facts("m-x")
+            fallback = _cli.resolve_runtime_facts()
+        finally:
+            _cli.resolve_model_config = real_resolve
+        check("runtime facts: explicit model id beats config resolution",
+              "model: m-x" in explicit and "model: cfg-model" in fallback)
+        # a missing VERSION degrades honestly — the slot never raises
+        real_repo = _cli.REPO
+        try:
+            _cli.REPO = tdp          # no VERSION file in this tmp dir
+            degraded = _cli.resolve_runtime_facts("m-x")
+        finally:
+            _cli.REPO = real_repo
+        check("runtime facts: missing VERSION degrades to unknown",
+              "version unknown" in degraded and "model: m-x" in degraded)
+
+    # source-level leg: no production call site may forget the slot (a
+    # forgotten site = a turn with no version/model fact, i.e. this bug).
+    def _calls_missing_facts(path: Path) -> list[int]:
+        text = path.read_text(encoding="utf-8")
+        out: list[int] = []
+        idx = 0
+        while True:
+            i = text.find("build_system_stack(", idx)
+            if i < 0:
+                break
+            idx = i + 1
+            depth, j = 0, i + len("build_system_stack(") - 1
+            while j < len(text):
+                if text[j] == "(":
+                    depth += 1
+                elif text[j] == ")":
+                    depth -= 1
+                    if depth == 0:
+                        break
+                j += 1
+            if "runtime_facts" not in text[i:j + 1]:
+                out.append(text[:i].count("\n") + 1)
+        return out
+
+    prod_sites = (REPO / "mycore" / "service.py", REPO / "web" / "server.py",
+                  REPO / "mycore" / "cli.py", REPO / "mycore" / "acp.py")
+    misses = {p.name: _calls_missing_facts(p) for p in prod_sites}
+    check("runtime facts: every production call site passes the slot",
+          not any(misses.values()),
+          str({k: v for k, v in misses.items() if v}))
+
 
 def test_context_files() -> None:
     """Car 1-D1: configured project context dirs -> injected, present-only,
@@ -2258,6 +2337,11 @@ def test_service() -> None:
 
             # --- release awareness (car G, owner ask #7) ------------------
             # The update-module loader is stubbed: zero network, zero git.
+            # SENTINEL VERSIONS (hotfix 0.5.76): every fake "latest" here is
+            # the decoupled sentinel "9.9.9", never the real VERSION — a
+            # staged pending equal to the on-disk VERSION is consumed by
+            # _take_release_note's already-upgraded guard, so pinning the
+            # release line made this block fail once per release.
             from lib import i18n as _i18n
             real_loader = svc_mod._load_update_mod
             fetch_calls = {"n": 0}
@@ -2285,18 +2369,18 @@ def test_service() -> None:
                 check("service: /version up to date says so (installed shown)",
                       "0.5.69" in v_ok and "up to date" in v_ok, v_ok[:140])
 
-                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.75")
-                staged({"day": "x", "pending": "0.5.75"})
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "9.9.9")
+                staged({"day": "x", "pending": "9.9.9"})
                 svc.handle_update(mk_update(31, 111, 123456789, "/version"))
                 v_up = fake.sends[-1][1]
                 check("service: /version update -> latest + apply command",
-                      "0.5.75" in v_up and "aidog_update.py apply" in v_up,
+                      "9.9.9" in v_up and "aidog_update.py apply" in v_up,
                       v_up[:170])
                 st_after = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: /version consumes the staged notice (no dup)",
                       not st_after.get("pending")
-                      and st_after.get("notified") == "0.5.75",
+                      and st_after.get("notified") == "9.9.9",
                       str(st_after))
 
                 svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", None, fail=True)
@@ -2307,7 +2391,7 @@ def test_service() -> None:
                       and "RuntimeError" in v_err, v_err[:170])
 
                 # daily check: stages once, day-capped, then one-shot attach
-                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.75")
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "9.9.9")
                 (state1 / "release_notice.json").unlink(missing_ok=True)
                 svc._maybe_release_check()
                 n1 = fetch_calls["n"]
@@ -2317,28 +2401,28 @@ def test_service() -> None:
                 stg = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: newer release stages exactly one pending notice",
-                      stg.get("pending") == "0.5.75", str(stg))
+                      stg.get("pending") == "9.9.9", str(stg))
 
                 svc.handle_update(mk_update(33, 111, 123456789, "hello again"))
                 note1 = fake.sends[-1][1]
                 check("service: next message carries the release note once",
-                      "0.5.75" in note1 and "pong" in note1, note1[:220])
+                      "9.9.9" in note1 and "pong" in note1, note1[:220])
                 svc.handle_update(mk_update(34, 111, 123456789, "and again"))
                 note2 = fake.sends[-1][1]
                 check("service: the note is one-shot (second message clean)",
                       note2 == "pong", repr(note2))
 
                 # commands never carry the note; the pending survives them
-                staged({"day": "x", "pending": "0.5.75"})
+                staged({"day": "x", "pending": "9.9.9"})
                 svc.handle_update(mk_update(35, 111, 123456789, "/help"))
                 h_txt = fake.sends[-1][1]
                 check("service: commands do not carry the release note",
-                      "/version" in h_txt and "0.5.75" not in h_txt,
+                      "/version" in h_txt and "9.9.9" not in h_txt,
                       h_txt[:90])
                 st_h = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: an unconsumed pending survives a command",
-                      st_h.get("pending") == "0.5.75", str(st_h))
+                      st_h.get("pending") == "9.9.9", str(st_h))
 
                 # already-upgraded guard: pending == VERSION on disk -> cleared
                 ver = (Path(svc.repo) / "VERSION").read_text().strip()
