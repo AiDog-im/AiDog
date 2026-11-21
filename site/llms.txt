@@ -7,7 +7,7 @@ I'm AiDog is a single companion you run yourself — not a platform, not an assi
 ## Product
 
 - Permanently free: no pricing, no paid features, no usage metering.
-- Anonymous usage reporting: on by default, one report per day per install (model name, request counts and token totals — never prompts, files, paths or credentials), switchable off in Settings; the Models section chart renders the public aggregates.
+- Anonymous usage reporting: opt-in and OFF by default, one report per day per install (model name, request counts and token totals — never prompts, files, paths or credentials), switchable off in Settings; the Models section chart renders the public aggregates.
 - Local-first console: web UI on your own machine for chat, memory, skills, cron and channel configuration.
 - Platforms: Linux via `install.sh` (the reference path, WSL2 included), Windows through WSL2, macOS expected-but-untested, and iOS/Android through the Telegram bot plus this site — the console binds loopback-only on a machine you control, so remote access is an SSH tunnel, never a cloud console.
 - Constitution and curated memory: behavioural rules and long-term memory are versioned assets you control — bounded Markdown budgets, archive tiers, a user-profile layer, no vector store you cannot read.

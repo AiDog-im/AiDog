@@ -18596,6 +18596,179 @@ def test_rewind_fork() -> None:
             _os.environ["MYCORE_WD_CHAT"] = saved_wd
 
 
+def test_user_fixes() -> None:
+    """User-issue fixes (owner report 2026-11-11, the Feishu onboarding
+    issue digest):
+    P0-2 endpoint reachability — path candidate order (a base carrying its
+    own version segment is probed AS-IS first: zhipu is /api/paas/v4 and
+    the old code only ever tried /v1/models), ANY status line counts as
+    answered (401 without a key still means the server is alive — user
+    report #14), and the port fallback probes the REAL host (it used to
+    probe 127.0.0.1, so a remote base always read False). Offline: a local
+    HTTP server records the paths it receives."""
+    import threading as _th
+    import subprocess
+    from http.server import BaseHTTPRequestHandler as _BH, ThreadingHTTPServer as _THS
+    from web import server as ws
+
+    hits: list[str] = []
+
+    class _H(_BH):
+        def do_GET(self):  # noqa: N802
+            hits.append(self.path)
+            # zhipu shape: /models answers 401 WITHOUT a key (user #14)
+            if "boom" in self.path:
+                self.send_response(502)       # proxy-style upstream error
+            else:
+                self.send_response(401 if self.path.endswith("/models") else 404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def log_message(self, *a):  # noqa: D102
+            pass
+
+    srv = _THS(("127.0.0.1", 0), _H)
+    port = srv.server_address[1]
+    _th.Thread(target=srv.serve_forever, daemon=True).start()
+    try:
+        hits.clear()
+        ok = ws.endpoint_reachable(f"http://127.0.0.1:{port}/api/paas/v4",
+                                   timeout=1.0)
+        check("fix2: zhipu-shaped base (/api/paas/v4) is reachable",
+              ok is True, str(ok))
+        check("fix2: first candidate probes the base AS-IS (/v4/models)",
+              "/api/paas/v4/models" in hits, str(hits))
+        hits.clear()
+        ok = ws.endpoint_reachable(f"http://127.0.0.1:{port}", timeout=1.0)
+        check("fix2: a bare base falls through the candidate list (alive)",
+              ok is True and "/models" in hits, f"{ok} {hits}")
+        check("fix2: any 4xx status line counts as answered (401 != dead)",
+              ws._http_answered(
+                  f"http://127.0.0.1:{port}/api/paas/v4/models",
+                  timeout=1.0) is True)
+        check("fix2: 5xx is NOT answered (proxy/origin errors keep ready=false)",
+              ws._http_answered(
+                  f"http://127.0.0.1:{port}/boom",
+                  timeout=1.0) is False
+              and ws._http_answered("http://127.0.0.1:1/api/models",
+                                    timeout=0.3) is False)
+        check("fix2: connection-refused is NOT answered",
+              ws._http_answered("http://127.0.0.1:1/models",
+                                timeout=0.3) is False)
+        check("fix2: dead port -> unreachable",
+              ws.endpoint_reachable("http://127.0.0.1:1/",
+                                    timeout=0.3) is False)
+        check("fix2: garbage base -> unreachable, never raises",
+              ws.endpoint_reachable("not-a-url") is False
+              and ws.endpoint_reachable("") is False
+              and ws.endpoint_reachable(None) is False)
+        check("fix2: port_open probes the REAL host (default stays loopback)",
+              ws.port_open(port, "127.0.0.1") is True
+              and ws.port_open(1) is False)
+    finally:
+        srv.shutdown()
+
+    # ---- P0-1 channel-only startup (user report #4) --------------------
+    from mycore.service import (ALLOW_ENV, POLL_BOT_ENV, ChatService,
+                                channel_only_mode, main as svc_main)
+    saved_env = {k: os.environ.get(k) for k in
+                 (ALLOW_ENV, POLL_BOT_ENV, "AIDOG_PROFILE",
+                  "AIDOG_PROFILES_DIR")}
+    tmp = Path(tempfile.mkdtemp(prefix="c1_chanonly_"))
+    try:
+        os.environ.pop(ALLOW_ENV, None)
+        os.environ.pop(POLL_BOT_ENV, None)
+        os.environ["AIDOG_PROFILES_DIR"] = str(tmp)
+        os.environ["AIDOG_PROFILE"] = "co"
+        prof = tmp / "co"
+        prof.mkdir(parents=True, exist_ok=True)
+
+        def write_settings(channels: dict) -> None:
+            (prof / "settings.json").write_text(
+                json.dumps({"channels": channels}), encoding="utf-8")
+
+        write_settings({"feishu": {"enabled": True, "allow": []}})
+        check("fix1: no TG token + an enabled non-TG channel -> channel-only",
+              channel_only_mode() is True)
+        write_settings({"feishu": {"enabled": False},
+                        "discord": {"enabled": False}})
+        check("fix1: zero enabled channels -> fail-closed (not channel-only)",
+              channel_only_mode() is False)
+        os.environ[POLL_BOT_ENV] = "some-token"
+        check("fix1: a TG token anywhere -> normal mode",
+              channel_only_mode() is False)
+        os.environ.pop(POLL_BOT_ENV, None)
+        (prof / "settings.json").unlink()
+        check("fix1: missing settings -> fail-closed",
+              channel_only_mode() is False)
+        (prof / "settings.json").write_text("{broken", encoding="utf-8")
+        check("fix1: garbage settings -> fail-closed",
+              channel_only_mode() is False)
+        write_settings({"feishu": {"enabled": True}})
+
+        # main() --channel-only-check: the run_service --check seam
+        check("fix1: --channel-only-check exits 0 when qualified",
+              svc_main(["--channel-only-check"]) == 0)
+        os.environ[POLL_BOT_ENV] = "tok"
+        check("fix1: --channel-only-check exits 1 with a TG token",
+              svc_main(["--channel-only-check"]) == 1)
+        os.environ.pop(POLL_BOT_ENV, None)
+
+        # Gate 1: empty allowlist + channel-only -> starts past exit 3
+        saved_tok = os.environ.get(POLL_BOT_ENV)
+        os.environ.pop(POLL_BOT_ENV, None)
+        fake = FakeTgTransport()
+        with tempfile.TemporaryDirectory() as st:
+            svc = ChatService(Path(st), frozenset(), transport=fake,
+                              chat=lambda messages=None, tools=None, **kw:
+                              fake_response(text="pong"),
+                              channel_only=True)
+            check("fix1: ChatService accepts an empty allowlist in "
+                  "channel-only mode",
+                  svc.channel_only is True and svc.tg.has_token is False)
+            rc = svc.run(once=True)
+            log = (Path(st) / "service.log").read_text(encoding="utf-8")
+            check("fix1: channel-only run skips getUpdates entirely",
+                  fake.polls == 0 and "channel-only" in log
+                  and "LOOP_END" in log and rc == 0,
+                  f"polls={fake.polls} rc={rc} log={log[-200:]}")
+            check("fix1: no bot-menu sync without a token",
+                  fake.menus == [], str(fake.menus))
+        # the historical guard still holds for normal construction
+        try:
+            ChatService(Path(tempfile.mkdtemp()), frozenset())
+            check("fix1: normal mode still refuses an empty allowlist",
+                  False, "accepted")
+        except ValueError:
+            check("fix1: normal mode still refuses an empty allowlist", True)
+
+        # run_service.sh --check: channel-only ready / no-channel exit 3
+        env = dict(os.environ)
+        env.pop(ALLOW_ENV, None)
+        env.pop(POLL_BOT_ENV, None)
+        env["AIDOG_PROFILES_DIR"] = str(tmp)
+        env["AIDOG_PROFILE"] = "co"
+        r = subprocess.run(["bash", "deploy/run_service.sh", "--check"],
+                           cwd=str(REPO), env=env, capture_output=True,
+                           timeout=60)
+        check("fix1: run_service --check ready for a channel-only install",
+              r.returncode == 0, f"rc={r.returncode} {r.stderr[:120]}")
+        write_settings({"feishu": {"enabled": False}})
+        r = subprocess.run(["bash", "deploy/run_service.sh", "--check"],
+                           cwd=str(REPO), env=env, capture_output=True,
+                           timeout=60)
+        check("fix1: run_service --check keeps exit 3 with no channel",
+              r.returncode == 3, f"rc={r.returncode}")
+    finally:
+        for k, v in saved_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        import shutil
+        shutil.rmtree(tmp, ignore_errors=True)
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -18678,6 +18851,7 @@ def main() -> int:
         test_protected_writes,
         test_cron_controls,
         test_rewind_fork,
+        test_user_fixes,
     ]
     rows = []
     for fn in suites:

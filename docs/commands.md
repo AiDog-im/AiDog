@@ -90,7 +90,7 @@ bot itself.
   tail.
 - **Example:** `/evolution`
 
-### `/cron [add [message|prompt] <spec> :: <text> | del <id>]`
+### `/cron [add [message|prompt] <spec> :: <text> | del <id> | pause <id> | resume <id> | run <id> | catchup <id> on|off]`
 
 - **Purpose:** natural-language cron job registry (fail-closed until
   enabled). No argument lists the jobs (id · spec · kind · next fire · text
@@ -99,6 +99,13 @@ bot itself.
   `weekly mon 08:00` · `once YYYY-MM-DD HH:MM`
 - **Kinds:** `message` = the text is delivered as-is · `prompt` = one model
   turn runs and its result is delivered.
+- **Per-job controls (0.5.84, same grammar on every entry — the model
+  `cron` tool, the ops CLI and the console buttons): `pause <id>` /
+  `resume <id>` stop and restore automatic fires (a manual run still works);
+  `run <id>` executes it now through the scheduler's own fire path (the
+  schedule is never consumed early — an early run does not eat a future
+  one-shot); `catchup <id> on|off` sets the missed-window policy — `off`
+  skips a window stale beyond five minutes instead of firing it late.
 - **Delivery on fire:** the origin chat that created the job, else
   `MYCORE_WD_CHAT`, else log-only — never an error; the fire still runs and
   is recorded as `CRON_FIRE` in `service.log`.

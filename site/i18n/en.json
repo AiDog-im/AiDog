@@ -189,7 +189,7 @@
   "security.s2B": "Secrets live in one gitignored file (mode 0600). Output and logs report slot names and lengths — never values.",
   "security.s3T": "Writes need your token",
   "security.s3B": "Every console write operation requires your local access token.",
-  "security.s4T": "Anonymous reporting, on by default",
+  "security.s4T": "Anonymous reporting, opt-in (off by default)",
   "security.s4B": "Once a day the app sends model names and token totals to the public statistics — never prompts, files or credentials. Flip the switch in Settings and nothing leaves your machine.",
   "security.s5T": "en + zh interface, English source",
   "security.s5B": "The interface speaks English and Chinese; all source code is written in English.",
