@@ -200,6 +200,10 @@ Routes:
                                    -> car K B4: write/clear deploy/
                                    proxy.local (direct mode); honest
                                    restart_required — applies on restart
+  GET  /api/journey           -> car D: the adoption ladder (L0–L4) + the
+                                   five ritual moments, computed from the
+                                   owner's LOCAL state only — no new
+                                   telemetry, no credential ever echoed
   POST /api/extensions/intent    -> Bearer WEB_TOKEN; {text} -> car 4 call
                                    site 1: which Extensions tab owns the
                                    request (Jev choice over finance/home/
@@ -613,11 +617,16 @@ DEFAULT_SETTINGS: dict = {
     # DEFAULT_OBEDIENCE — empty lists = nothing injected into the stack
     # (the pre-car-7 system stack stays byte-for-byte).
     "obedience": dict(DEFAULT_OBEDIENCE),
+    # Car D (novice onboarding, owner feedback #10): the Extensions board is
+    # USER-curated — categories appear only when the owner adds them (a
+    # preset example is inert until adopted). Empty = the shipped Finance
+    # tab only; the console renders the composer without an absence check.
+    "extensions": {"categories": []},
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media", "web3", "mission",
-               "bridge", "guardrails", "obedience", "ledger")
+               "bridge", "guardrails", "obedience", "ledger", "extensions")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
@@ -636,6 +645,8 @@ MODEL_KEY_SLOTS = ("MODEL_API_KEY", "OPENAI_API_TOKEN",
                    "MODEL_UP_K1", "MODEL_UP_K2", "MODEL_UP_K3", "MODEL_UP_K4",
                    "MODEL_UP_K5", "MODEL_UP_K6", "MODEL_UP_K7", "MODEL_UP_K8")
 MODEL_KEY_SLOT_RE = re.compile(r"^(?:MODEL_API_KEY|OPENAI_API_TOKEN|MODEL_UP_K[1-8])$")
+# Car D (novice onboarding #10): the user-curated Extensions board bound.
+EXT_CATEGORIES_MAX = 8
 MYCORE_MODEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]{0,99}$")
 # mycore.models / mycore.budget join the schema (activation car §1.6): the
 # raw-file consumers (service._allowed_models / service._budget /
@@ -1988,6 +1999,54 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
         errors.extend(obs_errors)
         if clean_obs:
             clean["obedience"] = clean_obs
+    if "extensions" in patch:
+        # Car D (novice onboarding #10): the user-curated Extensions
+        # categories. Grammar: {categories: [{id: a-z0-9- slug, name: one
+        # line}]}, at most EXT_CATEGORIES_MAX, ids unique — a preset id is
+        # just an id (adoption is the owner's explicit console action).
+        ext = patch["extensions"]
+        if not isinstance(ext, dict):
+            errors.append("extensions must be an object")
+        else:
+            unknown = [k for k in ext if k != "categories"]
+            if unknown:
+                errors.append("unknown extensions key: "
+                              f"{str(unknown[0])[:40]}")
+            cats = ext.get("categories", [])
+            if not isinstance(cats, list):
+                errors.append("extensions.categories must be a list")
+            elif len(cats) > EXT_CATEGORIES_MAX:
+                errors.append("extensions.categories: at most "
+                              f"{EXT_CATEGORIES_MAX} categories")
+            else:
+                clean_cats: list[dict] = []
+                seen_ids: set = set()
+                bad = ""
+                for row in cats:
+                    if not isinstance(row, dict):
+                        bad = "every category must be an object"
+                        break
+                    cid = row.get("id")
+                    name = row.get("name")
+                    if not isinstance(cid, str) or not re.match(
+                            r"^[a-z0-9-]{1,32}$", cid):
+                        bad = ("category id must be a lowercase slug "
+                               "(a-z0-9-, max 32)")
+                        break
+                    if cid in seen_ids:
+                        bad = f"duplicate category id: {cid[:32]}"
+                        break
+                    if not isinstance(name, str) or not name.strip() \
+                            or len(name) > 40 or "\n" in name or "\r" in name:
+                        bad = ("category name must be one line of at most "
+                               "40 chars")
+                        break
+                    seen_ids.add(cid)
+                    clean_cats.append({"id": cid, "name": name.strip()})
+                if bad:
+                    errors.append(f"extensions: {bad}")
+                else:
+                    clean["extensions"] = {"categories": clean_cats}
     return clean, errors
 
 
@@ -5855,6 +5914,74 @@ def collect_recovery() -> dict:
     }
 
 
+def collect_journey() -> dict:
+    """GET /api/journey — the adoption ladder + the five ritual moments
+    (car D, the L0–L4 doctrine: each level adds ONE concept; a user parked
+    at ANY level is a success; the five moments are first-class objects
+    with local, credential-free acceptance facts). No new telemetry — the
+    moment-arrival METRICS instrumentation stays owner-gated per the
+    2026-10-31 ruling; this endpoint only computes the owner's own local
+    state so the console can celebrate it."""
+    from mycore import sniff as _sniff
+    # ---- stages: L0 always; L1 = a brain is pointed at (key slot filled
+    # or a non-default endpoint); L2 = a learned skill exists; L3 = TG
+    # configured; L4 = always available (the advanced surfaces never left).
+    base_default = "http://127.0.0.1:3460/v1"
+    base = str((load_settings().get("mycore") or {}).get("base_url")
+               or base_default)
+    l1 = bool(read_env_slot("MODEL_API_KEY")) or base != base_default
+    if not l1:
+        # The shipped default is a KEYLESS local gateway — one bounded
+        # loopback probe decides whether a brain actually answers there
+        # (2s cap, no key, only ever the default loopback URL in this
+        # branch). A keyless local brain IS a brain: never report L1
+        # pending while chat works.
+        try:
+            with urllib.request.urlopen(
+                    base.rstrip("/") + "/models", timeout=2) as _r:
+                l1 = _r.status == 200
+        except Exception:  # noqa: BLE001 — unreachable = honestly pending
+            l1 = False
+    try:
+        sdir = profile_paths.skills_dir(REPO)
+        learned = [p for p in sdir.iterdir()] if sdir.is_dir() else []
+    except OSError:
+        learned = []
+    l2 = len(learned) > 0
+    l3 = (bool(read_env_slot("MYCORE_TG_TOKEN"))
+          and bool(read_env_slot("AIDOG_TG_ALLOWED_USERS")))
+    nxt = ("l1" if not l1 else "l2" if not l2
+           else "l3" if not l3 else "l4")
+    # ---- moments: 1 first bark (a sniff finding landed); 2 first response
+    # (curated memory exists); 3 first job (a learned skill was adopted);
+    # 4 pocket (TG configured AND actually polling); 5 remembers you
+    # (memory exists AND a real chat session happened).
+    try:
+        m1 = len(_sniff.load_findings()) > 0
+    except Exception:  # noqa: BLE001 — absent store = moment not yet
+        m1 = False
+    try:
+        mem, _usr = profile_paths.memory_slots(REPO)
+        m2 = bool(mem.read_text(encoding="utf-8").strip())
+    except (OSError, ValueError, IndexError):
+        m2 = False
+    m3 = l2
+    m4 = bool(l3 and tg_polling())
+    m5 = False
+    try:
+        sdir2 = chat_sessions_dir()
+        m5 = m2 and any(p.is_file() and p.stat().st_size > 100
+                        for p in sdir2.glob("*.jsonl"))
+    except OSError:
+        m5 = False
+    return {
+        "stages": {"l0": True, "l1": l1, "l2": l2, "l3": l3, "l4": True},
+        "next": nxt,
+        "moments": {"bark": m1, "response": m2, "job": m3,
+                    "pocket": m4, "remembers": m5},
+    }
+
+
 def collect_setup() -> dict:
     """GET /api/setup — the activation checklist (loopback READ, no auth).
 
@@ -6129,6 +6256,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_console())
         if path == "/api/recovery":
             return self._json(collect_recovery())
+        if path == "/api/journey":
+            return self._json(collect_journey())
         if path == "/api/backup/export":
             return self._handle_backup_export()
         if path == "/api/backup/agent":

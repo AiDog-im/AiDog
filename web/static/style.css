@@ -1929,3 +1929,18 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
   flex: 1; min-width: 0; }
 .preset-btns .btn { font-size: 12px; padding: 4px 10px; }
 .preset-btns .save-state { flex: 1; min-width: 120px; }
+
+/* ------------------------ car D: journey ladder + curated board --------- */
+/* The L0–L4 chips: done = filled, next = outlined, pending = muted —
+   relationship stages, not a feature checklist. Motion is decoration only
+   (the global reduced-motion rule kills it). */
+.jrn-stages { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 4px; }
+.jrn-chip { display: inline-flex; align-items: center; gap: 5px;
+  padding: 3px 10px; border: 1px solid var(--line); border-radius: 999px;
+  font-size: 12.5px; color: var(--muted); background: var(--panel); }
+.jrn-chip.is-done { color: var(--ok); border-color: rgba(10, 122, 82, .45); }
+.jrn-chip.is-next { color: var(--blue-ink);
+  border-color: rgba(40, 146, 255, .55); font-weight: 600; }
+.ext-add { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.ext-presets { margin-top: 14px; padding-top: 12px;
+  border-top: 1px dashed var(--line); }

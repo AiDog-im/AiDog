@@ -1018,6 +1018,42 @@ def main() -> int:
                 break
         check("watchdog process is live again after the recycle", _up,
               str((_rec or {}).get("watchdog"))[:160])
+        # ---- car D (novice onboarding): the ladder + the curated board ----
+        s, jr = get("/api/journey")
+        check("GET /api/journey shape (stages + next + moments, no secrets)",
+              s == 200 and isinstance(jr, dict)
+              and isinstance(jr.get("stages"), dict)
+              and jr["stages"].get("l0") is True
+              and jr.get("next") in ("l1", "l2", "l3", "l4")
+              and isinstance(jr.get("moments"), dict)
+              and set(jr["moments"]) == {"bark", "response", "job",
+                                         "pocket", "remembers"}
+              and "Bearer" not in json.dumps(jr),
+              f"got {s} {str(jr)[:200]}")
+        _ext_orig = ((cur or {}).get("extensions") if isinstance(cur, dict)
+                     else None) or {"categories": []}
+        s, body = post("/api/settings", {"extensions": {"categories": [
+            {"id": "Bad ID", "name": "x"}]}}, token)
+        check("extensions bad slug -> 400", s == 400
+              and "slug" in str(body), f"got {s} {str(body)[:120]}")
+        s, body = post("/api/settings", {"extensions": {"categories": [
+            {"id": "a", "name": "x"}, {"id": "a", "name": "y"}]}}, token)
+        check("extensions duplicate id -> 400", s == 400
+              and "duplicate" in str(body), f"got {s} {str(body)[:120]}")
+        s, body = post("/api/settings", {"extensions": {"categories": [
+            {"id": f"c{i}", "name": str(i)} for i in range(9)]}}, token)
+        check("extensions over the max -> 400", s == 400
+              and "at most" in str(body), f"got {s} {str(body)[:120]}")
+        s, body = post("/api/settings", {"extensions": {"categories": [
+            {"id": "smoke-cat", "name": "Smoke Cat"}]}}, token)
+        check("extensions valid -> 200 + read-back",
+              s == 200 and body.get("settings", {}).get("extensions", {})
+              .get("categories") == [{"id": "smoke-cat",
+                                      "name": "Smoke Cat"}], f"got {s}")
+        # restore the owner's original categories (the console is live)
+        s, body = post("/api/settings", {"extensions": _ext_orig}, token)
+        check("extensions restored after the smoke leg", s == 200,
+              f"got {s} {str(body)[:120]}")
         # self-metered usage panel (works with zero rows — honest zeros)
         s, mine = get("/api/usage/self")
         check("GET /api/usage/self shape",

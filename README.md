@@ -17,7 +17,7 @@
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-2124%2F2124-brightgreen?style=flat-square" alt="core tests 2124/2124">
-  <img src="https://img.shields.io/badge/console_smoke-471%2F471-brightgreen?style=flat-square" alt="console smoke 471/471">
+  <img src="https://img.shields.io/badge/console_smoke-477%2F477-brightgreen?style=flat-square" alt="console smoke 477/477">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -192,7 +192,7 @@ Every release is cut only after these run green on a clean tree:
 | Suite | Result |
 |---|---|
 | `mycore` core suite | **2124/2124** |
-| Console smoke (live HTTP) | **471/471** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
+| Console smoke (live HTTP) | **477/477** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
 | Setup wizard | **99/99** |
