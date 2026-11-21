@@ -1215,7 +1215,7 @@
   "set.tierHint": "Guided shows the six cards most people touch; Advanced opens every card — nothing is ever removed, and Access and Backup stay visible in both.",
   "save.dirty": "unsaved changes",
   "sec.ledger": "Usage reporting",
-  "led.hint": "one anonymous report per day: model names, request counts and token totals. Never prompts, files, paths or credentials. Off = nothing leaves this machine.",
+  "led.hint": "one anonymous report per day: model names, request counts and token totals. Never prompts, files, paths or credentials. The install id is a random per-install pseudonym — not a device or account fingerprint; deleting its state file resets it. Off = nothing leaves this machine.",
   "led.toggle": "send the daily anonymous report",
   "led.lastReport": "Last report (UTC)",
   "led.installId": "Install id",

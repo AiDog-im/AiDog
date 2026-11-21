@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/badge/release-0.5.53-blue?style=flat-square" alt="release 0.5.53"></a>
+  <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="最新版本"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
   <img src="https://img.shields.io/badge/core_tests-2081%2F2081-brightgreen?style=flat-square" alt="核心测试 2081/2081">
   <img src="https://img.shields.io/badge/console_smoke-432%2F432-brightgreen?style=flat-square" alt="控制台冒烟 432/432">
@@ -35,7 +35,7 @@
 </p>
 
 > 🌍 **公开仓库**（2026-10-27 转公）——issues / discussions / PR 已开放；
-> 内部设计与研究历史保存在所有者私有库（`aidog-im/aidog-internal`）。
+> 内部设计与研究历史保存在所有者的私有存档中，不在此公开。
 > 🟢 **永久免费，绝无例外**：无付费档、无按量计费、绝无任何功能设付费墙。
 
 ## 关于
@@ -176,7 +176,7 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 | 套件 | 结果 |
 |---|---|
 | `mycore` 核心套件 | **2081/2081** |
-| 控制台冒烟（真实 HTTP） | **432/432** |
+| 控制台冒烟（真实 HTTP） | **432/432**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
 | 技能路由 | **30/30** |
 | 记忆持久化 | **58/58** |
 | 安装向导 | **99/99** |
@@ -212,7 +212,7 @@ E2E**——全部全绿。
 - **Web3** — [`exchanges`](docs/features/exchanges.md)（9 家场所，下单过人工审批闸）
 - **技能生态** — [`skills_ecosystem`](docs/features/skills_ecosystem.md)（官方目录页、公开技能仓、双闸审核、远端目录 API）
 
-设计史与第三方调研笔记保存在所有者私有库（`aidog-im/aidog-internal`），不随本仓导出。
+设计史与第三方调研笔记保存在所有者的私有存档中，不随本仓导出。
 
 ## 路线图
 

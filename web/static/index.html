@@ -1876,7 +1876,7 @@
              is the opt-out. Status reads GET /api/ledger, never guessed. -->
         <div class="card" data-setgroup="general" id="ledgerCard">
           <h2 data-i18n="sec.ledger">Usage reporting</h2>
-          <div class="stat-note" data-i18n="led.hint">one anonymous report per day: model names, request counts and token totals. Never prompts, files, paths or credentials. Off = nothing leaves this machine.</div>
+          <div class="stat-note" data-i18n="led.hint">one anonymous report per day: model names, request counts and token totals. Never prompts, files, paths or credentials. The install id is a random per-install pseudonym — not a device or account fingerprint; deleting its state file resets it. Off = nothing leaves this machine.</div>
           <div class="ctl-row">
             <label class="bk-box"><input type="checkbox" id="ledToggle"><span data-i18n="led.toggle">send the daily anonymous report</span></label>
           </div>
@@ -1953,10 +1953,10 @@
     <footer>
       <span class="brand-line" data-i18n="app.brandLine">Your loyal AI companion</span>
       <!-- X19: the console's documentation entry (the upstream /docs gap) —
-           one honest deep link to the public docs site. Car 8: language-
-           specific (owner ruling) — an English session must never render
-           Chinese here, and vice versa; both live in the locale packs. -->
-      <a class="foot-docs" id="footDocs" href="https://aidog.im/"
+           one honest deep link. Car A (owner feedback 2026-10-31): pointing
+           \"Docs\" back at the marketing homepage was a circle — it now
+           lands on the real documentation tree in the public repo. -->
+      <a class="foot-docs" id="footDocs" href="https://github.com/AiDog-im/AiDog/tree/main/docs"
          target="_blank" rel="noopener noreferrer" data-i18n="app.docs">Docs</a>
       <span id="footnote">loopback · free forever</span>
       <span id="ts">–</span>
