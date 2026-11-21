@@ -1681,6 +1681,8 @@
  "pipe.importOpen": "+ IMPORT LIST",
  "pipe.forum": "READ MY FORUM",
  "pipe.enabled": "Pipeline on",
+ "pipe.settingsSec": "Acquisition pipeline",
+ "pipe.settingsHint": "off by default — the left-nav entry appears only while this is on; every send still waits for your approval",
  "pipe.auto": "Read my forum automatically",
  "pipe.interval": "Interval (minutes)",
  "pipe.cap": "Daily send cap",

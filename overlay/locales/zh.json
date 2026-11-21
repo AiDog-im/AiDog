@@ -1682,6 +1682,8 @@
  "pipe.importOpen": "+ 导入名单",
  "pipe.forum": "读我的论坛",
  "pipe.enabled": "流水线开启",
+ "pipe.settingsSec": "获客流水线",
+ "pipe.settingsHint": "默认关闭 —— 只有开启后左侧才出现入口；且每一封发送仍然等你点头",
  "pipe.auto": "自动读我的论坛",
  "pipe.interval": "间隔（分钟）",
  "pipe.cap": "每日发送上限",
