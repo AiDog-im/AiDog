@@ -1993,3 +1993,226 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 .gal-tag.installed { color: var(--blue-ink); border-color: var(--blue-dim);
   background: var(--blue-wash); }
 .gal-tag.learned { color: var(--violet); border-color: rgba(101, 88, 214, .55); }
+
+/* ---------------------------------------- relayout car (A version) ------ */
+/* page header in the topbar + brand moved to the sidebar top (owner-approved
+   mockup A, 2026-11-08). The in-view .view-head stays as the data source —
+   setView() mirrors it into #pageTitle/#pageSub. */
+.page-head { display: flex; flex-direction: column; min-width: 0; }
+.page-head h1 { font-size: 24px; line-height: 1.15; letter-spacing: .06em;
+  font-weight: 700; color: var(--navy); }
+.page-head .sub { color: var(--muted); font-size: 12.5px; letter-spacing: .05em; }
+.sidebar .brand { padding-bottom: 12px; border-bottom: 1px solid var(--line); }
+.sidebar .brand-text { flex-direction: column; align-items: flex-start;
+  gap: 2px; }
+.sidebar .brand h1 { font-size: 16px; letter-spacing: .18em; }
+.sidebar .brand .sub { font-size: 11px; letter-spacing: .1em; }
+@media (max-width: 1000px) {
+  .sidebar .brand { padding-bottom: 0; border-bottom: 0; }
+  .sidebar .brand-text { flex-direction: row; align-items: baseline; gap: 8px; }
+  .sidebar .brand .sub { display: none; }
+}
+@media (max-width: 760px) {
+  .page-head h1 { font-size: 19px; }
+  .page-head .sub { display: none; }
+}
+/* one title locus: the in-view titles stay in the DOM (deep links, i18n
+   mirrors and test legs read them) but the topbar owns the visible H1.
+   Only h2+.view-sub hide — #ovState (the ONE status sentence) lives in the
+   same wrapper and must stay visible. */
+.view-titles > h2, .view-titles > .view-sub { display: none; }
+
+/* ------------------------------------------ relayout car P2 (0.5.81) -----
+ * Settings two-pane (owner-approved mockup A, 2026-11-08).
+ * .set-wrap is a plain block below 1200px — byte-for-byte today's stack.
+ * At >=1200px it becomes a 250px section rail + content pane:
+ *   rail  = #setTools, restacked column-wise (search on top, then the group
+ *           list with a live card count + state dot, then the tier switch);
+ *   pane  = #setTierHint over #setGrid (one card wide, as the mockup).
+ * Guided hides .set-chips (unchanged rule), so .set-wrap.is-guided drops the
+ * grid back to one column and the rail becomes today's horizontal toolbar.
+ * Mechanism untouched: same ids, same data-setfilter / data-setgroup filter,
+ * same tier persistence — pure geometry + a computed count (zero new keys). */
+
+/* --- section rows: state dot + label + live count ---------------------- */
+.set-chip { display: inline-flex; align-items: center; gap: 7px; }
+.set-chip-dot { flex: none; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--blue); }
+.set-chip.is-empty .set-chip-dot { background: var(--rule); }
+.set-chip.is-active .set-chip-dot { background: #fff; }
+.set-chip.is-active.is-empty .set-chip-dot { background: rgba(255, 255, 255, .4); }
+.set-chip-l { flex: 1 1 auto; min-width: 0; overflow-wrap: break-word; }
+.set-chip-n { flex: none; font-variant-numeric: tabular-nums; }
+/* #setTierHint now lives inside .set-tools: full-width so it keeps its own
+   line under the toolbar at every width below the two-pane breakpoint, and
+   order 4 so it still trails the tier switch (which carries order 3 at
+   <=640px) exactly where the old block-level note used to sit. */
+.set-tools > .set-tier-hint { flex: 1 1 100%; order: 4; }
+
+@media (min-width: 1200px) {
+  .set-wrap:not(.is-guided) {
+    display: grid;
+    grid-template-columns: 250px minmax(0, 1fr);
+    gap: 0 24px;
+    align-items: start;
+  }
+  .set-wrap:not(.is-guided) > .set-tools {
+    grid-column: 1;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+    margin: 0;
+    padding: 14px;
+    background: var(--panel);
+    border: 1px solid var(--line-solid);
+    border-radius: 12px;
+    box-shadow: var(--shadow);
+    position: sticky;
+    top: calc(var(--topbar-h, 56px) + 16px);
+  }
+  /* search rides on top of the rail (mockup) — flex-basis was a width in the
+     old row, and a height here, so it has to be reset explicitly */
+  .set-wrap:not(.is-guided) > .set-tools .set-search {
+    order: -1;
+    flex: 0 0 auto;
+    width: 100%;
+    max-width: none;
+    min-height: 36px;
+  }
+  .set-wrap:not(.is-guided) > .set-tools .set-chips {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 6px;
+  }
+  .set-wrap:not(.is-guided) > .set-tools .set-chip {
+    width: 100%;
+    text-align: left;
+    min-height: 36px;
+    padding: 9px;
+    gap: 5px;
+    letter-spacing: 0;
+    white-space: normal;
+  }
+  .set-wrap:not(.is-guided) > .set-tools .set-tier { align-self: stretch; }
+  .set-wrap:not(.is-guided) > .set-tools .set-tier-btn {
+    flex: 1 1 auto; text-align: center;
+  }
+  /* the note stays in the rail, under the tier switch it explains */
+  .set-wrap:not(.is-guided) > .set-tools .set-tier-hint {
+    flex: 0 0 auto;
+    margin-top: 0;
+  }
+  .set-wrap:not(.is-guided) > .set-grid { grid-column: 2;
+    grid-template-columns: minmax(0, 1fr); }
+}
+
+/* ------------------------------------------ relayout car P3 (0.5.81) -----
+ * KPI context line + sparkline (audit item 7 — "a number without context
+ * cannot be sanity-checked"). The context is a number or an SVG shape, never
+ * a sentence, so it carries no locale key (owner direction 2026-11-09).
+ * `.c` is the third line inside an existing .stat-grid tile — the tile stays
+ * ONE direct child, so every `#usageStats > div` / `#selfStats > div` count
+ * leg keeps its shape. */
+.stat-grid .c { color: var(--muted); font-size: 11px; letter-spacing: .04em;
+  margin-top: 2px; font-variant-numeric: tabular-nums; }
+.stat-grid .spark { display: block; margin-top: 3px; color: var(--blue); }
+
+/* ------------------------------------------ relayout car P3 (0.5.81) -----
+ * Audit items 8/20 — row & chip collisions at the phone breakpoint (design
+ * §6, row-to-card). The Rate caps row is a long label plus two 120px
+ * min-width numerics: ~510px of content in a 324px box pushed .set-grid to
+ * 445px and the whole document to 459px — horizontal scroll on a 390px
+ * phone. flex-wrap lets a row that cannot fit break instead of pushing the
+ * page sideways; rows that DO fit keep today's single-line shape. */
+@media (max-width: 760px) {
+  .ctl-row { flex-wrap: wrap; }
+  .ctl-row > label { min-width: 0; overflow-wrap: break-word; }
+  /* #modelCard pins both rate numerics at 210px (console-fix car), so the
+     .ep-rate pair is 426px wide inside a 324px box — let the pair break
+     onto its own lines instead of dragging .set-grid sideways. */
+  .ctl-row > * { min-width: 0; }
+  .ep-rate { flex-wrap: wrap; }
+}
+/* audit item 8/20, second leg: the disabled-tools grid auto-fills 150px
+   cells, but a checkbox label is one unbreakable mono identifier
+   ("exchange_execute_order" = 179px) — it painted straight over the next
+   column on a 390px phone. Break anywhere inside the identifier. */
+@media (max-width: 760px) {
+  #toolsOffList label { flex-wrap: wrap; overflow-wrap: anywhere; }
+}
+/* audit item 8/20, third leg: the preset row's "OpenAI-compatible" button is
+   173px and will not shrink, so label + button pair (333px) still bled 9px
+   past a 324px box. Give the preset button strip its own full-width line. */
+@media (max-width: 760px) {
+  .preset-row > label { flex-basis: 100%; }
+}
+/* audit item 8/20, fourth leg (P4 regression): the chip-family restyle gave
+   .auth-stamp a 7px dot + 10px padding (+17px), and #authCard h2 is a flex
+   row (.card h2) whose nowrap stamp cannot shrink — droplet + title + stamp
+   measured 361px in a 324px box, pushing the document to 394px on a 390px
+   phone (en). Wrap instead of overflow: the stamp drops to its own line only
+   when the pair no longer fits; wider layouts are byte-identical. */
+@media (max-width: 760px) {
+  .card h2 { flex-wrap: wrap; }
+}
+
+/* ------------------------------------------ relayout car P3 (0.5.81) -----
+ * ONE status vocabulary (design §3, owner scope ruling 2026-11-09: chip
+ * family only — text statuses such as "saved ✓" keep their green).
+ * Six families (.chip .chat-badge .gal-tag .evo-badge .sniff-badge
+ * .auth-stamp) previously spoke three dialects: green ok, blue info and
+ * amber/coral warn in three different pill geometries. They now share one
+ * shape — inline-flex, 24px pill, a 7px leading dot (dot + text, never
+ * colour alone) — and one four-state semantic set:
+ *   ok   dot #2892ff · ink #1c519a   warn dot #e98667 · ink #a05a04
+ *   err  dot #d02a44 · ink #d02a44   off  dot #a5b7ca · ink #5b7085
+ * The dot carries the pure palette hue; the ink is the AA-safe tone of the
+ * same hue (the audit must stay at 0 fail). Class names are untouched —
+ * every test pins those. text-transform stays per family (label copy, not
+ * status semantics). */
+.chip, .chat-badge, .gal-tag, .evo-badge, .sniff-badge, .auth-stamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 24px;
+  padding: 2px 10px;
+  border-radius: 999px;
+  line-height: 1.2;
+  vertical-align: middle;
+  --st-dot: var(--rule);
+}
+.chip::before, .chat-badge::before, .gal-tag::before,
+.evo-badge::before, .sniff-badge::before, .auth-stamp::before {
+  content: "";
+  flex: none;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--st-dot);
+}
+/* --- the four states --------------------------------------------------- */
+.st-ok, .chat-badge.live, .gal-tag.installed, .gal-tag.body,
+.evo-badge.on, .sniff-badge.reachable, .sniff-badge.sev-info,
+.chip.adv-info {
+  --st-dot: var(--blue);
+  color: var(--blue-ink);
+}
+.st-warn, .chip.adv-warn, .sniff-badge.stale, .sniff-badge.sev-warn,
+.auth-stamp {
+  --st-dot: var(--coral);
+  color: var(--amber);
+}
+.st-err, .chip.adv-urgent, .sniff-badge.error, .sniff-badge.sev-high {
+  --st-dot: var(--red);
+  color: var(--red);
+}
+.st-off, .evo-badge.off {
+  --st-dot: var(--rule);
+  color: var(--muted);
+}
+/* provenance tags are not statuses — they keep their identity hue, but
+   they gain the same pill + dot geometry */
+.gal-tag.external, .gal-tag.learned {
+  --st-dot: var(--violet);
+  color: var(--violet);
+}
