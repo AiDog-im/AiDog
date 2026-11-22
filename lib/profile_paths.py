@@ -122,6 +122,13 @@ def learned_path(repo: Path = REPO) -> Path:
     return body_root(repo) / "memory" / "EVOLUTION_learned.md"
 
 
+def capability_path(repo: Path = REPO) -> Path:
+    """CAPABILITY_MAP.md under the active body root (car C, agent
+    foundation) — the curated product-surface map injected into the system
+    stack when present."""
+    return body_root(repo) / "agent" / "CAPABILITY_MAP.md"
+
+
 def skills_dir(repo: Path = REPO) -> Path:
     """LEARNED skills root (<body>/skills). Shipped skills stay shared in
     <repo>/overlay/skills — skill_route roots include both."""

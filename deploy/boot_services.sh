@@ -148,7 +148,41 @@ start_svc() {
 }
 
 start_mwd() {
+  local p pid="" comm etimes cfg_age i
   if session_exists aidog_mwd || [ -n "$(our_pgrep 'python3 -m mycore\.watchdog')" ]; then
+    # Config-snapshot guard (2026-11-01 incident): the watchdog reads its
+    # config ONCE at start, so a config edited while the session lives
+    # keeps the process probing the OLD targets forever — observed with the
+    # 8790 -> 19167 port move: 79 blind console restarts while the console
+    # was healthy on the new port (panel: permanent "watchdog FAULT").
+    # Config younger than the python process = stale snapshot -> recycle.
+    for p in $(our_pgrep 'python3 -m mycore\.watchdog'); do
+      comm=$(ps -o comm= -p "$p" 2>/dev/null | tr -d ' ')
+      case "$comm" in python*) pid=$p; break ;; esac
+    done
+    if [ -n "$pid" ]; then
+      etimes=$(ps -o etimes= -p "$pid" 2>/dev/null | tr -d ' ')
+      cfg_age=$(( $(date +%s) - $(stat -c %Y "$REPO/deploy/watchdog.mycore.local" 2>/dev/null || echo 0) ))
+      if [ -n "$etimes" ] && [ "$cfg_age" -lt "$etimes" ]; then
+        log "aidog_mwd: config newer than the process (stale snapshot) — recycling"
+        tmux kill-session -t aidog_mwd 2>/dev/null
+        # kill ONLY python processes: a bare pattern match would also reap
+        # an operator's `grep … mycore.watchdog` (self-match, same class as
+        # the tmux-server exclusion above)
+        for p in $(our_pgrep 'python3 -m mycore\.watchdog'); do
+          comm=$(ps -o comm= -p "$p" 2>/dev/null | tr -d ' ')
+          case "$comm" in python*) kill "$p" 2>/dev/null ;; esac
+        done
+        i=0
+        while [ "$i" -lt 5 ] && [ -n "$(our_pgrep 'python3 -m mycore\.watchdog')" ]; do
+          sleep 1; i=$((i+1))
+        done
+        mkdir -p "$REPO/data"
+        tmux new -d -s aidog_mwd "cd $REPO && $PROXY_ENV python3 -m mycore.watchdog --config deploy/watchdog.mycore.local --execute > data/mycore_watchdog.log 2>&1"
+        log "aidog_mwd: restarted with the fresh config (--execute per owner authorization)"
+        return 0
+      fi
+    fi
     log "aidog_mwd: already running"
   else
     mkdir -p "$REPO/data"

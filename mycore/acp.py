@@ -43,7 +43,8 @@ from pathlib import Path
 from typing import Callable, Iterable
 
 from . import checkpoint, cli
-from .assembly import build_system_stack, resolve_context_dirs
+from .assembly import (build_system_stack, resolve_capability_path,
+                         resolve_context_dirs)
 from .loop import run_turn
 from .model import ChatClient
 from .tools import ToolError, build_registry, resolve_disabled_tools, resolve_inside
@@ -423,7 +424,8 @@ class AcpServer:
         t0 = time.monotonic()
         stop = "internal_error"
         try:
-            stack = build_system_stack(context_dirs=resolve_context_dirs())
+            stack = build_system_stack(context_dirs=resolve_context_dirs(),
+                                    capability_path=resolve_capability_path())
             history = [m for m in session.messages if m.get("role") != "system"]
             messages = stack + history
             messages.append({"role": "user", "content": text})

@@ -1430,6 +1430,22 @@
               <option value="high" data-i18n="ctl.effortHigh">high</option>
             </select>
           </div>
+          <!-- car C (agent foundation): owner-configurable sub-agent bounds
+               (live — mycore.subagent reads them per delegate call). The
+               shipped safety range IS the product promise: never unbounded
+               parallelism, never an unbounded sub-turn. -->
+          <div class="ctl-row">
+            <label data-i18n="ctl.subPar" data-i18n-t="ctl.subParT"
+                   title="mycore.subagent.max_parallel — parallel sub-agent slots per delegate call (1–5)">Sub-agent parallel tasks (1–5)</label>
+            <input type="number" id="subParInput" min="1" max="5" step="1"
+                   placeholder="3 = default" data-i18n-ph="ctl.subDefPh">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="ctl.subIters" data-i18n-t="ctl.subItersT"
+                   title="mycore.subagent.max_iters — max model turns per sub-agent (1–25)">Sub-agent max iterations (1–25)</label>
+            <input type="number" id="subItersInput" min="1" max="25" step="1"
+                   placeholder="12 = default" data-i18n-ph="ctl.subDefPh2">
+          </div>
           <div class="ctl-row">
             <label data-i18n="ctl.mycContextDirs">Context dirs (":" separated)</label>
             <input type="text" id="mycContextDirs" maxlength="256" autocomplete="off"
@@ -1721,6 +1737,23 @@
           <h2 data-i18n="orch.sec">Orchestration</h2>
           <div id="orchList"></div>
           <div class="stat-note" data-i18n="orch.hint">read-only summary — each row deep-links to its existing control (no second switchboard)</div>
+        </div>
+
+        <!-- car C (agent foundation): the owner's approval surface for the
+             assistant's settings proposals. The `settings` tool never
+             writes: every change waits here, dry-validated by the SAME
+             validator a hand-typed save runs; APPROVE applies it through
+             the same write core as SAVE. -->
+        <div class="card" data-setgroup="services" id="agentPlanCard">
+          <h2 data-i18n="aplan.sec">Agent plans</h2>
+          <div class="stat-note" data-i18n="aplan.hint">the assistant proposes settings changes with its settings tool — nothing is written until you approve it here</div>
+          <div id="agentPlanList"></div>
+          <div class="stat-note" id="agentPlanEmpty" data-i18n="aplan.empty">no proposals</div>
+          <div class="ctl-actions">
+            <button class="btn" id="agentPlanRefresh" type="button"
+                    data-i18n="aplan.refresh">REFRESH</button>
+            <span class="save-state" id="agentPlanMsg" role="status"></span>
+          </div>
         </div>
 
         <div class="card" data-setgroup="creds">

@@ -847,6 +847,102 @@ def main() -> int:
                        token)
         check("POST model_pricing valid -> 200", s == 200,
               f"got {s} {body}")
+        # ---- car C (agent foundation): the owner-approval plan surface ----
+        # The tool side (propose) lives in the core suite; this block drives
+        # the HTTP approval face against the live plan store, then cleans up
+        # every plan it filed (plans are proposals, but the audit face stays
+        # tidy after the smoke).
+        _plans_file = (Path(__file__).resolve().parent.parent / "data" /
+                       "mycore_service" / "agent_settings_plans.json")
+
+        def _write_plan(doc: dict) -> None:
+            _plans_file.parent.mkdir(parents=True, exist_ok=True)
+            _plans_file.write_text(json.dumps([doc]), encoding="utf-8")
+
+        s, body = get("/api/agent/settings-plans")
+        check("GET /api/agent/settings-plans shape",
+              s == 200 and isinstance(body, dict)
+              and isinstance(body.get("plans"), list), f"got {s} {body}")
+        # original refresh value — restored at the end of this block
+        s0, cur = get("/api/settings")
+        orig_refresh = ((cur or {}).get("refresh_sec") if isinstance(cur, dict)
+                        else None) or 10
+        _write_plan({"id": "p-smoke-valid", "ts": 1.0, "status": "pending",
+                     "patch": {"refresh_sec": (orig_refresh % 300) + 5}})
+        s, body = get("/api/agent/settings-plans")
+        row = next((r for r in body.get("plans", [])
+                    if r.get("id") == "p-smoke-valid"), {}) if s == 200 else {}
+        check("plan GET shows the pending row + dry-valid verdict",
+              s == 200 and row.get("status") == "pending"
+              and row.get("valid") is True and row.get("errors") == [],
+              str(row)[:200])
+        s, body = post("/api/agent/settings-plans/p-smoke-valid",
+                       {"action": "approve"}, None)
+        check("plan approve without token -> 401", s == 401, f"got {s}")
+        s, body = post("/api/agent/settings-plans/p-smoke-valid",
+                       {"action": "approve"}, token)
+        check("plan approve -> 200 changed", s == 200
+              and body.get("ok") is True and body.get("changed") is True,
+              f"got {s} {body}")
+        s, cur = get("/api/settings")
+        check("approved plan applied (read-back reflects the patch)",
+              s == 200 and cur.get("refresh_sec")
+              == (orig_refresh % 300) + 5,
+              f"refresh_sec={cur.get('refresh_sec') if isinstance(cur, dict) else '?'}")
+        s, body = post("/api/agent/settings-plans/p-smoke-valid",
+                       {"action": "approve"}, token)
+        check("second decide on a closed plan -> 409", s == 409,
+              f"got {s} {body}")
+        # an invalid plan: the dry verdict says so, approve refuses, and the
+        # plan STAYS pending until the owner rejects it
+        _write_plan({"id": "p-smoke-invalid", "ts": 2.0, "status": "pending",
+                     "patch": {"refresh_sec": 999}})
+        s, body = get("/api/agent/settings-plans")
+        row = next((r for r in body.get("plans", [])
+                    if r.get("id") == "p-smoke-invalid"), {}) if s == 200 else {}
+        check("invalid plan dry-verdict says invalid with reasons",
+              s == 200 and row.get("valid") is False
+              and bool(row.get("errors")), str(row)[:200])
+        s, body = post("/api/agent/settings-plans/p-smoke-invalid",
+                       {"action": "approve"}, token)
+        check("invalid plan approve -> 400 with the validator details",
+              s == 400 and "details" in body, f"got {s} {body}")
+        s, body = get("/api/agent/settings-plans")
+        row = next((r for r in body.get("plans", [])
+                    if r.get("id") == "p-smoke-invalid"), {}) if s == 200 else {}
+        check("refused plan stays pending (owner can still reject)",
+              row.get("status") == "pending", str(row)[:160])
+        s, body = post("/api/agent/settings-plans/p-smoke-invalid",
+                       {"action": "reject"}, token)
+        check("plan reject -> 200", s == 200 and body.get("status") == "rejected",
+              f"got {s} {body}")
+        s, body = post("/api/agent/settings-plans/p-nope",
+                       {"action": "approve"}, token)
+        check("unknown plan id -> 404", s == 404, f"got {s}")
+        s, body = post("/api/agent/settings-plans/p-smoke-invalid",
+                       {"action": "bogus"}, token)
+        check("invalid plan action -> 400", s == 400, f"got {s}")
+        # restore the original value + drop the smoke plans
+        post("/api/settings", {"refresh_sec": orig_refresh}, token)
+        try:
+            _plans_file.unlink()
+        except OSError:
+            pass
+        # ---- car C: mycore.subagent bounds ride the same validator ----
+        s, body = post("/api/settings", {"mycore": {"subagent": {
+            "max_parallel": 9}}}, token)
+        check("POST subagent.max_parallel out of range -> 400",
+              s == 400 and "1..5" in str(body), f"got {s} {body}")
+        s, body = post("/api/settings", {"mycore": {"subagent": {
+            "max_iters": True}}}, token)
+        check("POST subagent.max_iters bool -> 400",
+              s == 400 and "1..25" in str(body), f"got {s} {body}")
+        s, body = post("/api/settings", {"mycore": {"subagent": {
+            "max_parallel": 3, "max_iters": 12}}}, token)
+        check("POST subagent valid -> 200 + read-back",
+              s == 200 and isinstance(body, dict)
+              and body.get("settings", {}).get("mycore", {}).get("subagent")
+              == {"max_parallel": 3, "max_iters": 12}, f"got {s}")
         # self-metered usage panel (works with zero rows — honest zeros)
         s, mine = get("/api/usage/self")
         check("GET /api/usage/self shape",
@@ -2723,9 +2819,9 @@ def main() -> int:
     _kt = (caps2.get("mycore") or {}).get("known_tools") \
         if isinstance(caps2, dict) else None
     from mycore.tools import KNOWN_TOOL_NAMES as _KTN
-    check("GET capabilities mycore.known_tools == 27 sorted names",
-          isinstance(_kt, list) and len(_kt) == 27
-          and _kt == sorted(_KTN) and len(set(_kt)) == 27,
+    check("GET capabilities mycore.known_tools == 28 sorted names",
+          isinstance(_kt, list) and len(_kt) == 28
+          and _kt == sorted(_KTN) and len(set(_kt)) == 28,
           f"n={len(_kt) if isinstance(_kt, list) else _kt}")
 
     # --- 1.4 GET /api/cron: read-only sanitized job list ---

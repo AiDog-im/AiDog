@@ -3288,7 +3288,21 @@ async function loadSettings() {
     setField("wakePhrases", Array.isArray(med.wake_phrases)
       ? med.wake_phrases.join(", ") : "");
     document.getElementById("alertSelect").value = settings.alert_preview || "off";
-    document.getElementById("refreshSelect").value = String(settings.refresh_sec || 10);
+    // car C: refresh_sec is a free int (5..300) but this control is a fixed
+    // <select> — a value applied OUTSIDE the form (an approved agent plan)
+    // must stay REPRESENTABLE, else the repaint blanks the select and the
+    // next manual save ships null. Add the missing option; never blank it.
+    const rsSel = document.getElementById("refreshSelect");
+    if (rsSel) {
+      const rsVal = String(settings.refresh_sec || 10);
+      if (![].some.call(rsSel.options, o => o.value === rsVal)) {
+        const opt = document.createElement("option");
+        opt.value = rsVal;
+        opt.textContent = rsVal + "s";
+        rsSel.appendChild(opt);
+      }
+      rsSel.value = rsVal;
+    }
     const stored = localStorage.getItem(LANG_KEY);
     // An explicit ?lang= view override wins over the saved setting for this
     // page view — otherwise the settings fetch races loadLang() and can flip
@@ -4817,6 +4831,15 @@ function mycoreExtraPayload() {
     out.context_dirs = g("mycContextDirs").trim();
     out.mcp = g("mycMcp").trim();
     out.shell = g("mycShell").trim();
+    // car C: sub-agent bounds — an empty box omits the key (partial patch
+    // deep-merges); a typed integer is sent as-is and the SERVER's range
+    // grammar refuses an out-of-range value verbatim.
+    const subPar = parseInt(g("subParInput"), 10);
+    const subIters = parseInt(g("subItersInput"), 10);
+    const subBlock = {};
+    if (Number.isInteger(subPar)) subBlock.max_parallel = subPar;
+    if (Number.isInteger(subIters)) subBlock.max_iters = subIters;
+    if (Object.keys(subBlock).length) out.subagent = subBlock;
     // v0.5.55 dual-track: the endpoint manager and the one-line spec are two
     // representations of the SAME chain — the server refuses both non-empty
     // in one patch, so the payload always pairs a non-empty endpoints array
@@ -4950,6 +4973,125 @@ function paintLedgerStatus() {
     status.textContent = doc.enabled
       ? t("led.on", "reporting ON — one anonymous report per day")
       : t("led.off", "reporting OFF — nothing leaves this machine");
+  }
+}
+
+/* car C (agent foundation): the owner's approval surface for the
+   assistant's settings proposals. Data comes from GET
+   /api/agent/settings-plans — every pending row carries the console's own
+   DRY validation verdict (the same validator a hand-typed save runs);
+   APPROVE re-validates server-side and applies through the same write
+   core. Fail-soft: an unreachable store keeps the last paint. */
+let agentPlanData = null;
+
+function aplanAge(ts) {
+  const m = Math.max(0, Math.round((Date.now() / 1000 - Number(ts || 0)) / 60));
+  return m < 60
+    ? t("aplan.agoMin", "{v}m ago").replace("{v}", String(m))
+    : t("aplan.agoHour", "{v}h ago").replace("{v}", String(Math.round(m / 60)));
+}
+
+function renderAgentPlans() {
+  const list = document.getElementById("agentPlanList");
+  const empty = document.getElementById("agentPlanEmpty");
+  if (!list) return;
+  const rows = (Array.isArray(agentPlanData) ? agentPlanData : []).slice(0, 12);
+  if (empty) empty.hidden = rows.length > 0;
+  list.innerHTML = rows.map(r => {
+    const st = String(r.status || "pending");
+    const id = String(r.id || "");
+    const keys = (Array.isArray(r.keys) ? r.keys : [])
+      .map(k => `<span class="chip">${escapeHtml(String(k))}</span>`).join(" ");
+    const age = `<span class="stat-note" style="margin:0;display:inline;">` +
+      `${escapeHtml(aplanAge(r.ts))}</span>`;
+    if (st === "pending") {
+      const okv = r.valid === false
+        ? `<span class="chip" style="color:var(--red);">` +
+          `${escapeHtml(t("aplan.invalid", "invalid"))}</span>`
+        : `<span class="chip" style="color:var(--ok);">` +
+          `${escapeHtml(t("aplan.valid", "valid"))}</span>`;
+      const errs = (Array.isArray(r.errors) ? r.errors : [])
+        .map(e => escapeHtml(String(e))).join("; ");
+      return `<div class="plan-row" data-plan-row="${escapeHtml(id)}">` +
+        `<div class="ctl-row" style="margin-bottom:4px;align-items:center;">` +
+        `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+        `${keys || escapeHtml(id)} ${age}</label>${okv}` +
+        `<button class="btn" type="button" data-plan-decide="approve" ` +
+        `data-plan-id="${escapeHtml(id)}" data-i18n="aplan.approve">` +
+        `APPROVE</button>` +
+        `<button class="btn" type="button" data-plan-decide="reject" ` +
+        `data-plan-id="${escapeHtml(id)}" data-i18n="aplan.reject">` +
+        `REJECT</button></div>` +
+        (errs ? `<div class="stat-note" style="margin-top:0;` +
+          `color:var(--red);">${errs}</div>` : "") + `</div>`;
+    }
+    const word = st === "approved" ? t("aplan.stApproved", "approved")
+      : st === "rejected" ? t("aplan.stRejected", "rejected")
+      : st === "withdrawn" ? t("aplan.stWithdrawn", "withdrawn") : st;
+    return `<div class="plan-row" data-plan-row="${escapeHtml(id)}">` +
+      `<div class="ctl-row" style="margin-bottom:0;">` +
+      `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
+      `${keys || escapeHtml(id)} ${age}</label>` +
+      `<span class="stat-note" style="margin:0;">${escapeHtml(word)}</span>` +
+      `</div></div>`;
+  }).join("");
+}
+
+async function refreshAgentPlans() {
+  try {
+    const doc = await fetch("/api/agent/settings-plans").then(r => r.json());
+    agentPlanData = (doc && Array.isArray(doc.plans)) ? doc.plans : [];
+  } catch (e) { /* keep the last paint */ }
+  renderAgentPlans();
+}
+
+async function decideAgentPlan(id, action) {
+  const msg = document.getElementById("agentPlanMsg");
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = t("save.needToken", "token required"); }
+    return;
+  }
+  if (msg) { msg.className = "save-state"; msg.textContent = "…"; }
+  try {
+    const res = await fetch("/api/agent/settings-plans/"
+      + encodeURIComponent(id), {
+        method: "POST",
+        headers: { "Content-Type": "application/json",
+                   "Authorization": "Bearer " + token },
+        body: JSON.stringify({ action }) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = t("save.badToken", "401 · unauthorized"); }
+      return;
+    }
+    if (!res.ok) {
+      const det = ((body && (body.details || [body.error])) || ["error"])
+        .join("; ");
+      if (msg) { msg.className = "save-state err";
+        msg.textContent = det.slice(0, 160); }
+      refreshAgentPlans();          // the row re-shows its honest verdict
+      return;
+    }
+    if (msg) {
+      msg.className = "save-state";
+      msg.textContent = "✓ " + (action === "approve"
+        ? (body.changed ? t("save.ok", "saved ✓")
+                        : t("save.same", "no change ✓"))
+        : t("aplan.stRejected", "rejected"));
+    }
+    // an applied patch repaints the form ONLY when nothing is dirty — a
+    // concurrent unsaved edit is never silently clobbered
+    if (action === "approve" && body.changed
+        && !document.querySelector(".set-grid > .card[data-dirty='1']")) {
+      loadSettings().then(() => initSettingsPanels());
+    }
+    refreshAgentPlans();
+  } catch (e) {
+    if (msg) { msg.className = "save-state err";
+      msg.textContent = String(e).slice(0, 80); }
   }
 }
 
@@ -5098,6 +5240,12 @@ function initSettingsPanels() {
   // Wave 6 delta2: the two opt-in switches round-trip like the other fields
   setField("mycPrune", myc.session_prune_days);
   setField("mycEffort", myc.reasoning_effort || "");
+  // car C: owner-configurable sub-agent bounds — round-trip raw (the
+  // server's grammar refusal on save is the honest signal)
+  const sub = (myc.subagent && typeof myc.subagent === "object")
+    ? myc.subagent : {};
+  setField("subParInput", sub.max_parallel == null ? "" : sub.max_parallel);
+  setField("subItersInput", sub.max_iters == null ? "" : sub.max_iters);
   // v0.5.55 gateway knobs + the endpoint manager's first load
   setField("mycRotation", myc.rotation || "");
   setField("mycMaxRpm", Number(myc.max_rpm) || 0);
@@ -5370,6 +5518,7 @@ function settingsRelang() {
   renderFileFace();            // round C: file face text follows the pack
   renderModelChips();          // D1: chip remove labels follow the pack
   paintLedgerStatus();        // D2: ledger card dynamic rows follow the pack too
+  renderAgentPlans();         // car C: plan rows follow the pack too
   paintPresetMsg();           // car B: preset status line follows the pack
   discPaintMsg();              // D1: discovery status line repaints
   discPaintAdd();              // D1: ADD label repaints with the selection
@@ -8756,6 +8905,9 @@ function setView(name, fromUser) {
   // delta4: the community panel fetches on first open, then only on a user
   // nav click (the server cache keeps the upstream read rate sane anyway).
   if (name === "community" && (fromUser || !commData)) refreshCommunity(false);
+  // car C: the agent-proposal queue loads when Settings opens — the same
+  // lazy rule as the approval queue above
+  if (name === "settings" && (fromUser || !agentPlanData)) refreshAgentPlans();
   // SNIFF car: the SENSE board lazy-loads on the same rule — first open, then
   // only on a user nav click (the sweep state changes server-side anyway).
   if (name === "sniff" && (fromUser || !sniffData)) refreshSniff();
@@ -8907,7 +9059,7 @@ if (exCapSaveBtnEl) exCapSaveBtnEl.addEventListener("click", exCapSave);
   const el = document.getElementById(id);
   if (el) el.addEventListener("input", () => { usageDirty = true; });
 });
-["mycContextDirs", "mycMcp", "mycShell"].forEach(id => {
+["mycContextDirs", "mycMcp", "mycShell", "subParInput", "subItersInput"].forEach(id => {
   const el = document.getElementById(id);
   if (el) el.addEventListener("input", () => {
     mycDirty = true; mycRestartDirty = true;
@@ -8966,6 +9118,15 @@ if (actListEl) actListEl.addEventListener("click", e => {
   const btn = e.target.closest("[data-act-fix]");
   if (btn) actFix(btn.dataset.actFix);
 });
+/* car C: the plan card's APPROVE/REJECT (delegated — rows re-render) */
+const agentPlanListEl = document.getElementById("agentPlanList");
+if (agentPlanListEl) agentPlanListEl.addEventListener("click", e => {
+  const btn = e.target.closest("[data-plan-decide]");
+  if (btn) decideAgentPlan(btn.dataset.planId, btn.dataset.planDecide);
+});
+const agentPlanRefreshEl = document.getElementById("agentPlanRefresh");
+if (agentPlanRefreshEl) agentPlanRefreshEl.addEventListener("click",
+  () => refreshAgentPlans());
 const svcRestartBtnEl = document.getElementById("svcRestartBtn");
 if (svcRestartBtnEl) svcRestartBtnEl.addEventListener("click", svcRestart);
 const tgRestartBtnEl = document.getElementById("tgRestartBtn");
