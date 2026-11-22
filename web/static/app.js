@@ -95,6 +95,7 @@ async function loadLang(lang) {
   renderFleet(); renderFleetApprovals();
   if (memBrowseData) renderMemoryBrowse();   // the memory entries + provenance
   if (memForgetState) memForgetRender();     // the open confirmation follows
+  if (sessData) renderSessions(sessQuery);   // the session hits + their actions
   renderProfiling();          // the owner-profile rows + provenance follow too
   renderHelpCmds();            // discoverability: the TG command table repaints too
   chatBadge(chatBusy);            // badge label follows the active language
@@ -10164,6 +10165,7 @@ let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
    pack entry (795 keys per pack), so both locales render translated text. */
 let artData = null;      // X17 gallery payload (null = never loaded)
 let sessData = null;     // X13 sessions payload (null = never loaded)
+let sessQuery = "";      // the query the current session list was read with
 let pendingImage = null; // X16 {name, dataUrl} waiting for the next turn
 
 function fmtBytes(n) {
@@ -10491,10 +10493,22 @@ let memForgetState = null;    // the item the confirmation is about
 let memForgetBusy = false;     // a write is in flight
 
 /* Which surface the open confirmation is about. The memory entries forget
-   by slot+title, the owner profile forgets by source id. The KIND decides
-   the endpoint, the payload and the copy — one gate, one honest path. */
+   by slot+title, the owner profile forgets by source id, a transcript
+   MESSAGE forgets by its opaque source id. The KIND decides the endpoint,
+   the payload and the copy — one gate, one honest path. */
 function forgetKind(st) {
-  return st && st.kind === "profile" ? "profile" : "memory";
+  if (st && st.kind === "profile") return "profile";
+  if (st && st.kind === "session") return "session";
+  return "memory";
+}
+
+/* The locale-pack prefix of the surface the confirmation is about. ONE
+   gate, three packs — the copy never comes from the wrong surface. */
+function forgetPack(st) {
+  const kind = forgetKind(st);
+  if (kind === "profile") return "prof.forget.";
+  if (kind === "session") return "sess.forget.";
+  return "memory.forget.";
 }
 
 /* The slot the forget API addresses. The channel is the authority (it is
@@ -10529,6 +10543,15 @@ function profForgetChannelText(channel) {
     return t("prof.forget.chanProfile", "Owner profile");
   }
   return t("prof.forget.chanOther", "Derived item");
+}
+
+/* The transcript's channel in plain words — one MESSAGE of a session. */
+function sessForgetChannelText(channel) {
+  const key = String(channel || "");
+  if (key === "session") {
+    return t("sess.forget.chanSession", "Session transcript");
+  }
+  return t("sess.forget.chanOther", "Session message");
 }
 
 /* The opaque id, shortened for the eye. The full id stays in the title
@@ -10594,6 +10617,15 @@ function profForgetStatus(text, kind) {
   forgetStatus("profForgetStatus", text, kind);
 }
 
+/* The session panel's own status line (the element the OPEN and the EXPORT
+   actions already use) — honest in both directions. */
+function sessForgetStatus(text, kind) {
+  const el = document.getElementById("sessMsg");
+  if (!el) return;
+  el.className = "save-state" + (kind === "err" ? " err" : "");
+  el.textContent = text || "";
+}
+
 /* One affected-surface row: an on/off flag plus WHAT is affected. The
    pack decides the wording; the server decides the truth. */
 function forgetAffectRow(pack, key, fallback, value) {
@@ -10608,6 +10640,9 @@ function memForgetAffectRow(key, fallback, value) {
 }
 function profForgetAffectRow(key, fallback, value) {
   return forgetAffectRow("prof.forget.", key, fallback, value);
+}
+function sessForgetAffectRow(key, fallback, value) {
+  return forgetAffectRow("sess.forget.", key, fallback, value);
 }
 
 /* The memory half of the preview body: what a forget WOULD silence. */
@@ -10712,6 +10747,61 @@ function profForgetPreviewRows(st) {
   return rows;
 }
 
+/* The transcript half of the preview body: how many messages that source
+   would silence and WHICH surfaces that touches — in plain words, never a
+   bare flag. The honest limit is stated here too: the transcript line
+   itself stays on disk (D31/D35). */
+function sessForgetPreviewRows(st) {
+  const rows = [];
+  rows.push(`<div class="mem-pv-title">${escapeHtml(
+    memForgetShortId(st.sourceId))}</div>`);
+  const p = st.preview;
+  if (p) {
+    const n = Number(p.items);
+    const counted = Number.isFinite(n) ? n : 0;
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      counted === 1
+        ? t("sess.forget.itemsOne", "1 message would be silenced.")
+        : t("sess.forget.items", "{n} messages would be silenced.")
+          .replace("{n}", String(counted)))}</div>`);
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      t("sess.forget.source", "source"))}: ` +
+      `${escapeHtml(sessForgetChannelText(p.channel))} · ` +
+      `<code class="mem-src-id">${escapeHtml(
+        memForgetShortId(p.source_id || st.sourceId))}</code></div>`);
+    rows.push(`<div class="mem-pv-head">${escapeHtml(
+      t("sess.forget.affects", "Affected surfaces"))}</div>`);
+    const affects = p.affects || {};
+    rows.push(`<ul class="mem-pv-list">` +
+      sessForgetAffectRow("sess.forget.affectRecall",
+        "recall — what the model remembers from this message",
+        affects.recall) +
+      sessForgetAffectRow("sess.forget.affectList",
+        "the session list on this page", affects.session_list) +
+      sessForgetAffectRow("sess.forget.affectProfile",
+        "the owner profile", affects.profile) +
+      `</ul>`);
+    rows.push(`<div class="mem-pv-head">${escapeHtml(
+      t("sess.forget.limitsLabel", "What this does not do"))}</div>`);
+    rows.push(`<div class="mem-pv-limits">${escapeHtml(
+      t("sess.forget.limitsSummary",
+        "Nothing is deleted — the transcript line stays on disk; the "
+        + "ledger only silences this message."))}</div>`);
+    const limits = String(p.limits || "").trim();
+    rows.push(`<div class="mem-pv-limits-detail">${escapeHtml(limits
+      ? limits
+      : t("sess.forget.limitsFallback",
+        "The message is silenced in recall, in the session list, in the "
+        + "export and in the owner profile; the transcript file keeps the "
+        + "line."))}</div>`);
+  } else if (!st.error) {
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      t("sess.forget.previewLoading",
+        "reading what this would change…"))}</div>`);
+  }
+  return rows;
+}
+
 /* Paint the confirmation from the server's preview. Until the preview has
    arrived the confirm button stays disabled: the owner always sees WHAT
    would change before anything is written. */
@@ -10730,24 +10820,35 @@ function memForgetRender() {
     if (confirmBtn) confirmBtn.disabled = true;
     return;
   }
-  const isProf = forgetKind(st) === "profile";
+  const kind = forgetKind(st);
+  const isProf = kind === "profile";
+  const isSess = kind === "session";
+  const pack = forgetPack(st);
   // the dialog's own chrome follows the surface it is about
   if (titleEl) {
     titleEl.textContent = isProf
       ? t("prof.forget.title", "Forget this profile item?")
-      : t("memory.forget.title", "Forget this memory?");
+      : isSess
+        ? t("sess.forget.title", "Forget this message?")
+        : t("memory.forget.title", "Forget this memory?");
   }
   if (subEl) {
     subEl.textContent = isProf
       ? t("prof.forget.subtitle", "Nothing is written until you confirm.")
-      : t("memory.forget.subtitle", "Nothing is written until you confirm.");
+      : isSess
+        ? t("sess.forget.subtitle", "Nothing is written until you confirm.")
+        : t("memory.forget.subtitle", "Nothing is written until you confirm.");
   }
   if (cancelBtn) {
     cancelBtn.textContent = isProf
       ? t("prof.forget.cancel", "CANCEL")
-      : t("memory.forget.cancel", "CANCEL");
+      : isSess
+        ? t("sess.forget.cancel", "CANCEL")
+        : t("memory.forget.cancel", "CANCEL");
   }
-  const rows = isProf ? profForgetPreviewRows(st) : memForgetPreviewRows(st);
+  const rows = isProf ? profForgetPreviewRows(st)
+    : isSess ? sessForgetPreviewRows(st)
+    : memForgetPreviewRows(st);
   body.innerHTML = rows.join("");
   if (err) {
     err.textContent = st.error || "";
@@ -10756,12 +10857,8 @@ function memForgetRender() {
   if (confirmBtn) {
     confirmBtn.disabled = !st.preview || memForgetBusy;
     confirmBtn.textContent = memForgetBusy
-      ? (isProf
-          ? t("prof.forget.working", "working…")
-          : t("memory.forget.working", "working…"))
-      : (isProf
-          ? t("prof.forget.confirm", "CONFIRM FORGET")
-          : t("memory.forget.confirm", "CONFIRM FORGET"));
+      ? t(pack + "working", "working…")
+      : t(pack + "confirm", "CONFIRM FORGET");
   }
 }
 
@@ -10773,8 +10870,11 @@ async function memForgetLoadPreview() {
     const url = forgetKind(st) === "profile"
       ? "/api/profiling/forget/preview?source=" +
         encodeURIComponent(st.sourceId)
-      : "/api/memory/forget/preview?slot=" +
-        encodeURIComponent(st.slot) + "&title=" + encodeURIComponent(st.title);
+      : forgetKind(st) === "session"
+        ? "/api/sessions/forget/preview?source=" +
+          encodeURIComponent(st.sourceId)
+        : "/api/memory/forget/preview?slot=" +
+          encodeURIComponent(st.slot) + "&title=" + encodeURIComponent(st.title);
     const res = await fetch(url);
     const body = await res.json().catch(() => null);
     if (memForgetState !== st) return;      // the owner moved on
@@ -10790,11 +10890,8 @@ async function memForgetLoadPreview() {
   } catch (e) {
     if (memForgetState !== st) return;
     st.preview = null;
-    st.error = forgetKind(st) === "profile"
-      ? t("prof.forget.network",
-        "the console could not be reached — nothing was written")
-      : t("memory.forget.network",
-        "the console could not be reached — nothing was written");
+    st.error = t(forgetPack(st) + "network",
+      "the console could not be reached — nothing was written");
     memForgetRender();
   }
 }
@@ -10811,6 +10908,18 @@ function forgetPreviewError(st, status) {
         "that source cannot be forgotten from here");
     }
     return t("prof.forget.previewFailed",
+      "the preview could not be loaded — nothing was written");
+  }
+  if (forgetKind(st) === "session") {
+    if (status === 404) {
+      return t("sess.forget.previewMissing",
+        "that message is no longer available — nothing was written");
+    }
+    if (status === 400) {
+      return t("sess.forget.previewBadSource",
+        "that source cannot be forgotten from here");
+    }
+    return t("sess.forget.previewFailed",
       "the preview could not be loaded — nothing was written");
   }
   if (status === 404) {
@@ -10885,6 +10994,27 @@ function profForgetOpen(sourceId, token) {
   memForgetLoadPreview();
 }
 
+/* The transcript message's own FORGET action: the SAME dialog and the SAME
+   preview gate, addressed by the opaque source id the server handed out
+   with the hit. The UI never invents an address — without one there is
+   no action. */
+function sessForgetOpen(sourceId) {
+  const sid = String(sourceId || "");
+  if (!sid) return;
+  const dlg = document.getElementById("memForgetDialog");
+  if (!dlg) return;
+  memForgetState = { kind: "session", sourceId: sid,
+                     preview: null, error: "" };
+  sessForgetStatus("", null);
+  memForgetRender();
+  if (typeof dlg.showModal === "function") {
+    if (!dlg.open) dlg.showModal();
+  } else {
+    dlg.setAttribute("open", "");
+  }
+  memForgetLoadPreview();
+}
+
 function memForgetClose() {
   const dlg = document.getElementById("memForgetDialog");
   if (!dlg) return;
@@ -10903,10 +11033,14 @@ async function memForgetConfirm() {
   if (!st || !st.preview || memForgetBusy) return;
   memForgetBusy = true;
   memForgetRender();
-  const res = forgetKind(st) === "profile"
+  const kind = forgetKind(st);
+  const res = kind === "profile"
     ? await memForgetPost("/api/profiling/forget", { source_id: st.sourceId })
-    : await memForgetPost("/api/memory/forget",
-      { slot: st.slot, title: st.title });
+    : kind === "session"
+      ? await memForgetPost("/api/sessions/forget",
+        { source_id: st.sourceId })
+      : await memForgetPost("/api/memory/forget",
+        { slot: st.slot, title: st.title });
   memForgetBusy = false;
   if (!res.ok) {
     st.error = forgetWriteError(st, res.reason);
@@ -10915,11 +11049,18 @@ async function memForgetConfirm() {
   }
   const body = res.body || {};
   const already = body.already === true;
-  if (forgetKind(st) === "profile") {
+  if (kind === "profile") {
     memForgetClose();
     memForgetState = null;
     memForgetRender();
     await profForgetDone(st, already);
+    return;
+  }
+  if (kind === "session") {
+    memForgetClose();
+    memForgetState = null;
+    memForgetRender();
+    await sessForgetDone(st, already);
     return;
   }
   memForgetClose();
@@ -10940,33 +11081,21 @@ async function memForgetConfirm() {
 /* A refused write says WHAT happened — a missing token, a rejected token,
    a dead network or a plain refusal. Never a fake success. */
 function forgetWriteError(st, reason) {
-  const prof = forgetKind(st) === "profile";
+  const pack = forgetPack(st);
   if (reason === "need_token") {
-    return prof
-      ? t("prof.forget.needToken",
-        "sign in required — set the access token in Settings → Access")
-      : t("memory.forget.needToken",
-        "sign in required — set the access token in Settings → Access");
+    return t(pack + "needToken",
+      "sign in required — set the access token in Settings → Access");
   }
   if (reason === "unauthorized") {
-    return prof
-      ? t("prof.forget.unauthorized",
-        "sign in required (401) — the access token was rejected")
-      : t("memory.forget.unauthorized",
-        "sign in required (401) — the access token was rejected");
+    return t(pack + "unauthorized",
+      "sign in required (401) — the access token was rejected");
   }
   if (reason === "network") {
-    return prof
-      ? t("prof.forget.network",
-        "the console could not be reached — nothing was written")
-      : t("memory.forget.network",
-        "the console could not be reached — nothing was written");
+    return t(pack + "network",
+      "the console could not be reached — nothing was written");
   }
-  return prof
-    ? t("prof.forget.failed",
-      "the forget was refused — nothing was written")
-    : t("memory.forget.failed",
-      "the forget was refused — nothing was written");
+  return t(pack + "failed",
+    "the forget was refused — nothing was written");
 }
 
 /* The profile half of a confirmed forget: the view is RE-READ from the
@@ -11005,6 +11134,46 @@ function profKeywordListed(sourceId) {
   const rows = (ownProfileData && Array.isArray(ownProfileData.keywords))
     ? ownProfileData.keywords : [];
   return rows.some(r => String((r && r.source_id) || "") === id);
+}
+
+/* The transcript half of a confirmed forget: the session list is RE-READ
+   from the API (the hit list is the server's, never a local guess) and
+   the owner gets an honest sentence — nothing was deleted, the transcript
+   line stays on disk. If the re-read fails, or the message is still
+   listed, the message says THAT instead. */
+async function sessForgetDone(st, already) {
+  const reread = await refreshSessions(sessQuery);
+  if (!reread) {
+    sessForgetStatus(t("sess.forget.rereadFailed",
+      "forgotten — but the session list could not be re-read: press "
+      + "SEARCH again to refresh. Nothing was deleted."), null);
+    return;
+  }
+  if (sessSourceListed(st.sourceId)) {
+    sessForgetStatus(t("sess.forget.stillListed",
+      "forgotten — but the message is still listed: press SEARCH again to "
+      + "refresh. Nothing was deleted."), null);
+    return;
+  }
+  sessForgetStatus(already
+    ? t("sess.forget.already",
+      "already forgotten — it was already silenced. Nothing was deleted.")
+    : t("sess.forget.done",
+      "Forgotten: {id}. Nothing was deleted — the transcript line stays on "
+      + "disk; the message is silenced in recall, in the session list, in "
+      + "the export and in the owner profile.")
+      .replace("{id}", memForgetShortId(st.sourceId)), null);
+}
+
+/* Is this transcript message still listed by the server? The answer is
+   the server's own, never a local guess. */
+function sessSourceListed(sourceId) {
+  const id = String(sourceId || "");
+  if (!id) return false;
+  const rows = (sessData && Array.isArray(sessData.sessions))
+    ? sessData.sessions : [];
+  return rows.some(r => (Array.isArray(r && r.hit_sources) ? r.hit_sources : [])
+    .some(h => String((h && h.source_id) || "") === id));
 }
 
 const memBrowseListEl = document.getElementById("memBrowseList");
@@ -11055,6 +11224,7 @@ async function refreshSessions(q) {
     list.innerHTML = `<div class="stat-note">${escapeHtml(
       t("sess.loading", "loading…"))}</div>`;
   }
+  sessQuery = String(q || "");
   try {
     const url = "/api/sessions" +
       (q ? "?q=" + encodeURIComponent(q) : "");
@@ -11063,6 +11233,48 @@ async function refreshSessions(q) {
     sessData = (d && Array.isArray(d.sessions)) ? d : null;
   } catch (e) { sessData = null; }
   renderSessions(q);
+  return sessData;      // the server's answer, or null when it failed
+}
+
+/* One search hit's own FORGET action. The address is the opaque source id
+   the server handed out WITH the hit — the UI never invents one, so a hit
+   without an id stays listed and inert. */
+function sessForgetHitHtml(srcId, label) {
+  const id = String(srcId || "");
+  if (!id) return "";
+  return `<span class="sess-hit">` +
+    `<code class="mem-src-id" title="${escapeHtml(id)}">` +
+    `${escapeHtml(memForgetShortId(id))}</code>` +
+    `<button class="btn tiny sess-forget-btn" type="button" ` +
+    `title="${escapeHtml(t("sess.forget.btnTitle",
+      "Forget this message — it is silenced, never deleted"))}" ` +
+    `aria-label="${escapeHtml(t("sess.forget.btnTitle",
+      "Forget this message — it is silenced, never deleted") + " " + label)}" ` +
+    `data-sess-forget="${escapeHtml(id)}">${escapeHtml(
+      t("sess.forget.btn", "FORGET"))}</button></span>`;
+}
+
+/* The hits of one session row: every visible hit carries its own FORGET
+   action, so the owner can silence ONE message and recognise it by the
+   opaque id the server printed. The list is bounded by the server; when
+   the bound bites the panel says so instead of pretending it is complete. */
+function sessForgetHitsHtml(s) {
+  const sources = Array.isArray(s && s.hit_sources) ? s.hit_sources : [];
+  if (!sources.length) return "";
+  const rows = sources.map(h => sessForgetHitHtml(
+    h && h.source_id, String((s && s.id) || ""))).join("");
+  const more = s.hit_sources_truncated
+    ? `<div class="stat-note sess-hits-more">${escapeHtml(
+      t("sess.forget.moreHits",
+        "only the first hits are listed — narrow the search to address the "
+        + "rest"))}</div>` : "";
+  const n = Number(s.hits);
+  const counted = Number.isFinite(n) ? n : sources.length;
+  return `<details class="sess-hits"><summary>` +
+    `${escapeHtml(t("sess.forget.hitsLabel",
+      "{n} matching message(s) — forget one?").replace("{n}",
+        String(counted)))}</summary>` +
+    `<div class="sess-hit-list">${rows}</div>${more}</details>`;
 }
 
 function renderSessions(q) {
@@ -11108,13 +11320,14 @@ function renderSessions(q) {
         `data-sess-open="${escapeHtml(sid)}" ` +
         `aria-label="${escapeHtml("open session " + sid + " as the live chat session")}" ` +
         `style="padding:2px 9px;font-size:12.5px;">${t("sess.openBtn", "OPEN")}</button>`;
-      return `<div class="ctl-row">` +
+      return `<div class="sess-row"><div class="ctl-row">` +
         `<label style="flex:1;min-width:0;overflow-wrap:anywhere;">` +
         `${escapeHtml(bits.filter(Boolean).join(" · "))}` +
         `${escapeHtml(hits + partial)}</label>` +
         `<span class="stat-note" style="margin-top:0;overflow-wrap:anywhere;">` +
         `${escapeHtml(s.summary || "")}</span>` +
-        open + exp("json") + exp("md") + `</div>`;
+        open + exp("json") + exp("md") + `</div>` +
+        sessForgetHitsHtml(s) + `</div>`;
     }).join("");
     if (sessData.search) {
       const m = sessData.search;
@@ -11365,6 +11578,13 @@ if (sessAllEl) sessAllEl.addEventListener("click", () => {
 const sessListEl = document.getElementById("sessList");
 if (sessListEl) sessListEl.addEventListener("click", e => {
   if (!e.target || !e.target.closest) return;
+  const f = e.target.closest("[data-sess-forget]");      // per-hit FORGET
+  if (f) {
+    e.preventDefault();
+    e.stopPropagation();
+    sessForgetOpen(f.getAttribute("data-sess-forget") || "");
+    return;
+  }
   const o = e.target.closest("[data-sess-open]");       // X20 resume
   if (o) { sessionResume(o.getAttribute("data-sess-open")); return; }
   const b = e.target.closest("[data-sess-exp]");

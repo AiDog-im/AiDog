@@ -45,6 +45,30 @@ STATIC = {
 }
 
 
+
+def chromium_path() -> str | None:
+    """The cached Chromium: the env override first, then the newest one.
+
+    A gate that cannot run is a gate that does not run — the fleet browser
+    test used to pass no executable at all, so Playwright looked for a
+    build that is not installed here."""
+    for var in ("FLEET_TEST_CHROMIUM", "AIDOG_TEST_CHROMIUM"):
+        env = os.environ.get(var)
+        if env and Path(env).exists():
+            return env
+    root = Path.home() / ".cache" / "ms-playwright"
+    best: tuple[int, Path] | None = None
+    if root.is_dir():
+        for entry in root.glob("chromium-*"):
+            tail = entry.name.split("-")[-1]
+            if not tail.isdigit():
+                continue
+            for rel in ("chrome-linux64/chrome", "chrome-linux/chrome"):
+                cand = entry / rel
+                if cand.exists() and (best is None or int(tail) > best[0]):
+                    best = (int(tail), cand)
+    return str(best[1]) if best else None
+
 def stream_page(browser, history=HISTORY, plans=PLANS, *, lang="en", width=320):
     page = browser.new_page(viewport={"width": width, "height": 780}, service_workers="block")
     calls, writes, errors = [], [], []
@@ -78,7 +102,7 @@ def stream_page(browser, history=HISTORY, plans=PLANS, *, lang="en", width=320):
 def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
-            executable_path=os.environ.get("FLEET_TEST_CHROMIUM"),
+            executable_path=chromium_path(),
             args=["--disable-background-networking"],
         )
         page, calls, writes, errors = stream_page(browser)

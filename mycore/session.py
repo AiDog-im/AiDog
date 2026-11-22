@@ -22,6 +22,8 @@ import sqlite3
 import time
 from pathlib import Path
 
+from mycore import memforget   # the suppression ledger (stage 6, D30-D35)
+
 MSG_KEYS = ("role", "content", "name", "tool_calls", "tool_call_id", "ts")
 
 
@@ -255,18 +257,26 @@ def _scan_docs(path: Path) -> tuple[list[dict], bool]:
     return docs, partial
 
 
-def _summary_of(docs: list[dict]) -> str:
+def _summary_of(docs: list[dict],
+                suppression: "memforget.ChannelSuppression | None" = None) -> str:
     """First user (else first assistant) text, whitespace-collapsed, control
-    chars stripped, capped at SUMMARY_MAX. "" = genuinely nothing readable."""
+    chars stripped, capped at SUMMARY_MAX. "" = genuinely nothing readable.
+
+    A silenced message is skipped: the session list never shows the text of
+    a forgotten message (D31)."""
     chosen = ""
     for want in ("user", "assistant"):
         for doc in docs:
             if doc.get("role") != want:
                 continue
             text = " ".join(_msg_text(doc).split())
-            if text:
-                chosen = text
-                break
+            if not text:
+                continue
+            if suppression is not None and not suppression.empty \
+                    and suppression.suppresses_digest(message_digest(doc)):
+                continue              # a forgotten message is not a summary
+            chosen = text
+            break
         if chosen:
             break
     chosen = _CTRL_RE.sub(" ", chosen)
@@ -282,6 +292,109 @@ def _fts_norm(text: str) -> str:
     single token and a mid-run query could never match."""
     return _NSS_RE.sub(lambda m: " " + " ".join(m.group(0)) + " ",
                        text.casefold())
+
+
+# ------------------------------------- stage 6: the transcript suppression --
+# D30-D35. A transcript MESSAGE is a source of its own: the store that
+# reaches the model most directly (through the recall window after a fold)
+# is the last one a tombstone can silence.
+#
+# The identity of a message is the NORMALISED message text — the same
+# normalisation the search index uses — so the source id agrees on BOTH
+# sides of the index (D30). The transcript FILE is never rewritten: the
+# message stays on disk, append-only and reviewable, and every READ path
+# drops it (D31).
+SESSION_CHANNEL = memforget.CHANNEL_SESSION
+
+# A search hit carries the source id of its message (D32). The list is
+# bounded so one broad query cannot turn the read face into a dump; when
+# the bound bites the face says so instead of pretending it is complete.
+MAX_HIT_SOURCES = 200
+
+# Files the source RESOLUTION may open. The resolution is an owner action
+# (one click), not a hot path; the bound keeps it honest about the window.
+RESOLVE_FILES_MAX = 500
+
+
+def message_identity(doc: dict) -> str:
+    """The NORMALISED text that identifies one transcript message (D30).
+
+    A multimodal message contributes its text parts and one honest
+    '[image]' marker per image part — exactly what the index stores, so the
+    id agrees on both sides of the index."""
+    return _fts_norm(_msg_text(doc))
+
+
+_digest_cache: dict = {}
+_DIGEST_CACHE_MAX = 8192
+
+
+def normalised_digest(norm: str) -> str:
+    """The content digest of an ALREADY normalised text.
+
+    The digest is a pure function of the text, so it is computed ONCE per
+    distinct message and never needs invalidating — the ledger can change
+    under it, the digest cannot (D34)."""
+    key = norm or ""
+    hit = _digest_cache.get(key)
+    if hit is None:
+        hit = memforget.digest_of(key)
+        if len(_digest_cache) >= _DIGEST_CACHE_MAX:
+            _digest_cache.clear()
+        _digest_cache[key] = hit
+    return hit
+
+
+def message_digest(doc: dict) -> str:
+    """The content digest of one transcript message (its normalised text)."""
+    return normalised_digest(message_identity(doc))
+
+
+def text_digest(text: str) -> str:
+    """The content digest of a raw message TEXT (normalised first).
+
+    The same identity form as `message_digest`, for the callers that hold
+    the text instead of the parsed message — the profiling corpus reads
+    the transcript's own JSON, so it has the text."""
+    return normalised_digest(_fts_norm(text or ""))
+
+
+def message_source_id(doc: dict, *, repo=None) -> str:
+    """The opaque, deterministic id of one transcript message (D30).
+
+    The usual id: profile scope + admission channel `session` + the content
+    digest of the normalised message text. It carries no path, no excerpt
+    and no credential — it can only be matched, never read back."""
+    return memforget.source_id_from_digest(SESSION_CHANNEL, message_digest(doc),
+                                           repo=repo)
+
+
+def state_root_of(directory) -> Path:
+    """The state root that owns a sessions directory (its parent).
+
+    The product's layout puts the sessions directory INSIDE the per-profile
+    state root (the search index lives beside it), so the parent's ledger
+    is the ledger that governs these transcripts."""
+    return Path(directory).parent
+
+
+def message_suppression(directory=None, *, repo=None,
+                        state=None) -> memforget.ChannelSuppression:
+    """The session-channel suppressor of the ACTIVE ledger (D34).
+
+    The comparison is skipped entirely while the ledger holds no
+    session-channel row — the normal state, where nothing is forgotten — so
+    a read path pays nothing when there is nothing to suppress. The
+    ledger is the one of the state root that owns the transcripts (the
+    sessions directory's parent) or, without a directory, the one of the
+    active profile."""
+    try:
+        if state is None and directory is not None:
+            state = state_root_of(directory)
+        snapshot = memforget.load_set(repo, state)
+    except Exception:  # noqa: BLE001 — an unreadable ledger hides nothing
+        return memforget.ChannelSuppression(SESSION_CHANNEL, None)
+    return memforget.ChannelSuppression(SESSION_CHANNEL, snapshot)
 
 
 def _fts_expr(qf: str) -> str | None:
@@ -446,13 +559,22 @@ def recall_snippets(candidates: list[dict], query: str, *,
       * `none`      — empty task line, no candidates or no indexable probe.
     Never raises: every failure degrades to `none`/`substring` with zero hits
     rather than breaking the turn. Snippets are bounded (RECALL_* constants)
-    and role-tagged so the model can see WHERE a fact came from."""
+    and role-tagged so the model can see WHERE a fact came from.
+
+    A FORGOTTEN message is never recalled (D31): the fold-time recall is a
+    READ path, so a silenced message leaves the window before it can be
+    re-injected into the model's context. The check is skipped entirely
+    while no session-channel tombstone exists (D34)."""
+    suppression = message_suppression()
     try:
         probes = _recall_probes(query)
         entries: list[tuple[dict, str]] = []
         for m in candidates:
             if not isinstance(m, dict):
                 continue
+            if not suppression.empty and \
+                    suppression.suppresses_digest(message_digest(m)):
+                continue          # a forgotten message is never recalled
             txt = _msg_text(m)
             if txt.strip():
                 entries.append((m, txt))
@@ -512,14 +634,43 @@ def _fts_drop_index(directory: str | Path) -> None:
 
 def _fts_schema(conn) -> None:
     """Create the two tables if missing (a corrupt file never gets this far —
-    sqlite raises before)."""
+    sqlite raises before).
+
+    `msgdig` is the content digest of the row's normalised text — the
+    digest a source id is derived from (D30). It lets a search hit name
+    its source (and be silenced) without the index keeping anything else
+    about the message."""
     conn.execute("CREATE TABLE IF NOT EXISTS session_index ("
                  "path TEXT PRIMARY KEY, root TEXT NOT NULL, "
                  "mtime INTEGER NOT NULL, size INTEGER NOT NULL)")
     conn.execute("CREATE VIRTUAL TABLE IF NOT EXISTS session_fts USING "
                  "fts5(text, root UNINDEXED, path UNINDEXED, "
-                 "tokenize='unicode61')")
+                 "msgdig UNINDEXED, tokenize='unicode61')")
     conn.commit()
+
+
+def _fts_ensure_msgdig(conn) -> bool:
+    """True when the index carries the per-message digest column.
+
+    An index built by an older build does not. The search index is a
+    DERIVED store — a cache of the transcripts, never a source of truth —
+    so the old tables are dropped and the next sync re-indexes every file.
+    A hit that cannot name its source would be a hit the owner could not
+    address (D32)."""
+    try:
+        cols = {row[1] for row in
+                conn.execute("PRAGMA table_info(session_fts)")}
+    except sqlite3.Error:
+        return True                     # unknown -> let the query fail loudly
+    if "msgdig" in cols:
+        return True
+    try:
+        conn.execute("DROP TABLE IF EXISTS session_fts")
+        conn.execute("DROP TABLE IF EXISTS session_index")
+        conn.commit()
+    except sqlite3.Error:
+        return True
+    return False
 
 
 def _fts_sync(conn, root: str, stat: dict[str, tuple[int, int]]) -> None:
@@ -543,11 +694,12 @@ def _fts_sync(conn, root: str, stat: dict[str, tuple[int, int]]) -> None:
         for doc in docs:
             if "role" not in doc:
                 continue
-            text = _fts_norm(_msg_text(doc))
-            if text.strip():
-                rows.append((text, root, path))
+            norm = message_identity(doc)
+            if norm.strip():
+                rows.append((norm, root, path, normalised_digest(norm)))
         conn.executemany(
-            "INSERT INTO session_fts(text, root, path) VALUES (?,?,?)", rows)
+            "INSERT INTO session_fts(text, root, path, msgdig) "
+            "VALUES (?,?,?,?)", rows)
         conn.execute(
             "INSERT INTO session_index(path, root, mtime, size) "
             "VALUES (?,?,?,?)", (path, root, mtime, size))
@@ -556,39 +708,46 @@ def _fts_sync(conn, root: str, stat: dict[str, tuple[int, int]]) -> None:
 
 def _fts_attempt(directory: str | Path, root: str,
                  stat: dict[str, tuple[int, int]], expr: str
-                 ) -> list[tuple[str, int, float]]:
+                 ) -> list[tuple[str, int, float, list[str]]]:
     """One open → schema → sync → match pass over the index. Returns
-    [(absolute path, hits, bm25 score)] best-first (BM25 ascending; a
-    session's rows collapse to its FIRST = best row, extra rows add hits).
+    [(absolute path, hits, bm25 score, [message digests])] best-first
+    (BM25 ascending; a session's rows collapse to its FIRST = best row,
+    extra rows add hits). The digests are the per-message identities a hit
+    is addressed by (D30/D32).
     Raises sqlite3.Error/OSError for the caller's rebuild/degrade ladder."""
     conn = sqlite3.connect(str(_fts_index_path(directory)), timeout=5.0)
     try:
         _fts_schema(conn)
+        if not _fts_ensure_msgdig(conn):
+            _fts_schema(conn)           # recreate with the digest column
         _fts_sync(conn, root, stat)
         order: list[str] = []
         hits: dict[str, int] = {}
         scores: dict[str, float] = {}
-        for path, score in conn.execute(
-                "SELECT path, bm25(session_fts) AS score FROM session_fts "
-                "WHERE session_fts MATCH ? AND root=? ORDER BY score",
-                (expr, root)):
+        digests: dict[str, list[str]] = {}
+        for path, score, msgdig in conn.execute(
+                "SELECT path, bm25(session_fts) AS score, msgdig "
+                "FROM session_fts WHERE session_fts MATCH ? AND root=? "
+                "ORDER BY score", (expr, root)):
             if path in hits:
                 hits[path] += 1
+                digests[path].append(msgdig)
             else:
                 hits[path] = 1
                 scores[path] = score
+                digests[path] = [msgdig]
                 order.append(path)
-        return [(p, hits[p], scores[p]) for p in order]
+        return [(p, hits[p], scores[p], digests[p]) for p in order]
     finally:
         conn.close()
 
 
 def _fts_lookup(directory: str | Path, files: list[tuple[Path, str]],
                 qf: str) -> tuple[list[tuple[Path, str, int, int, int,
-                                            float]] | None, str]:
+                                            float, list[str]]] | None, str]:
     """FTS5 search for the casefolded `qf` over `files` [(path, id)]:
-    -> ([ (path, id, when, size, hits, score) ... ] best-first, "") on
-    success, or (None, reason) when list_sessions must degrade to the
+    -> ([ (path, id, when, size, hits, score, digests) ... ] best-first, "")
+    on success, or (None, reason) when list_sessions must degrade to the
     substring scan. reason ∈ fts5_unavailable | unindexable_query |
     index_unusable. Fail-soft by design: ANY failure degrades, never raises."""
     global _FTS5_AVAILABLE
@@ -626,14 +785,26 @@ def _fts_lookup(directory: str | Path, files: list[tuple[Path, str]],
                 return None, "index_unusable"
             rebuilt = True
             _fts_drop_index(directory)
-    rows: list[tuple[Path, str, int, int, int, float]] = []
-    for ap, hits, score in matched:
+    rows: list[tuple[Path, str, int, int, int, float, list[str]]] = []
+    for ap, hits, score, digests in matched:
         if ap not in info or not os.path.isfile(ap):
             continue        # deleted between sync and now — never surface
         sid, when, size = info[ap]
-        rows.append((Path(ap), sid, when, size, hits, score))
+        rows.append((Path(ap), sid, when, size, hits, score, digests))
     rows.sort(key=lambda r: (r[5], -r[2]))  # BM25 best first, ties newest
     return rows, ""
+
+
+def _hit_sources(digests: list[str], repo=None) -> list[dict]:
+    """The opaque source id of every visible hit (D30/D32).
+
+    One id per hit, nothing else: no path, no excerpt, no credential. The
+    list is bounded — a broad query can match thousands of messages — and
+    the face says so when the bound bites."""
+    out = [{"source_id": memforget.source_id_from_digest(SESSION_CHANNEL, d,
+                                                        repo=repo)}
+           for d in digests[:MAX_HIT_SOURCES]]
+    return out
 
 
 def list_sessions(directory: str | Path, *, q: str | None = None,
@@ -650,7 +821,13 @@ def list_sessions(directory: str | Path, *, q: str | None = None,
     scan and says so instead (`method:"substring", fallback:true,
     reason:...`). `count` = matched sessions (rows returned may be fewer;
     `truncated` says so). Fail-soft: an unreadable file becomes a missing
-    row, never a raised error."""
+    row, never a raised error.
+
+    A FORGOTTEN message is skipped everywhere in this face (D31): it is not
+    a hit, it is not counted, it never becomes a session summary, and a
+    session whose every hit is silenced does not appear at all. Every
+    visible hit carries the opaque source id of its message
+    (`hit_sources`), so the owner can address it (D32)."""
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -659,6 +836,7 @@ def list_sessions(directory: str | Path, *, q: str | None = None,
     qf = str(q).casefold() if q else None
     files = _session_files(directory)
     files.sort(key=lambda pair: _mtime(pair[0]), reverse=True)
+    suppression = message_suppression(directory)
 
     if qf is None:
         rows: list[dict] = []
@@ -667,7 +845,7 @@ def list_sessions(directory: str | Path, *, q: str | None = None,
                 break
             docs, partial = _scan_docs(path)
             row: dict = {"id": sid, "when": _mtime(path), "size": _size(path),
-                         "summary": _summary_of(docs)}
+                         "summary": _summary_of(docs, suppression)}
             if partial:
                 row["partial"] = True
             rows.append(row)
@@ -679,14 +857,24 @@ def list_sessions(directory: str | Path, *, q: str | None = None,
     if matched is not None:
         search: dict = {"q": str(q), "method": "fts5", "engine": "fts5",
                         "fallback": False, "case_insensitive": True}
-        count = len(matched)
-        for path, sid, when, size, hits, _score in matched[:limit]:
+        count = 0
+        for path, sid, when, size, _hits, _score, digests in matched:
+            visible = [d for d in digests
+                       if not suppression.suppresses_digest(d)]
+            if not visible:
+                continue          # every hit of this session is silenced
+            count += 1
+            if len(rows) >= limit:
+                continue
             docs, partial = _scan_docs(path)
             row = {"id": sid, "when": when, "size": size,
-                   "summary": _summary_of(docs)}
+                   "summary": _summary_of(docs, suppression)}
             if partial:
                 row["partial"] = True
-            row["hits"] = hits
+            row["hits"] = len(visible)
+            row["hit_sources"] = _hit_sources(visible)
+            if len(visible) > MAX_HIT_SOURCES:
+                row["hit_sources_truncated"] = True
             rows.append(row)
     else:
         # honest degradation: the original substring scan, labelled as such
@@ -695,17 +883,27 @@ def list_sessions(directory: str | Path, *, q: str | None = None,
         count = 0
         for path, sid in files:
             docs, partial = _scan_docs(path)
-            hits = sum(1 for d in docs if qf in _msg_text(d).casefold())
-            if not hits:
+            visible = []
+            for doc in docs:
+                if qf not in _msg_text(doc).casefold():
+                    continue
+                digest = message_digest(doc)
+                if suppression.suppresses_digest(digest):
+                    continue      # a forgotten message is not a hit
+                visible.append(digest)
+            if not visible:
                 continue
             count += 1
             if len(rows) >= limit:
                 continue
             row = {"id": sid, "when": _mtime(path), "size": _size(path),
-                   "summary": _summary_of(docs)}
+                   "summary": _summary_of(docs, suppression)}
             if partial:
                 row["partial"] = True
-            row["hits"] = hits
+            row["hits"] = len(visible)
+            row["hit_sources"] = _hit_sources(visible)
+            if len(visible) > MAX_HIT_SOURCES:
+                row["hit_sources_truncated"] = True
             rows.append(row)
     return {"sessions": rows, "count": count,
             "truncated": count > len(rows), "limit": limit,
@@ -821,6 +1019,12 @@ def export_session(directory: str | Path, sid: str, fmt: str = "json") -> tuple[
     sess = Session(resolved)
     meta = sess.meta()
     msgs = sess.load()
+    # A FORGOTTEN message leaves the export (D31) — the file on disk stays
+    # byte-identical, only the READ drops it.
+    suppression = message_suppression(directory)
+    if not suppression.empty:
+        msgs = [m for m in msgs
+                if not suppression.suppresses_digest(message_digest(m))]
     if fmt == "json":
         doc = {"id": sid, "meta": meta, "count": len(msgs),
                "corrupt": sess.corrupt, "messages": msgs}
@@ -850,6 +1054,57 @@ def export_session(directory: str | Path, sid: str, fmt: str = "json") -> tuple[
         lines.append(f"**{label}:** {_msg_text(m)}")
         lines.append("")
     return "\n".join(lines).rstrip() + "\n", "text/markdown; charset=utf-8"
+
+
+def find_message_by_source_id(directory: str | Path, source_id: str, *,
+                              repo=None,
+                              limit_files: int = RESOLVE_FILES_MAX) -> dict | None:
+    """Locate the transcript message an opaque source id names (D32).
+
+    The SERVER resolves the source: the client sends the opaque id and
+    never invents one. The scan uses the SAME bounded window the search
+    face reads (SCAN_CAP chars per file) and a bounded number of files; a
+    message that is gone, or that sits outside that window, is refused
+    honestly — never guessed at.
+
+    Returns {"text": <the NORMALISED text>, "role": <the role of the first
+    match>, "count": <how many messages carry this id>, "user_items": <how
+    many of them are the owner's own messages>} or None when the id names
+    nothing inside the window. The text is returned to the CALLER (the
+    server) so it can record the tombstone; it never reaches the client."""
+    target = str(source_id or "").strip()
+    if not target:
+        return None
+    root = Path(directory)
+    files = _session_files(root)
+    files.sort(key=lambda pair: _mtime(pair[0]), reverse=True)
+    scope = memforget.profile_scope(repo)
+    found_text = ""
+    role = ""
+    count = 0
+    user_items = 0
+    for path, _sid in files[:max(1, int(limit_files))]:
+        docs, _partial = _scan_docs(path)
+        for doc in docs:
+            if "role" not in doc:
+                continue
+            norm = message_identity(doc)
+            if not norm.strip():
+                continue
+            sid = memforget.source_id_from_digest(
+                SESSION_CHANNEL, normalised_digest(norm), scope=scope)
+            if sid != target:
+                continue
+            if not found_text:
+                found_text = norm
+                role = str(doc.get("role") or "")
+            count += 1
+            if str(doc.get("role") or "") == "user":
+                user_items += 1
+    if not found_text:
+        return None
+    return {"text": found_text, "role": role, "count": count,
+            "user_items": user_items}
 
 
 def prune_old(directory: str | Path, max_age_days: int, *,

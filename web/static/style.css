@@ -2633,3 +2633,30 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
   display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px;
 }
 .mem-dialog-actions .btn:disabled { opacity: .45; cursor: not-allowed; }
+
+/* --------------------------------------- session hits + their FORGET ---- *
+   The session search row's hits: every visible hit carries its own
+   FORGET action, addressed by the opaque source id the server printed
+   with it. Same paper/ink language as the memory view: a hairline list,
+   mono stamps, the quiet blue action. */
+.sess-row { min-width: 0; }
+.sess-hits { margin-top: 7px; }
+.sess-hits > summary {
+  cursor: pointer; list-style: none; font-size: 12px; color: var(--muted);
+  padding: 2px 0; overflow-wrap: anywhere;
+}
+.sess-hits > summary::-webkit-details-marker { display: none; }
+.sess-hits > summary::before { content: "▸ "; color: var(--blue-ink); }
+.sess-hits[open] > summary::before { content: "▾ "; }
+.sess-hits > summary:hover { color: var(--blue-ink); }
+.sess-hit-list {
+  display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: center;
+  margin-top: 6px; padding: 8px 10px; min-width: 0;
+  border: 1px solid var(--line); border-left: 2px solid var(--rule);
+  background: #fff;
+}
+.sess-hit {
+  display: inline-flex; align-items: center; gap: 8px; min-width: 0;
+}
+.sess-hit .mem-src-id { font-size: 11px; }
+.sess-hits-more { flex-basis: 100%; margin: 0; }

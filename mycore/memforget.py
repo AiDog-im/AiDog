@@ -31,6 +31,14 @@ is the usual one — profile scope + channel + content digest — so the
 derived item is addressable with the same opaque id as every other source,
 and the transcript row it came from is never touched (D10).
 
+One channel addresses a TRANSCRIPT MESSAGE: `session` silences one message
+of the session transcripts. Its id is the usual one over the NORMALISED
+message text — the normalisation the search index already uses, so the id
+agrees on both sides of the index (D30). The transcript FILE is never
+rewritten: the message stays on disk, append-only and reviewable, and every
+READ path drops it (D31). The server resolves the source — the client
+never invents one — so this module only holds the ledger and the channel.
+
 `describe_entry` is the READ half of the owner-facing forget control: it
 answers what a forget WOULD do (the admission channel, the opaque source
 id, how many sections it would filter) without touching anything and
@@ -76,14 +84,21 @@ CHANNEL_CURATED_MEMORY = "curated:memory"   # MEMORY_curated.md entries
 CHANNEL_CURATED_USER = "curated:user"       # USER_curated.md entries
 CHANNEL_CURATED_OTHER = "curated:other"     # any other curated file
 CHANNEL_PROFILE = "profile"                 # a DERIVED owner-profile item
+CHANNEL_SESSION = "session"                # one transcript MESSAGE
 
 # Suppression scope — WHICH surfaces the tombstone silences.
 SCOPE_MEMORY = "memory"                # learned memory + the derived stores
 SCOPE_CURATED = "curated-entry"        # one curated entry, everywhere it shows
 SCOPE_PROFILE = "profile"              # one derived profile item
+SCOPE_SESSION = "session"              # one transcript message, everywhere it shows
 
 CHANNELS = (CHANNEL_LEARNED, CHANNEL_CURATED_MEMORY, CHANNEL_CURATED_USER,
-            CHANNEL_CURATED_OTHER, CHANNEL_PROFILE)
+            CHANNEL_CURATED_OTHER, CHANNEL_PROFILE, CHANNEL_SESSION)
+
+# The CLI never offers a MESSAGE source: a message is addressed by the
+# opaque id the SERVER resolves (D32/D33), never by handing text to a
+# command line.
+CLI_CHANNELS = tuple(c for c in CHANNELS if c != CHANNEL_SESSION)
 
 MAX_ROWS = 20000            # hard cap on the ledger (a tombstone is rare)
 LOCK_WAIT = 0.25            # seconds before dropping a contended write
@@ -156,8 +171,23 @@ def source_id(channel: str, text: str, *, repo: Path | None = None) -> str:
     profile scope + admission channel + content digest. The id carries no
     path, no excerpt and no credential — it cannot be read back into the
     source, only matched against it."""
-    scope = profile_scope(repo)
-    raw = f"{scope}\x1f{channel}\x1f{digest_of(text)}".encode("utf-8")
+    return source_id_from_digest(channel, digest_of(text), repo=repo)
+
+
+def source_id_from_digest(channel: str, digest: str, *,
+                          repo: Path | None = None,
+                          scope: str | None = None) -> str:
+    """The id of a source whose content digest is ALREADY known (D2).
+
+    The same derivation as `source_id`, for the callers that hold a digest
+    instead of the text — the session search index stores the digest of
+    every message, so it can name a source without keeping the text.
+
+    `scope` is the profile scope of the id; a caller that resolves many
+    sources in one pass passes the scope it already resolved, so the
+    derivation stays identical and the profile lookup happens once."""
+    scope = scope if scope else profile_scope(repo)
+    raw = f"{scope}\x1f{channel}\x1f{digest}".encode("utf-8")
     return "src_" + hashlib.sha256(raw).hexdigest()[:32]
 
 
@@ -405,6 +435,7 @@ def forget(channel: str, text: str, *, repo: Path | None = None,
     if scope is None:
         scope = (SCOPE_MEMORY if channel == CHANNEL_LEARNED
                  else SCOPE_PROFILE if channel == CHANNEL_PROFILE
+                 else SCOPE_SESSION if channel == CHANNEL_SESSION
                  else SCOPE_CURATED)
     row = {"id": source_id(channel, text, repo=repo),
            "channel": channel, "scope": scope,
@@ -476,6 +507,76 @@ def is_suppressed(channel: str, text: str, *, repo: Path | None = None,
     """Is this source suppressed right now? The admission gate (D5)."""
     snapshot = tombstones if tombstones is not None else load_set(repo, state)
     return snapshot.contains(channel, text)
+
+
+class ChannelSuppression:
+    """Which sources of ONE admission channel the ledger silences.
+
+    The ledger holds digests, not texts, so a source is matched by its own
+    content digest (and by its opaque id, for a set that carries ids
+    only). Two rules keep the check honest and cheap:
+
+    * the whole comparison is SKIPPED while the ledger holds no row of
+      this channel — the normal state, where nothing is forgotten, so a
+      read path pays nothing (D26/D34);
+    * a caller that already holds a content digest uses
+      `suppresses_digest`, so the digest is computed ONCE per distinct
+      message instead of once per read path (D34).
+
+    `suppresses(text)` expects the text in the IDENTITY FORM of the
+    channel — for the `session` channel that is the NORMALISED message
+    text (mycore.session), so the digest agrees with the search index."""
+
+    __slots__ = ("_channel", "_digests", "_ids", "_cache", "_possible")
+
+    def __init__(self, channel: str, snapshot: "TombstoneSet | None" = None):
+        self._channel = channel
+        self._digests: set = set()
+        self._ids: frozenset = frozenset()
+        self._cache: dict = {}
+        self._possible = False
+        if snapshot is None:
+            return
+        for chan, digest in (snapshot.pairs or ()):
+            if chan == channel:
+                self._digests.add(digest)
+        rows = list(snapshot.rows or ())
+        if rows:
+            # The rows carry the channel: a tombstone in ANOTHER store can
+            # never silence this channel's sources (D11), so the whole
+            # check can be skipped while no row of this channel exists.
+            self._possible = any(r.get("channel") == channel for r in rows)
+            self._ids = frozenset(r.get("id") for r in rows
+                                  if r.get("channel") == channel)
+        else:
+            # A merged set carries no rows (the channel of a row is then
+            # unknown): this channel's digests are enough to decide.
+            self._possible = bool(self._digests)
+
+    @property
+    def empty(self) -> bool:
+        """Can this set silence a source of this channel at all? (The normal
+        state: nothing is forgotten — the check costs nothing then.)"""
+        return not self._possible
+
+    def suppresses_digest(self, digest: str) -> bool:
+        """Is the source with this content digest silenced right now?"""
+        if not digest or self.empty:
+            return False
+        return digest in self._digests
+
+    def suppresses(self, text: str) -> bool:
+        """Is this source (as text in the channel's identity form) silenced?"""
+        if not text or self.empty:
+            return False
+        hit = self._cache.get(text)
+        if hit is None:
+            hit = (digest_of(text) in self._digests
+                   or source_id(self._channel, text) in self._ids)
+            if len(self._cache) >= 4096:
+                self._cache.clear()
+            self._cache[text] = hit
+        return hit
 
 
 # ------------------------------------------------------------- the filter ---
@@ -706,7 +807,7 @@ def _cli(argv: list[str]) -> int:
     sub.add_parser("list", help="list the recorded tombstone ids")
     p_forget = sub.add_parser("forget", help="record a tombstone")
     p_forget.add_argument("--channel", default=CHANNEL_LEARNED,
-                           choices=list(CHANNELS))
+                           choices=list(CLI_CHANNELS))
     p_forget.add_argument("--text", default="",
                            help="the source text to suppress")
     p_forget.add_argument("--slot", default="",

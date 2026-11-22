@@ -214,3 +214,25 @@ the rule, never the content.
   the per-profile state root.
 - Evidence: `tests/tg_forget_flow.py` (47/47), including an assertion that
   the model client is never called for a forget command.
+
+## Stage 6 — a session message can be forgotten
+
+- A transcript message is a source of its own, addressed by the digest of its
+  normalised text. The console's session search shows the message; a FORGET
+  action sits next to the result, so the owner recognises the source without
+  the product printing it anywhere new.
+- The transcript file is never rewritten. The filter sits at every point where
+  messages are read: the search index, the recall that runs after a fold, the
+  session list, the per-session export, the owner profile corpus, the
+  console's live chat history, its resume/fork/rewind faces, the chat
+  service's history and the CLI's session view.
+- The chat command list does NOT offer message sources: a chat reply quoting
+  past messages would move private text into another surface.
+- Honest limits: the transcript line stays on disk (and so does anything
+  already copied off the machine, committed to the public history, or captured
+  in a backup taken before the forget); normalisation makes the identity
+  case- and whitespace-insensitive, so "Hello" and "hello" are one source and
+  an edited message is a new one; two messages with identical text are one
+  source, so forgetting one silences both.
+- Evidence: `tests/session_forget_api.py` (72/72) and
+  `tests/session_forget_ui.py` (50/50, offline browser).

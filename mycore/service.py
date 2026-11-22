@@ -149,7 +149,7 @@ from .assembly import (build_system_stack, resolve_capability_path,
                          resolve_context_dirs, resolve_user_rules)
 from .loop import run_turn
 from .model import ChatClient
-from .session import Session
+from .session import Session, message_digest, message_suppression
 from .tg import POLL_BOT_ENV, TgClient, TgError
 from .tools import build_registry, resolve_disabled_tools
 
@@ -234,6 +234,42 @@ def state_dir() -> Path:
     """State root: env AIDOG_MC_STATE > <profile>/state > <repo>/data/mycore_service
     (the profile seam already embeds the env precedence — car F)."""
     return pp.state_dir(REPO)
+
+
+# --------------------------------------- stage 6: the transcript filter ----
+# A FORGOTTEN transcript message must not resurface through ANY read path
+# (D31). The chat service's own reads — the model's context, the turn
+# count, the /rewind head — therefore run the SAME filter the session
+# module's read paths run: the message is matched by the digest of its
+# NORMALISED text (the identity form the search index uses on both sides of
+# the index), and the whole comparison is SKIPPED while the ledger holds no
+# session-channel row (D34) — so a read path pays nothing when nothing is
+# forgotten.
+def _session_suppression(sessions_dir):
+    """The session-channel suppressor of the ACTIVE ledger (D34).
+
+    The ledger is the one of the state root that owns the sessions directory
+    (its parent) — the same rule the session module applies, so the console
+    and the chat service share ONE ledger for the same profile. An unreadable
+    ledger hides nothing: the suppressor degrades to "nothing is silenced"
+    (fail-soft, never a raised error in a read path)."""
+    return message_suppression(sessions_dir)
+
+
+def _visible_session_messages(messages: list[dict], suppression) -> list[dict]:
+    """The messages of a loaded session that are still VISIBLE (D31).
+
+    A forgotten message is dropped from every read: the model's own context,
+    the turn count, the /rewind head. The transcript FILE is never rewritten
+    — the line stays on disk, append-only and reviewable (D10/D31).
+
+    The check is skipped entirely while the ledger holds no session-channel
+    row (D34): with nothing forgotten the list comes back unchanged, so the
+    behaviour is byte-identical to the pre-suppression build."""
+    if suppression.empty:
+        return messages
+    return [m for m in messages
+            if not suppression.suppresses_digest(message_digest(m))]
 
 
 # ------------------------------------------------- release awareness (car G) --
@@ -1410,6 +1446,12 @@ class ChatService:
             meta = sess.meta()
         except OSError:
             return "not_found", 0
+        # A FORGOTTEN message is not carried into the truncated session
+        # (D31): the kept prefix is filtered through the same session
+        # suppressor the model-context read uses. The pre-rewind transcript
+        # still survives byte-identically in archive/ (D10).
+        msgs = _visible_session_messages(
+            msgs, _session_suppression(self.sessions))
         if not msgs:
             return "not_found", 0
         if not isinstance(keep, int) or isinstance(keep, bool) \
@@ -1473,6 +1515,10 @@ class ChatService:
             msgs = _Session(self._session_path(chat_id)).load()
         except OSError:
             msgs = []
+        # A FORGOTTEN message is not a rewind target and is not a visible
+        # turn any more (D31) — it cannot be matched, counted or kept.
+        msgs = _visible_session_messages(
+            msgs, _session_suppression(self.sessions))
         if not msgs:
             return self._t("cmd.rewind.empty")
 
@@ -1541,7 +1587,11 @@ class ChatService:
                            f"model={arg}")
             return self._t("cmd.model.set", model=arg)
         if name == "status":
-            turns = len(Session(self._session_path(chat_id)).load())
+            # A FORGOTTEN message is not a turn any more (D31): the count
+            # stays a count, and it counts what the model would see.
+            turns = len(_visible_session_messages(
+                Session(self._session_path(chat_id)).load(),
+                _session_suppression(self.sessions)))
             cfg = self._model_for_chat(chat_id)
             up = fmt_uptime(self._now() - self._started)
             return self._t("cmd.status.line", turns=turns, model=cfg.model,
@@ -3208,6 +3258,11 @@ class ChatService:
             sess = Session.create(path, meta={"model": cfg.model})
             history = []
         history = [m for m in history if m.get("role") != "system"]
+        # A FORGOTTEN message never reaches the model (D31): the model's own
+        # context is a READ path like any other, and the suppression applies
+        # the moment the tombstone exists (no restart, no tick).
+        history = _visible_session_messages(
+            history, _session_suppression(self.sessions))
 
         # Car 4 (D6) call site 4 — the model router (TG interactive leg).
         # A stored /model override is the operator's explicit choice and

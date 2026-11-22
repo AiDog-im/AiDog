@@ -420,6 +420,28 @@ Routes:
                                    repeat is a no-op that reports already=
                                    true. 400 bad shape | 404 unknown id |
                                    409 the ledger refused the write
+  GET  /api/sessions/forget/preview
+                               -> READ-ONLY (no auth, like the other read
+                                   faces): ?source=<src_…> -> {source_id,
+                                   channel, items, affects{recall,
+                                   session_list, profile}, limits} — what a
+                                   forget of one TRANSCRIPT MESSAGE WOULD do
+                                   and nothing more: the opaque id, the
+                                   channel, the counts, the honest D10
+                                   limits. Never the message text, never a
+                                   file path, never a credential. 400 missing
+                                   or malformed id | 404 unknown or
+                                   out-of-window id (never a guess)
+  POST /api/sessions/forget   -> Bearer WEB_TOKEN; {source_id} -> {ok, id,
+                                   channel, already, limits}. Records a
+                                   TOMBSTONE for one transcript message: the
+                                   transcript file is NEVER rewritten (D31),
+                                   the message leaves the search, the
+                                   fold-time recall, the session list, the
+                                   export and the owner profile. A repeat is
+                                   a no-op that reports already=true. 400 bad
+                                   shape | 404 unknown or out-of-window id |
+                                   409 the ledger refused the write
   GET  /static/i18n/<lang>.json -> locale packs served from the SSOT
                                    overlay/locales/ (en default, zh switchable)
 """
@@ -476,7 +498,9 @@ from mycore.service import (state_dir as mycore_state_dir,  # noqa: E402
                             BOT_COMMANDS)
 from mycore.session import (Session, export_session, list_sessions,  # noqa: E402
                              prune_old, read_head, session_file,
-                             write_session_file)
+                             write_session_file,
+                             find_message_by_source_id,
+                             message_digest, message_suppression)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
                           resolve_disabled_tools, outbound_probe,
                           outbound_validate)
@@ -5003,6 +5027,42 @@ def chat_session_path() -> Path:
     return chat_sessions_dir() / f"{CHAT_SESSION_NAME}.jsonl"
 
 
+# --------------------------------------- stage 6: the transcript filter ----
+# A FORGOTTEN transcript message must not resurface through ANY read path
+# (D31). The console's own faces — the live chat history, the context
+# usage, the model's own context, the rewind/fork heads — therefore run the
+# SAME filter the session module's read paths run: the message is matched by
+# the digest of its NORMALISED text (the identity form the search index uses
+# on both sides of the index), and the whole comparison is SKIPPED while the
+# ledger holds no session-channel row (D34) — so a read path pays nothing
+# when nothing is forgotten.
+def _session_suppression(directory=None):
+    """The session-channel suppressor of the ACTIVE ledger (D34).
+
+    The ledger is the one of the state root that owns the sessions directory
+    (its parent) — the same rule the session module applies. An unreadable
+    ledger hides nothing: the suppressor degrades to "nothing is silenced"
+    (fail-soft, never a raised error in a read face)."""
+    return message_suppression(directory)
+
+
+def _visible_session_messages(messages: list[dict], suppression) -> list[dict]:
+    """The messages of a loaded session that are still VISIBLE (D31).
+
+    A forgotten message is dropped from every read: the console's history,
+    the context usage, the model's own context, the rewind/fork heads. The
+    transcript FILE is never rewritten — the line stays on disk, append-only
+    and reviewable (D10/D31).
+
+    The check is skipped entirely while the ledger holds no session-channel
+    row (D34): with nothing forgotten the list comes back unchanged, so the
+    behaviour is byte-identical to the pre-suppression build."""
+    if suppression.empty:
+        return messages
+    return [m for m in messages
+            if not suppression.suppresses_digest(message_digest(m))]
+
+
 def chat_context_usage() -> dict:
     """Wave 3 (X14): read-only context usage for the console session.
 
@@ -5028,6 +5088,11 @@ def chat_context_usage() -> dict:
             runtime_facts=cli.resolve_runtime_facts())
         history = [m for m in Session(chat_session_path()).load()
                    if m.get("role") != "system"]
+        # A FORGOTTEN message is not part of the context the next model call
+        # sees, so it is not counted here either (D31) — the number stays the
+        # REAL one (the loop's own metric over what is actually sent).
+        history = _visible_session_messages(
+            history, _session_suppression(chat_sessions_dir()))
         sys_chars = measure(stack)
         ses_chars = measure(history)
     except Exception as e:  # noqa: BLE001 — honest degradation, no numbers
@@ -5049,10 +5114,16 @@ def chat_history(limit: int = 200) -> dict:
     session file (Session.load() order, append-only = stable), the handle
     POST /api/chat {action:'rewind'|'fork'} resolves. Ids are only as fresh
     as this read: a clear/resume/fork renumbers, so the client re-reads
-    history after any of them (it already does)."""
+    history after any of them (it already does).
+
+    A FORGOTTEN message is not shown (D31): it leaves this face at once,
+    while every other message keeps its absolute id (the ids stay the file's
+    own indices, so a rewind/fork handle never points at the wrong row).
+    The transcript file itself is never rewritten — the line stays on disk."""
     sess = Session(chat_session_path())
     full = sess.load()
     start = max(0, len(full) - limit)
+    suppression = _session_suppression(chat_sessions_dir())
     out = []
     for idx in range(start, len(full)):
         m = full[idx]
@@ -5062,6 +5133,9 @@ def chat_history(limit: int = 200) -> dict:
         content = m.get("content")
         if not isinstance(content, str):
             continue
+        if not suppression.empty and suppression.suppresses_digest(
+                message_digest(m)):
+            continue          # a forgotten message is not shown (D31)
         out.append({"id": idx, "role": role,
                     "content": content[:CHAT_HISTORY_CAP]})
     return {"messages": out, "count": len(out),
@@ -5150,7 +5224,16 @@ def resume_chat_session(sid: str) -> tuple[int, dict]:
     operation is non-destructive: the previous live session is in archive/,
     the target's only copy becomes the live session. ONE stderr audit line per
     attempt (sanitized id only — grammar-safe charset, no newlines), zero
-    message content, zero credentials."""
+    message content, zero credentials.
+
+    STAGE 6 — the resume is a FILE-level move, not a message-level read, so
+    it copies the transcript BYTE for byte: the copy keeps the forgotten
+    message's line on disk, exactly as D31 requires (the transcript file is
+    never rewritten, and this switch DELETES the source copy — filtering it
+    here would destroy the last on-disk copy of that line). The suppression
+    still holds on every READ of the resumed file: the console history, the
+    context usage, the model's context, the session list, the export and the
+    owner profile all filter the message out (D31)."""
     root = chat_sessions_dir()
     active = chat_session_path()
     audit_id = re.sub(r"[^A-Za-z0-9._/-]", "?", str(sid))[:96]
@@ -5261,7 +5344,13 @@ def rewind_chat_session(msg_id: object) -> tuple[int, dict]:
     pointing at a `user` row (only the user's own question is re-sendable —
     an assistant anchor answers 400; use `fork` there). 400 bad id / not a
     user row · 404 out of range. ONE sanitized stderr audit line (index
-    only, never content), like every other /api/chat action."""
+    only, never content), like every other /api/chat action.
+
+    A FORGOTTEN message is not carried into the new live session (D31): the
+    kept prefix is filtered through the same session suppressor the history
+    face uses. The pre-rewind transcript still survives byte-identically in
+    archive/ — the honest D10 limit (nothing is deleted, the line stays on
+    disk)."""
     audit_id = "-"
     if isinstance(msg_id, bool) or not isinstance(msg_id, int):
         sys.stderr.write("chat rewind id=- result=bad_id\n")
@@ -5292,6 +5381,9 @@ def rewind_chat_session(msg_id: object) -> tuple[int, dict]:
                      "details": ["only a user message can be rewound "
                                  "(use fork to branch from any message)"]}
     msgs = all_msgs[:msg_id]                          # drop target + tail
+    # A FORGOTTEN message is not carried into the new live session (D31).
+    msgs = _visible_session_messages(
+        msgs, _session_suppression(root))
     stamp = int(time.time())
     tmp = root / f"{CHAT_SESSION_NAME}.rewind-{stamp}." \
                f"{os.urandom(4).hex()}.jsonl.tmp"
@@ -5348,7 +5440,12 @@ def fork_chat_session(msg_id: object) -> tuple[int, dict]:
     when the user chooses to; that switch archives the original exactly
     like any session open). Crash-safe: entropy tmp + atomic rename, same
     directory. Validation mirrors rewind (int index, in range) but accepts
-    ANY role. Returns {ok, id, kept} — `id` is the fork's session id."""
+    ANY role. Returns {ok, id, kept} — `id` is the fork's session id.
+
+    A FORGOTTEN message is not copied into the fork (D31): the forked head
+    is filtered through the same session suppressor the history face uses,
+    so a forgotten message never gets a second copy on disk. The live
+    session is left byte-identical either way."""
     if isinstance(msg_id, bool) or not isinstance(msg_id, int):
         sys.stderr.write("chat fork id=- result=bad_id\n")
         return 400, {"error": "validation failed",
@@ -5369,6 +5466,9 @@ def fork_chat_session(msg_id: object) -> tuple[int, dict]:
         _audit("read_failed")
         return 404, {"error": "not found",
                      "details": ["no live session to fork"]}
+    # A FORGOTTEN message is not copied into the fork (D31) — the same
+    # suppressor the history face uses.
+    msgs = _visible_session_messages(msgs, _session_suppression(root))
     stamp = int(time.time())
     sid = f"{CHAT_SESSION_NAME}.fork.{stamp}"
     dst = root / f"{sid}.jsonl"
@@ -5523,6 +5623,10 @@ def _run_webhook_turn(text: str, sender: str):
         sess = Session.create(path, meta={"model": cfg.model})
         history = []
     history = [m for m in history if m.get("role") != "system"]
+    # A FORGOTTEN message never reaches the model (D31) — the webhook leg
+    # reads the same transcripts as every other face.
+    history = _visible_session_messages(
+        history, _session_suppression(chat_sessions_dir()))
 
     stack = build_system_stack(
         context_dirs=resolve_context_dirs(),
@@ -6785,6 +6889,114 @@ def apply_profiling_forget(source_id: str) -> tuple[dict, int]:
         "ok": True,
         "id": result["id"],
         "channel": PROFILE_FORGET_CHANNEL,
+        "already": bool(result["already"]),
+        "limits": result["limits"],
+    }, 200
+
+
+# -------------------------- the owner-facing forget: a transcript message --
+# The last store a tombstone can silence (stage 6 of the memory-suppression
+# design). A transcript MESSAGE is a source of its own: its opaque id is
+# the usual one over (profile scope, channel `session`, digest of the
+# NORMALISED message text) — the normalisation the search index already
+# uses, so the id agrees on both sides of the index (D30).
+#
+# THE TRANSCRIPT FILE IS NEVER REWRITTEN (D31): the message stays on disk,
+# append-only and reviewable, and every READ path drops it — the on-disk
+# search lookup, the fold-time recall, the session list, the per-session
+# export and the profiling corpus.
+#
+# THE SERVER RESOLVES THE SOURCE (D32): the console sends the opaque id and
+# never invents one; the server locates the message by digest inside the
+# EXISTING bounded scan window. A message that is gone, or that sits
+# outside that window, is refused honestly — never guessed at.
+#
+# The honest limit (D10/D35) stands and is the whole point: the transcript
+# LINE itself stays on disk, the published repository history keeps
+# whatever was committed there, and the copies that already left this
+# machine are untouched. The ledger row holds the opaque id and a content
+# digest — never the message, never a path, never a credential.
+SESSION_FORGET_CHANNEL = memforget.CHANNEL_SESSION
+_SESSION_SOURCE_RE = re.compile(r"^src_[0-9a-f]{32}$")
+
+
+def _session_source_error() -> dict:
+    """The honest answer for an unknown or out-of-window source id."""
+    return {"error": "unknown session source id"}
+
+
+def collect_session_forget_preview(source_id: str) -> tuple[dict, int]:
+    """GET /api/sessions/forget/preview?source=<id> — READ-ONLY, no auth
+    (like the other read faces).
+
+    What a forget of this transcript message WOULD do, and nothing more: the
+    opaque source id, the admission channel, how many messages that id
+    silences, the surfaces it silences and the honest D10 limits.
+
+    It carries NO message text, NO file path and NO credential — the source
+    id is opaque by construction (D2) and the counts are numbers."""
+    sid = str(source_id or "").strip()
+    if not sid:
+        return {"error": "a source id is required"}, 400
+    if not _SESSION_SOURCE_RE.match(sid):
+        return {"error": "malformed source id"}, 400
+    if sid in memforget.load_set().ids:
+        # Already silenced: a forget would change nothing, and the answer
+        # says so instead of pretending there is work to do.
+        return {"source_id": sid, "channel": SESSION_FORGET_CHANNEL,
+                "items": 0,
+                "affects": {"recall": False, "session_list": False,
+                            "profile": False},
+                "limits": memforget.LIMITS_NOTE}, 200
+    found = find_message_by_source_id(chat_sessions_dir(), sid)
+    if found is None:
+        return _session_source_error(), 404
+    items = int(found.get("count") or 0)
+    return {
+        "source_id": sid,
+        "channel": SESSION_FORGET_CHANNEL,
+        "items": items,
+        "affects": {
+            "recall": items > 0,
+            "session_list": items > 0,
+            "profile": int(found.get("user_items") or 0) > 0,
+        },
+        "limits": memforget.LIMITS_NOTE,
+    }, 200
+
+
+def apply_session_forget(source_id: str) -> tuple[dict, int]:
+    """POST /api/sessions/forget — record the tombstone for one message.
+
+    NOTHING is deleted: the transcript file is never rewritten (D31), and
+    the ledger records that the message must not be searched, recalled,
+    listed, exported or profiled again (D1/D5). Repeating the same forget
+    is a NO-OP that reports already=True, so the control is idempotent."""
+    sid = str(source_id or "").strip()
+    if not sid:
+        return {"error": "a source id is required"}, 400
+    if not _SESSION_SOURCE_RE.match(sid):
+        return {"error": "malformed source id"}, 400
+    if sid in memforget.load_set().ids:
+        return {"ok": True, "id": sid, "channel": SESSION_FORGET_CHANNEL,
+                "already": True, "limits": memforget.LIMITS_NOTE}, 200
+    found = find_message_by_source_id(chat_sessions_dir(), sid)
+    if found is None:
+        return _session_source_error(), 404
+    try:
+        result = memforget.forget(SESSION_FORGET_CHANNEL, found["text"],
+                                  scope=memforget.SCOPE_SESSION)
+    except memforget.MemforgetError as exc:
+        return {"error": str(exc)}, 409
+    if result.get("id") != sid:
+        # The id the client sent and the id the ledger derived must agree;
+        # if they ever do not, the honest answer is a refusal, not a
+        # tombstone for something else.
+        return {"error": "the session source could not be resolved"}, 409
+    return {
+        "ok": True,
+        "id": result["id"],
+        "channel": SESSION_FORGET_CHANNEL,
         "already": bool(result["already"]),
         "limits": result["limits"],
     }, 200
@@ -8157,6 +8369,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_profiles())
         if path == "/api/sessions":
             return self._handle_sessions_get()
+        if path == "/api/sessions/forget/preview":
+            params = {}
+            if "?" in self.path:
+                params = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+            payload, code = collect_session_forget_preview(
+                (params.get("source") or [""])[0])
+            return self._json(payload, code)
         if path == "/api/artifacts":
             return self._handle_artifacts_get()
         if path == "/api/mission":
@@ -8304,6 +8523,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_profiling_post()
         if path == "/api/profiling/forget":
             return self._handle_profiling_forget()
+        if path == "/api/sessions/forget":
+            return self._handle_session_forget()
         if path == "/api/pipeline":
             return self._handle_pipeline_post()
         if path == "/api/service/restart":
@@ -9834,6 +10055,40 @@ class Handler(BaseHTTPRequestHandler):
                              % (payload.get("id"), payload.get("already")))
         return self._json(payload, code)
 
+    def _handle_session_forget(self) -> None:
+        """POST /api/sessions/forget — Bearer WEB_TOKEN; {source_id}.
+
+        The owner-facing forget control for ONE transcript message (the
+        last store a tombstone can silence). It records a TOMBSTONE (D1):
+        NOTHING is deleted — the transcript file is never rewritten (D31),
+        and the message leaves the search, the fold-time recall, the
+        session list, the export and the owner profile at once (no restart,
+        no tick).
+
+        The SERVER resolves the source (D32): the console sends the opaque
+        id, the server locates the message by digest inside the existing
+        bounded scan window. An id that names nothing answers an honest
+        error, never a guess.
+
+        The write is gated like every other write route, and the answer
+        carries the opaque id, the channel, the already flag and the honest
+        D10 limits — never the message text, never a path, never a
+        credential."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        source_id = doc.get("source_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            return self._json({"error": "validation failed",
+                               "details": ["source_id is required"]}, 400)
+        payload, code = apply_session_forget(source_id)
+        if code == 200:
+            sys.stderr.write("session forget source=%s already=%s\n"
+                             % (payload.get("id"), payload.get("already")))
+        return self._json(payload, code)
+
     def _handle_pipeline_post(self) -> None:
         """POST /api/pipeline {action, ...} — Bearer gate (the settings write's
         contract). The acquisition pipeline's write face:
@@ -10329,6 +10584,12 @@ class Handler(BaseHTTPRequestHandler):
         # persisted, but counting the raw list keeps the arithmetic honest)
         base_len = len(history)
         history = [m for m in history if m.get("role") != "system"]
+        # A FORGOTTEN message never reaches the model (D31): the model's own
+        # context is a READ path like any other. The base index above stays
+        # the RAW row count, so the ids of this turn's rows still point at
+        # the file's own rows (the filtered rows are still ON disk).
+        history = _visible_session_messages(
+            history, _session_suppression(chat_sessions_dir()))
 
         stack = build_system_stack(
             context_dirs=resolve_context_dirs(),

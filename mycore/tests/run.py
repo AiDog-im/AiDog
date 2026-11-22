@@ -23083,6 +23083,727 @@ def test_profiling_forget() -> None:
                 os.environ[k] = saved[k]
 
 
+def test_session_forget() -> None:
+    """The TRANSCRIPT MESSAGE — the last store a tombstone can silence
+    (stage 6 of the memory-suppression design).
+
+    Design authority: docs/design/memory_suppression_design.md — D30 (a
+    message is a source, addressed by the digest of its NORMALISED text),
+    D31 (the transcript file is never rewritten), D32 (the server resolves
+    the source; the client never invents it), D33 (the chat command list
+    does NOT offer message sources), D34 (the check costs nothing while
+    nothing is forgotten), D35 (the limits stay visible), plus D1 (a
+    tombstone, never a deletion), D2 (opaque ids), D10 (honest limits) and
+    D11 (a suppression never crosses stores).
+
+    Covered: the message id is the usual opaque id over (profile scope,
+    channel `session`, the digest of the NORMALISED text) and agrees with
+    the search index; the search face names every hit's source; the
+    preview is READ-ONLY and honest; the write records a TOMBSTONE only;
+    the message leaves the search, the session list, the export, the
+    fold-time recall and the owner profile; the transcript file stays
+    byte-identical; an unrelated message keeps working; a repeat is
+    idempotent; an unknown or out-of-window id is refused honestly; a
+    suppression stays inside its profile; the ledger row and every answer
+    carry no text, no path and no credential; and the chat command list
+    never offers a message source (D33)."""
+    import json as _json
+    import os
+    import tempfile
+    from pathlib import Path as _Path
+    from mycore import forgetcmd as fc
+    from mycore import memforget as mf
+    from mycore import profiling as pf
+    from mycore import session as ss
+    from web import server as ws
+
+    keys = ("AIDOG_PROFILE", "AIDOG_PROFILES_DIR", "AIDOG_MC_STATE")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _env(state=None, profile=None, profiles=None) -> None:
+        for k in keys:
+            os.environ.pop(k, None)
+        if state is not None:
+            os.environ["AIDOG_MC_STATE"] = str(state)
+        if profiles is not None:
+            os.environ["AIDOG_PROFILES_DIR"] = str(profiles)
+        if profile is not None:
+            os.environ["AIDOG_PROFILE"] = profile
+
+    now = 1_800_000_000.0
+    day = 86400.0
+    SECRET = "the secret launch code is hunter2"
+    SURVIVOR = "the unrelated release notes mention version 5"
+    ASSISTANT = "understood, the secret launch code"
+    messages = [
+        {"role": "user", "content": SECRET, "ts": now - 2 * day},
+        {"role": "assistant", "content": ASSISTANT, "ts": now - 2 * day},
+        {"role": "user", "content": SURVIVOR, "ts": now - 5 * day},
+    ]
+    prod_state = REPO / "data" / "mycore_service"
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            profiles = _Path(td) / "profiles"
+            alpha = profiles / "alpha"
+            beta = profiles / "beta"
+            state = alpha / "state"
+            beta_state = beta / "state"
+            (state / "sessions").mkdir(parents=True)
+            (beta_state / "sessions").mkdir(parents=True)
+            body = "\n".join(_json.dumps(m) for m in messages) + "\n"
+            transcript = state / "sessions" / "a.jsonl"
+            transcript.write_text(body, encoding="utf-8")
+            beta_transcript = beta_state / "sessions" / "a.jsonl"
+            beta_transcript.write_text(body, encoding="utf-8")
+            transcript_before = transcript.read_bytes()
+            _env(state=state, profiles=profiles, profile="alpha")
+            sessions = state / "sessions"
+
+            # ---------------------------------------- 1. the message's id --
+            doc = {"role": "user", "content": SECRET}
+            sid = ss.message_source_id(doc)
+            check("session-forget: a message id is the usual opaque id over "
+                  "(scope, channel, digest of the normalised text)",
+                  sid.startswith("src_") and len(sid) == 36
+                  and sid == mf.source_id(mf.CHANNEL_SESSION,
+                                          ss.message_identity(doc)),
+                  sid)
+            check("session-forget: the id is scope-bound (a suppression never "
+                  "crosses profiles)",
+                  mf.source_id(mf.CHANNEL_SESSION, ss.message_identity(doc),
+                               repo=REPO) == sid, sid)
+
+            # ------------------------------- 2. the search face names hits --
+            out = ss.list_sessions(sessions, q="hunter2")
+            row = (out.get("sessions") or [{}])[0]
+            hits = row.get("hit_sources") or []
+            check("session-forget: the search face names every hit with its "
+                  "opaque source id",
+                  out.get("search", {}).get("method") == "fts5"
+                  and len(hits) == row.get("hits") == 1
+                  and hits[0].get("source_id") == sid,
+                  f"{out.get('search')} {hits}")
+            check("session-forget: the search face adds no path and no text "
+                  "to a hit",
+                  set(hits[0]) == {"source_id"}
+                  and str(sessions) not in _json.dumps(hits)
+                  and SECRET not in _json.dumps(hits),
+                  str(hits)[:160])
+
+            # ---------------------------- 3. D34: nothing forgotten is free --
+            check("session-forget: with nothing forgotten the suppressor is "
+                  "empty (the check costs nothing)",
+                  ss.message_suppression(sessions).empty)
+            check("session-forget: with nothing forgotten the read paths "
+                  "create no ledger file",
+                  not (state / "memforget").exists(),
+                  str(sorted(p.name for p in state.iterdir())))
+
+            # ------------------------------------- 4. the read-only preview --
+            payload, code = ws.collect_session_forget_preview(sid)
+            check("session-forget: the preview answers 200 without a Bearer "
+                  "token",
+                  code == 200 and isinstance(payload, dict), f"code={code}")
+            check("session-forget: the preview carries exactly the contracted "
+                  "keys",
+                  set(payload) == {"source_id", "channel", "items", "affects",
+                                   "limits"}, str(sorted(payload)))
+            check("session-forget: the preview names the channel and what it "
+                  "would silence",
+                  payload.get("channel") == mf.CHANNEL_SESSION
+                  and payload.get("source_id") == sid
+                  and payload.get("items") == 1
+                  and payload.get("affects") == {"recall": True,
+                                                 "session_list": True,
+                                                 "profile": True},
+                  str(payload)[:200])
+            check("session-forget: the preview carries the honest D10 "
+                  "limits",
+                  "NOT deleted" in str(payload.get("limits"))
+                  and "transcript" in str(payload.get("limits")),
+                  str(payload.get("limits"))[:120])
+            blob = _json.dumps(payload, ensure_ascii=False)
+            check("session-forget: the preview carries no message text, no "
+                  "path and no credential",
+                  SECRET not in blob and ASSISTANT not in blob
+                  and str(sessions) not in blob and "a.jsonl" not in blob
+                  and "WEB_TOKEN" not in blob, blob[:200])
+            check("session-forget: the preview wrote nothing (it is "
+                  "read-only)",
+                  not (state / "memforget").exists(),
+                  str(sorted(p.name for p in state.iterdir())))
+
+            # ----------------------------------------- 5. the honest errors --
+            payload, code = ws.collect_session_forget_preview("src_" + "0" * 32)
+            check("session-forget: an unknown source id answers an honest "
+                  "error, never a guess",
+                  code == 404 and payload.get("error"), f"code={code}")
+            payload, code = ws.collect_session_forget_preview("not-an-id")
+            check("session-forget: a malformed source id answers an honest "
+                  "error",
+                  code == 400 and payload.get("error"), f"code={code}")
+
+            # ------------------------------------------------ 6. the write --
+            payload, code = ws.apply_session_forget(sid)
+            check("session-forget: the forget answers ok with the id, the "
+                  "channel and the already flag",
+                  code == 200 and payload.get("ok") is True
+                  and payload.get("id") == sid
+                  and payload.get("channel") == mf.CHANNEL_SESSION
+                  and payload.get("already") is False,
+                  str(payload)[:200])
+            check("session-forget: the answer carries exactly the contracted "
+                  "keys",
+                  set(payload) == {"ok", "id", "channel", "already", "limits"},
+                  str(sorted(payload)))
+            answer = _json.dumps(payload, ensure_ascii=False)
+            check("session-forget: the answer holds no message text, no path "
+                  "and no credential",
+                  SECRET not in answer and ASSISTANT not in answer
+                  and str(sessions) not in answer and "a.jsonl" not in answer,
+                  answer[:200])
+
+            # ------------------------------------------------- 7. the ledger --
+            rows = mf.load_rows()
+            raw = (state / "memforget" / "tombstones.jsonl").read_text(
+                encoding="utf-8")
+            check("session-forget: the ledger holds exactly one row, in the "
+                  "session channel",
+                  len(rows) == 1 and rows[0].get("id") == sid
+                  and rows[0].get("channel") == mf.CHANNEL_SESSION,
+                  str(rows)[:200])
+            check("session-forget: the ledger row holds only a digest (no "
+                  "text, no path, no credential)",
+                  SECRET not in raw and ASSISTANT not in raw
+                  and str(sessions) not in raw and "a.jsonl" not in raw
+                  and _json.dumps(rows[0].get("digest")) != "",
+                  raw[:200])
+            check("session-forget: the tombstone names the session scope",
+                  rows[0].get("scope") == mf.SCOPE_SESSION, str(rows)[:160])
+
+            # -------------------------------- 8. the read paths react at once --
+            out2 = ss.list_sessions(sessions, q="hunter2")
+            check("session-forget: the forgotten message left the search "
+                  "results",
+                  not out2.get("sessions")
+                  and out2.get("count") == 0, str(out2)[:200])
+            listed = ss.list_sessions(sessions)
+            summary = " ".join(str(r.get("summary") or "")
+                               for r in listed.get("sessions") or [])
+            check("session-forget: the forgotten message left the session "
+                  "list",
+                  SECRET not in summary and ASSISTANT not in summary
+                  and SURVIVOR in summary, summary[:160])
+            text, _mime = ss.export_session(sessions, "a", "json")
+            doc_out = _json.loads(text)
+            check("session-forget: the forgotten message left the per-session "
+                  "export",
+                  SECRET not in text and doc_out.get("count") == 2
+                  and SURVIVOR in text, str(doc_out)[:200])
+            recall = ss.recall_snippets(
+                [{"role": "user", "content": SECRET},
+                 {"role": "user", "content": SURVIVOR}],
+                "secret launch code")
+            snippets = " ".join(str(h.get("text") or "")
+                                for h in recall.get("hits") or [])
+            check("session-forget: the forgotten message left the fold-time "
+                  "recall",
+                  "hunter2" not in snippets, snippets[:160])
+            # the fold-time path in mycore/loop.py needs NO change: the
+            # filter lives in the session module the loop calls
+            from mycore.loop import RECALL_MARKER, _recall_into
+
+            def _markers(messages):
+                return [m for m in messages
+                        if isinstance(m.get("content"), str)
+                        and m["content"].startswith(RECALL_MARKER)]
+
+            live = [{"role": "system", "content": "constitution"},
+                    {"role": "user", "content": "recheck the secret code"}]
+            _recall_into(live, [{"role": "user", "content": SECRET}])
+            check("session-forget: the fold-time recall in mycore/loop.py "
+                  "drops the forgotten message (the loop needs no change)",
+                  _markers(live) == [], str(_markers(live))[:200])
+            live2 = [{"role": "system", "content": "constitution"},
+                     {"role": "user", "content": "recheck the release notes"}]
+            _recall_into(live2, [{"role": "user", "content": SURVIVOR}])
+            check("session-forget: the fold-time recall still works for an "
+                  "unrelated message",
+                  len(_markers(live2)) == 1, str(_markers(live2))[:200])
+            report = pf.analyze(now, block={"top_k": 40, "exclude": []},
+                                root=state, curated="", source_terms=())
+            tokens = {r["token"] for r in report["keywords"]}
+            check("session-forget: a rebuilt profile cannot regenerate the "
+                  "forgotten message",
+                  "hunter2" not in tokens and "secret" not in tokens
+                  and "release" in tokens, str(sorted(tokens)))
+
+            # ------------------------------ 9. NOTHING was rewritten on disk --
+            check("session-forget: NOTHING was rewritten — the transcript is "
+                  "byte-identical",
+                  transcript.read_bytes() == transcript_before,
+                  "the session transcript changed")
+
+            # --------------------------------- 10. an unrelated message works --
+            out3 = ss.list_sessions(sessions, q="release")
+            row3 = (out3.get("sessions") or [{}])[0]
+            check("session-forget: a second, unrelated message still works",
+                  out3.get("count") == 1 and row3.get("hits") == 1
+                  and row3.get("hit_sources", [{}])[0].get("source_id")
+                  != sid, str(out3)[:200])
+
+            # ------------------------------------------- 11. idempotence ----
+            payload, code = ws.apply_session_forget(sid)
+            check("session-forget: repeating the forget is a no-op that "
+                  "reports already",
+                  code == 200 and payload.get("already") is True
+                  and payload.get("id") == sid and len(mf.load_rows()) == 1,
+                  str(payload)[:160])
+            payload, code = ws.collect_session_forget_preview(sid)
+            check("session-forget: the preview of an already-forgotten source "
+                  "says so honestly",
+                  code == 200 and payload.get("items") == 0
+                  and payload.get("affects") == {"recall": False,
+                                                 "session_list": False,
+                                                 "profile": False},
+                  str(payload)[:200])
+
+            # ---------------------------- 12. a message that is gone/window --
+            gone = state / "sessions" / "gone.jsonl"
+            gone.write_text(_json.dumps({"role": "user", "content": "gone",
+                                         "ts": now}) + "\n", encoding="utf-8")
+            gone_id = ss.message_source_id({"role": "user", "content": "gone"})
+            gone.unlink()
+            payload, code = ws.apply_session_forget(gone_id)
+            check("session-forget: a message that is gone is refused "
+                  "honestly",
+                  code == 404 and payload.get("error"), f"code={code}")
+            far = state / "sessions" / "far.jsonl"
+            with open(far, "w", encoding="utf-8") as handle:
+                handle.write(_json.dumps({"role": "user",
+                                          "content": "padding " * 200000,
+                                          "ts": now}) + "\n")
+                handle.write(_json.dumps({"role": "user",
+                                          "content": "beyond the window",
+                                          "ts": now}) + "\n")
+            far_id = ss.message_source_id({"role": "user",
+                                           "content": "beyond the window"})
+            payload, code = ws.apply_session_forget(far_id)
+            check("session-forget: a message outside the bounded scan window "
+                  "is refused honestly, never guessed at",
+                  code == 404 and payload.get("error"), f"code={code}")
+            far.unlink()
+
+            # -------------------------------------------- 13. the isolation --
+            _env(state=beta_state, profiles=profiles, profile="beta")
+            beta_out = ss.list_sessions(beta_state / "sessions", q="hunter2")
+            beta_row = (beta_out.get("sessions") or [{}])[0]
+            check("session-forget: a suppression stays inside its profile",
+                  beta_out.get("count") == 1
+                  and beta_row.get("hit_sources", [{}])[0].get("source_id")
+                  != sid, str(beta_out)[:200])
+            beta_report = pf.analyze(now, block={"top_k": 40, "exclude": []},
+                                     root=beta_state, curated="",
+                                     source_terms=())
+            check("session-forget: another profile's profile still holds the "
+                  "message's words",
+                  "hunter2" in {r["token"] for r in beta_report["keywords"]},
+                  str(sorted(r["token"] for r in beta_report["keywords"])))
+            _env(state=state, profiles=profiles, profile="alpha")
+
+            # ------------------------------------- 14. D33: the chat surface --
+            found = fc.candidates("hunter2", repo=REPO, state=state)
+            check("session-forget: the chat command list does NOT offer a "
+                  "message source",
+                  all(c.get("channel") != mf.CHANNEL_SESSION for c in found)
+                  and all(c.get("kind") in ("slot", "profile") for c in found),
+                  str(found)[:200])
+            check("session-forget: the ledger's session channel is not "
+                  "reachable from the command line either",
+                  mf.CHANNEL_SESSION not in mf.CLI_CHANNELS,
+                  str(mf.CLI_CHANNELS))
+
+            # ---------------------------------------------- 15. the hygiene --
+            check("session-forget: the other profile's transcript is "
+                  "untouched",
+                  beta_transcript.read_bytes() == transcript_before,
+                  "a session transcript changed")
+            check("session-forget: the production state was never written",
+                  not (prod_state / "memforget").exists(),
+                  str(sorted(p.name for p in prod_state.iterdir()))[:200]
+                  if prod_state.exists() else "no production state dir")
+
+            # ------------------------------- 16. an assistant message is one -
+            assistant_id = ss.message_source_id({"role": "assistant",
+                                                 "content": ASSISTANT})
+            payload, code = ws.collect_session_forget_preview(assistant_id)
+            check("session-forget: an assistant message is a source too, and "
+                  "it never fed the owner profile",
+                  code == 200 and payload.get("items") == 1
+                  and payload.get("affects") == {"recall": True,
+                                                 "session_list": True,
+                                                 "profile": False},
+                  str(payload)[:240])
+            payload, code = ws.apply_session_forget(assistant_id)
+            check("session-forget: the assistant message can be forgotten "
+                  "too",
+                  code == 200 and payload.get("ok") is True
+                  and payload.get("already") is False, str(payload)[:200])
+            check("session-forget: the ledger now holds both messages",
+                  len(mf.load_rows()) == 2
+                  and {r["channel"] for r in mf.load_rows()}
+                  == {mf.CHANNEL_SESSION}, str(mf.load_rows())[:200])
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
+
+def test_session_forget_read_paths() -> None:
+    """The remaining READ paths of the stage-6 session suppression.
+
+    Design authority: docs/design/memory_suppression_design.md — D31 (the
+    transcript file is never rewritten; EVERY read path drops the message),
+    D30 (the identity is the digest of the NORMALISED text), D34 (the
+    check costs nothing while nothing is forgotten), D10 (the honest
+    limits), plus D1 (a tombstone, never a deletion) and D2 (opaque ids).
+
+    `test_session_forget` covers the five PRIMARY paths (the search index
+    lookup, the fold-time recall, the session list summary, the per-session
+    export and the profiling corpus). THIS test covers the faces the first
+    pass reported as unfiltered:
+      1. the console's live chat history (GET /api/chat/history) and the
+         context usage that rides with it;
+      2. the console's resume / fork / rewind read faces;
+      3. the chat service's history (the model's own context) and its
+         turn-count face (/status);
+      4. the one-shot runner's session view (mycore/cli.py).
+
+    For every face: after the forget the message is ABSENT, an unrelated
+    message still appears, the transcript on disk keeps its bytes, nothing
+    changes while nothing is forgotten, and no body, path or credential
+    leaks into a response.
+
+    Offline: a throwaway profile state root (its own ledger, its own
+    transcripts); module surgery is restored in a finally; the production
+    state, the production profile and the repository's own files are never
+    written."""
+    import io as _io
+    import json as _json
+    import os
+    import tempfile
+    from contextlib import redirect_stdout as _redirect_stdout
+    from pathlib import Path as _Path
+    from mycore import cli as _cli
+    from mycore import memforget as mf
+    from mycore import service as svc_mod
+    from mycore import session as ss
+    from web import server as ws
+
+    keys = ("AIDOG_PROFILE", "AIDOG_PROFILES_DIR", "AIDOG_MC_STATE")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _env(state=None, profile=None, profiles=None) -> None:
+        for k in keys:
+            os.environ.pop(k, None)
+        if state is not None:
+            os.environ["AIDOG_MC_STATE"] = str(state)
+        if profiles is not None:
+            os.environ["AIDOG_PROFILES_DIR"] = str(profiles)
+        if profile is not None:
+            os.environ["AIDOG_PROFILE"] = profile
+
+    now = 1_800_000_000.0
+    SECRET = "the secret launch code is hunter2"
+    ASSISTANT = "understood, the secret launch code"
+    SURVIVOR = "the unrelated release notes mention version 5"
+    TOKEN = "READ-PATH-TOKEN-NOT-A-CREDENTIAL"
+
+    def _rows(*pairs) -> str:
+        return "\n".join(
+            _json.dumps({"role": role, "content": text, "ts": now})
+            for role, text in pairs) + "\n"
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            profiles = _Path(td) / "profiles"
+            state = profiles / "alpha" / "state"
+            sessions = state / "sessions"
+            sessions.mkdir(parents=True)
+            console_session = sessions / "web.jsonl"
+            console_session.write_text(
+                _rows(("user", SECRET), ("assistant", ASSISTANT),
+                      ("user", SURVIVOR)), encoding="utf-8")
+            service_session = sessions / "111.jsonl"
+            service_session.write_text(
+                _rows(("user", SECRET), ("user", SURVIVOR)), encoding="utf-8")
+            _env(state=state, profiles=profiles, profile="alpha")
+            console_before = console_session.read_bytes()
+            service_before = service_session.read_bytes()
+
+            # =============================== 0. nothing forgotten yet ======
+            hist = ws.chat_history()
+            ctx = ws.chat_context_usage()
+            check("read-paths: with nothing forgotten the console history is "
+                  "untouched",
+                  hist.get("count") == 3
+                  and SECRET in _json.dumps(hist)
+                  and ASSISTANT in _json.dumps(hist)
+                  and SURVIVOR in _json.dumps(hist), str(hist)[:200])
+            check("read-paths: with nothing forgotten the context usage "
+                  "counts every turn",
+                  ctx.get("available") is True
+                  and isinstance(ctx.get("session_chars"), int)
+                  and ctx.get("session_chars") > 0, _json.dumps(ctx)[:200])
+            check("read-paths: with nothing forgotten the suppressor is empty "
+                  "(the check costs nothing)",
+                  ss.message_suppression(sessions).empty)
+            check("read-paths: with nothing forgotten no ledger file is "
+                  "created",
+                  not (state / "memforget").exists(),
+                  str(sorted(p.name for p in state.iterdir())))
+
+            # ================================= 1. the forget (a tombstone) ==
+            doc = {"role": "user", "content": SECRET}
+            sid = ss.message_source_id(doc)
+            result = mf.forget(mf.CHANNEL_SESSION, ss.message_identity(doc),
+                               state=state, scope=mf.SCOPE_SESSION)
+            check("read-paths: the forget records the session tombstone",
+                  result.get("ok") is True and result.get("id") == sid
+                  and result.get("already") is False, str(result)[:200])
+            rows_ledger = mf.load_rows(state=state)
+            check("read-paths: the ledger holds one session row and no text",
+                  len(rows_ledger) == 1
+                  and rows_ledger[0].get("channel") == mf.CHANNEL_SESSION
+                  and SECRET not in _json.dumps(rows_ledger),
+                  str(rows_ledger)[:200])
+
+            # ============================ 2. the console's live history ====
+            hist = ws.chat_history()
+            blob = _json.dumps(hist, ensure_ascii=False)
+            check("read-paths: the forgotten message left the console's live "
+                  "chat history",
+                  SECRET not in blob and ASSISTANT in blob and SURVIVOR in blob,
+                  blob[:200])
+            check("read-paths: the console history shape is unchanged",
+                  set(hist) == {"messages", "count", "context"}
+                  and isinstance(hist.get("count"), int)
+                  and all(set(m) == {"id", "role", "content"}
+                          for m in hist.get("messages") or []),
+                  str(sorted(hist))[:160])
+            check("read-paths: the console history keeps the absolute ids of "
+                  "the visible rows",
+                  [m["id"] for m in hist["messages"]] == [1, 2],
+                  str([m["id"] for m in hist["messages"]]))
+            check("read-paths: the console history carries no path and no "
+                  "credential",
+                  str(state) not in blob and "web.jsonl" not in blob
+                  and TOKEN not in blob and "Bearer" not in blob, blob[:200])
+            ctx2 = ws.chat_context_usage()
+            check("read-paths: the context usage counts only the visible "
+                  "turns",
+                  ctx2.get("available") is True
+                  and ctx2.get("messages") == ctx.get("messages") - 1
+                  and ctx2.get("session_chars") < ctx.get("session_chars"),
+                  f"{ctx.get('messages')} -> {ctx2.get('messages')}")
+            check("read-paths: the console history did not rewrite the "
+                  "transcript",
+                  console_session.read_bytes() == console_before,
+                  "the session transcript changed")
+
+            # ============================= 3. fork / rewind / resume ========
+            live_before = console_session.read_bytes()
+            code, out = ws.fork_chat_session(2)
+            check("read-paths: the fork answers ok and counts the visible "
+                  "messages only",
+                  code == 200 and out.get("ok") is True
+                  and out.get("kept") == 2, str(out)[:200])
+            fork_path = sessions / f"{out.get('id')}.jsonl"
+            fork_text = fork_path.read_text(encoding="utf-8")
+            check("read-paths: the forked file carries no forgotten message",
+                  SECRET not in fork_text and ASSISTANT in fork_text
+                  and SURVIVOR in fork_text, fork_text[:200])
+            check("read-paths: the fork leaves the live session "
+                  "byte-identical",
+                  console_session.read_bytes() == live_before,
+                  "the live session changed")
+
+            # the rewind: its own live slot, so the main console session
+            # stays intact for the other checks
+            rewind_live = sessions / "rewind.jsonl"
+            rewind_live.write_text(
+                _rows(("user", SECRET), ("assistant", ASSISTANT),
+                      ("user", SURVIVOR)), encoding="utf-8")
+            rewind_before = rewind_live.read_bytes()
+            saved_path = ws.chat_session_path
+            ws.chat_session_path = lambda: rewind_live  # type: ignore[assignment]
+            try:
+                code, out = ws.rewind_chat_session(2)
+            finally:
+                ws.chat_session_path = saved_path  # type: ignore[assignment]
+            check("read-paths: the rewind answers ok",
+                  code == 200 and out.get("ok") is True, str(out)[:200])
+            kept = [m.get("content") for m in ss.Session(rewind_live).load()]
+            check("read-paths: the rewind does not carry the forgotten "
+                  "message into the new live session",
+                  SECRET not in kept and ASSISTANT in kept, str(kept)[:200])
+            archived = sorted((sessions / "archive").glob("web.*.jsonl"))
+            check("read-paths: the pre-rewind transcript survives "
+                  "byte-identically in archive/ (D10)",
+                  len(archived) == 1
+                  and archived[0].read_bytes() == rewind_before,
+                  str([a.name for a in archived]))
+
+            # the resume: a FILE-level move, so the copy keeps the line on
+            # disk (D31) — but every READ of the resumed file is filtered
+            resume_live = sessions / "resume.jsonl"
+            resume_live.write_text(
+                _rows(("user", SECRET), ("assistant", ASSISTANT),
+                      ("user", SURVIVOR)), encoding="utf-8")
+            target = sessions / "target.jsonl"
+            target_body = _rows(("user", SECRET), ("assistant", ASSISTANT),
+                                ("user", SURVIVOR))
+            target.write_text(target_body, encoding="utf-8")
+            saved_path = ws.chat_session_path
+            ws.chat_session_path = lambda: resume_live  # type: ignore[assignment]
+            try:
+                code, out = ws.resume_chat_session("target")
+            finally:
+                ws.chat_session_path = saved_path  # type: ignore[assignment]
+            check("read-paths: the resume answers ok",
+                  code == 200 and out.get("ok") is True
+                  and out.get("resumed") is True, str(out)[:200])
+            check("read-paths: the resume is a byte-level move — the line "
+                  "stays on disk (D31/D10)",
+                  resume_live.read_text(encoding="utf-8") == target_body,
+                  "the resumed copy differs")
+            saved_path = ws.chat_session_path
+            ws.chat_session_path = lambda: resume_live  # type: ignore[assignment]
+            try:
+                hist3 = ws.chat_history()
+            finally:
+                ws.chat_session_path = saved_path  # type: ignore[assignment]
+            blob3 = _json.dumps(hist3, ensure_ascii=False)
+            check("read-paths: the resumed session is still filtered on read",
+                  SECRET not in blob3 and SURVIVOR in blob3, blob3[:200])
+
+            # ======================= 4. the chat service's history face ====
+            seen: list[list[dict]] = []
+
+            def _chat(messages=None, tools=None, **kw):
+                seen.append(list(messages or []))
+                return fake_response(text="pong")
+
+            from mycore.tg import POLL_BOT_ENV
+            saved_tok = os.environ.get(POLL_BOT_ENV)
+            saved_wd = os.environ.get("MYCORE_WD_CHAT")
+            os.environ[POLL_BOT_ENV] = "read-path-test-token-not-real"
+            os.environ.pop("MYCORE_WD_CHAT", None)
+            try:
+                svc = svc_mod.ChatService(state, frozenset({111}), chat=_chat,
+                                          now=lambda: 0.0)
+                svc._pipeline_body(111, "what is the plan?")
+                model_seen = " ".join(str(m.get("content") or "")
+                                      for m in (seen[0] if seen else []))
+                check("read-paths: the forgotten message never reaches the "
+                      "service's model context",
+                      bool(seen) and SECRET not in model_seen
+                      and SURVIVOR in model_seen, model_seen[:200])
+                check("read-paths: the service's model context keeps every "
+                      "other turn",
+                      bool(seen)
+                      and sum(1 for m in seen[0]
+                              if m.get("content") == SURVIVOR) == 1,
+                      str(len(seen[0]) if seen else 0))
+                check("read-paths: the service's transcript keeps the "
+                      "forgotten line on disk (append-only, D31)",
+                      service_session.read_bytes().startswith(service_before)
+                      and SECRET in service_session.read_text(encoding="utf-8"),
+                      "the service transcript changed")
+
+                # ===================== 5. the service's turn-count face ===
+                raw_rows = len(ss.Session(service_session).load())
+                reply = svc._command(111, "/status")
+                turns = None
+                for token in str(reply).split():
+                    if token.startswith("turns="):
+                        turns = int(token.split("=", 1)[1] or 0)
+                check("read-paths: the service's turn count skips the "
+                      "forgotten message",
+                      turns is not None and turns == raw_rows - 1,
+                      f"turns={turns} raw={raw_rows} reply={str(reply)[:80]}")
+                check("read-paths: the service's turn-count face carries no "
+                      "message text",
+                      SECRET not in str(reply) and str(state) not in str(reply),
+                      str(reply)[:160])
+            finally:
+                if saved_tok is None:
+                    os.environ.pop(POLL_BOT_ENV, None)
+                else:
+                    os.environ[POLL_BOT_ENV] = saved_tok
+                if saved_wd is None:
+                    os.environ.pop("MYCORE_WD_CHAT", None)
+                else:
+                    os.environ["MYCORE_WD_CHAT"] = saved_wd
+
+            # ============================ 6. the CLI's session view ========
+            cli_session = _Path(td) / "cli" / "session.jsonl"
+            cli_session.parent.mkdir(parents=True, exist_ok=True)
+            cli_session.write_text(
+                _rows(("user", SECRET), ("assistant", ASSISTANT),
+                      ("user", SURVIVOR)), encoding="utf-8")
+            cli_before = cli_session.read_bytes()
+            cli_seen: list[list[dict]] = []
+
+            class _FakeClient:
+                def __init__(self, cfg):
+                    self.cfg = cfg
+
+                def chat(self, messages, tools=None, **kw):
+                    cli_seen.append(list(messages or []))
+                    return fake_response(text="pong")
+
+            saved_client = _cli.ChatClient
+            _cli.ChatClient = _FakeClient  # type: ignore[assignment]
+            buf = _io.StringIO()
+            try:
+                with _redirect_stdout(buf):
+                    rc = _cli.main(["--session", str(cli_session), "--quiet",
+                                    "what is the plan?"])
+            finally:
+                _cli.ChatClient = saved_client  # type: ignore[assignment]
+            cli_model = " ".join(str(m.get("content") or "")
+                                 for m in (cli_seen[0] if cli_seen else []))
+            check("read-paths: the CLI's session view drops the forgotten "
+                  "message",
+                  rc == 0 and bool(cli_seen) and SECRET not in cli_model
+                  and SURVIVOR in cli_model, cli_model[:200])
+            check("read-paths: the CLI's session file keeps the forgotten "
+                  "line on disk (append-only, D31)",
+                  cli_session.read_bytes().startswith(cli_before)
+                  and SECRET in cli_session.read_text(encoding="utf-8"),
+                  "the CLI session changed")
+
+            # ============================== 7. the hygiene ==================
+            check("read-paths: the console transcript is byte-identical after "
+                  "every leg",
+                  console_session.read_bytes() == console_before,
+                  "the console transcript changed")
+            check("read-paths: the production state was never written",
+                  not (REPO / "data" / "mycore_service" / "memforget").exists(),
+                  "the production ledger exists")
+            check("read-paths: the read faces carry no credential",
+                  TOKEN not in _json.dumps(hist) + _json.dumps(hist3),
+                  "a credential leaked")
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -23184,6 +23905,8 @@ def main() -> int:
         test_memforget,
         test_memory_forget_api,
         test_profiling_forget,
+        test_session_forget,
+        test_session_forget_read_paths,
     ]
     rows = []
     for fn in suites:

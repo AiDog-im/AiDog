@@ -64,6 +64,7 @@ from pathlib import Path
 
 from lib import profile_paths as pp  # noqa: E402  (profile state seam)
 from mycore import memforget  # noqa: E402  (memory suppression, D5/D7)
+from mycore.session import text_digest  # noqa: E402  (the session identity form)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -580,7 +581,8 @@ def _channel_of(name: str) -> str:
 def collect_messages(root: Path, *, since: str = "",
                      exclude: tuple[str, ...] = (),
                      max_messages: int = MAX_MESSAGES,
-                     max_chars: int = MAX_CHARS) -> dict:
+                     max_chars: int = MAX_CHARS,
+                     suppression=None) -> dict:
     """Owner messages from the local session history.
 
     Only `role == "user"` content counts: the assistant's and the tools' text
@@ -589,6 +591,12 @@ def collect_messages(root: Path, *, since: str = "",
     repeating one prompt is not evidence of interest) and the collapse is
     reported. Returns {messages, corpus, truncated} where each message is
     (ts, day, text, had_urgency, had_proactive) — text already capped.
+
+    A FORGOTTEN message never enters the corpus (D31): the profile is built
+    from the owner's own words, so a message the owner silenced must not
+    regenerate a profile item — not now, and not on the next rebuild. The
+    message is checked in its IDENTITY FORM (the normalised text the
+    session index uses), so the check agrees with the ledger on both sides.
     """
     since_ts = 0.0
     if since:
@@ -597,6 +605,9 @@ def collect_messages(root: Path, *, since: str = "",
                 tzinfo=_BJ).timestamp()
         except ValueError:
             since_ts = 0.0
+    if suppression is None:
+        suppression = memforget.ChannelSuppression(memforget.CHANNEL_SESSION,
+                                                   None)
     messages: list[tuple[float, str, str, bool, bool]] = []
     total_chars = 0
     scanned = 0
@@ -613,6 +624,9 @@ def collect_messages(root: Path, *, since: str = "",
             text = doc.get("content")
             if not isinstance(text, str) or not text.strip():
                 continue
+            if not suppression.empty and suppression.suppresses_digest(
+                    text_digest(text)):
+                continue              # a forgotten message is not evidence
             ts = doc.get("ts")
             if isinstance(ts, bool) or not isinstance(ts, (int, float)):
                 ts = 0.0
@@ -783,8 +797,15 @@ def analyze(now: float | None = None, *, block: dict | None = None,
                 "error": str(e)[:160], "keywords": [], "corpus": {},
                 "truncated": False, "rhythm": {}}
     state_root = root if root is not None else pp.state_dir(repo or REPO)
+    # ONE ledger read serves both channels: the derived profile items and
+    # the transcript messages the corpus is built from (D31/D34).
+    snapshot = (tombstones if tombstones is not None
+                else memforget.load_set(repo, state=state_root))
+    session_suppression = memforget.ChannelSuppression(
+        memforget.CHANNEL_SESSION, snapshot)
     got = collect_messages(state_root, since=cfg["since"],
-                           exclude=tuple(cfg["exclude"]))
+                           exclude=tuple(cfg["exclude"]),
+                           suppression=session_suppression)
     corpus = got["corpus"]
     messages = got["messages"]
     rhythm = collect_rhythm(state_root)
@@ -811,9 +832,7 @@ def analyze(now: float | None = None, *, block: dict | None = None,
     # silenced token never enters the profile, so the stored document, the
     # score, the tallies and the keyword list are computed WITHOUT it and a
     # re-analysis cannot reintroduce it (D7).
-    suppression = _Suppression(
-        tombstones if tombstones is not None
-        else memforget.load_set(repo, state=state_root))
+    suppression = _Suppression(snapshot)
     docs = {day: set() for day in corpus["days"]}
     per_token: dict[str, dict] = {}
     for ts, day, text, urg, pro in messages:

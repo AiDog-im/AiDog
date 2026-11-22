@@ -23,7 +23,7 @@ from .assembly import (build_system_stack, resolve_capability_path,
 from .modeltier import parse_upstreams, parse_endpoints, MAX_RPM, MAX_TPM
 from .loop import run_turn
 from .model import ChatClient, ModelConfig, ModelError
-from .session import Session
+from .session import Session, message_digest, message_suppression
 from .tools import build_registry, resolve_disabled_tools
 
 DEFAULT_BUDGET_CHARS = 24000        # ~6k tokens of conversation payload
@@ -32,6 +32,40 @@ from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 
 DEFAULT_RUN_DEADLINE = 1800     # L3 (owner2026-11-07): turn ceiling, seconds
+
+
+# --------------------------------------- stage 6: the transcript filter ----
+# A FORGOTTEN transcript message must not resurface through ANY read path
+# (D31). The one-shot runner reads a session and puts its turns into the
+# model's context, so it runs the SAME filter the session module's read
+# paths run: the message is matched by the digest of its NORMALISED text
+# (the identity form the search index uses on both sides of the index), and
+# the whole comparison is SKIPPED while the ledger holds no session-channel
+# row (D34) — so the read pays nothing when nothing is forgotten.
+def _session_suppression():
+    """The session-channel suppressor of the ACTIVE profile's ledger (D34).
+
+    The ledger is the one of the active profile's state root — the same
+    ledger the console and the chat service read, so one profile has one
+    suppression set. An unreadable ledger hides nothing: the suppressor
+    degrades to "nothing is silenced" (fail-soft, never a raised error)."""
+    return message_suppression()
+
+
+def _visible_session_messages(messages: list[dict], suppression) -> list[dict]:
+    """The messages of a loaded session that are still VISIBLE (D31).
+
+    A forgotten message is dropped from the model's context. The transcript
+    FILE is never rewritten — the line stays on disk, append-only and
+    reviewable (D10/D31).
+
+    The check is skipped entirely while the ledger holds no session-channel
+    row (D34): with nothing forgotten the list comes back unchanged, so the
+    behaviour is byte-identical to the pre-suppression build."""
+    if suppression.empty:
+        return messages
+    return [m for m in messages
+            if not suppression.suppresses_digest(message_digest(m))]
 
 
 def resolve_run_deadline() -> int | None:
@@ -222,6 +256,9 @@ def main(argv: list[str] | None = None) -> int:
     # fresh each run — constitution/memory must reflect the repo, not a stale
     # snapshot). Strip any system lines a legacy file may carry, then prepend.
     history = [m for m in messages if m.get("role") != "system"]
+    # A FORGOTTEN message never reaches the model (D31): the one-shot
+    # runner's session view is a READ path like any other.
+    history = _visible_session_messages(history, _session_suppression())
     messages = system_msgs + history
     persist_from = len(messages)          # user prompt must persist with the turn
     messages.append({"role": "user", "content": prompt})
