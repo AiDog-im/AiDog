@@ -20,7 +20,13 @@ Contract (B3, owner-approved):
   - invalid input is retried up to 3 times with the reason (never echoing the
     value), then the slot is skipped (left empty) — pending stays fail-closed;
   - finally offers to run deploy/install.sh (doctor + boot + verify) unless
-    --no-boot; exit codes follow install.sh: 0 ready / 2 pending / 1 error.
+    --no-boot; exit codes follow install.sh: 0 ready / 2 pending / 1 error;
+  - feature region (car I, owner #16): the interactive wizard asks ONE
+    explicit region question after settings.json exists (ENTER = keep the
+    current value, default global; NEVER detected — no locale/geo probing)
+    and writes web/settings.json region.code; --check reports the region and
+    drops the two Telegram slots from pending under region cn (Q5);
+    --yes/--check themselves never prompt.
 
 Input sourcing: interactive prompts read stdin (getpass on a TTY, plain line
 read otherwise so scripted/CI runs are testable). EOF ends prompting gracefully
@@ -59,11 +65,12 @@ SLOTS: list[tuple[str, str, "re.Pattern[str]", bool, str]] = [
     ("MYCORE_TG_TOKEN",
      "Telegram bot token (@BotFather)",
      re.compile(r"^\d{4,}:[A-Za-z0-9_-]{20,}$"), True,
-     "format 123456789:AA... from @BotFather"),
+     "format 123456789:AA... from @BotFather (optional when region is cn)"),
     ("AIDOG_TG_ALLOWED_USERS",
      "Allowed Telegram user ids",
      re.compile(r"^\d+(,\d+)*$"), False,
-     "your numeric user id, comma-separated for several (fail-closed while empty)"),
+     "your numeric user id, comma-separated for several (fail-closed while "
+     "empty; optional when region is cn)"),
     ("MODEL_API_KEY",
      "Model endpoint API key",
      re.compile(r"^\S+$"), True,
@@ -81,6 +88,13 @@ SLOTS: list[tuple[str, str, "re.Pattern[str]", bool, str]] = [
 
 URL_RE = re.compile(r"^https?://\S+$")
 MODEL_RE = re.compile(r"^\S+$")
+# Car I (owner #16): the explicit feature-visibility region. Mirrors
+# web/server.py REGION_CODES — the wizard never detects a region (no locale
+# sniffing, no geo lookup): the operator types it or presses ENTER to keep.
+REGION_VALUES = ("global", "cn")
+# Car I (Q5): the wizard's required set mirrors web/server.py REQUIRED_SLOTS
+# plus the region tier — under cn the two Telegram slots drop out of pending.
+REQUIRED_BASE = ("WEB_TOKEN", "MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS")
 
 
 def say(msg: str) -> None:
@@ -166,6 +180,27 @@ def read_settings() -> dict:
         return {}
 
 
+def settings_region_code() -> str:
+    """The explicit feature-visibility region from web/settings.json —
+    absent, invalid or non-string == global. Mirrors web/server.py
+    REGION_CODES; never detected (owner ruling 2026-11-03)."""
+    try:
+        code = (read_settings().get("region") or {}).get("code")
+    except AttributeError:
+        return "global"
+    return code if isinstance(code, str) and code in REGION_VALUES else "global"
+
+
+def required_slots() -> tuple[str, ...]:
+    """The wizard's required set for --check pending semantics — mirrors
+    web/server.py REQUIRED_SLOTS with the Car I region tier (Q5): under
+    region cn the two Telegram slots drop out, so a Feishu/DingTalk-only
+    install reaches rc 0. The base tuple never changes."""
+    if settings_region_code() == "cn":
+        return ("WEB_TOKEN",)
+    return REQUIRED_BASE
+
+
 def write_settings(data: dict) -> tuple[bool, str]:
     try:
         tmp = SETTINGS.with_name(SETTINGS.name + ".tmp")
@@ -242,7 +277,7 @@ def slot_report() -> tuple[int, list[str]]:
     pending: list[str] = []
     for key, label, pat, secret, help_txt in SLOTS:
         v = env_line_value(text, key)
-        required = key in ("WEB_TOKEN", "MYCORE_TG_TOKEN", "AIDOG_TG_ALLOWED_USERS")
+        required = key in required_slots()
         if v is None:
             mark = "EMPTY (required)" if required else "empty (optional)"
             if required:
@@ -271,6 +306,7 @@ def slot_report() -> tuple[int, list[str]]:
     mc = read_settings().get("mycore") or {}
     base = mc.get("base_url", "")
     model = mc.get("model", "")
+    say(f"settings region: {settings_region_code()} (feature-visibility tier)")
     if not URL_RE.match(str(base)):
         say(f"settings mycore.base_url: MISSING/invalid — set any http(s):// OpenAI-compatible endpoint")
         pending.append("mycore.base_url")
@@ -349,6 +385,33 @@ def cmd_wizard(boot: bool) -> int:
         SETTINGS.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(SETTINGS_EXAMPLE, SETTINGS)
         say("created web/settings.json from template")
+    # region (car I, owner #16): ONE explicit prompt — ENTER keeps the
+    # current value (default global). NEVER detected: no locale sniffing,
+    # no geo lookup (owner ruling 2026-11-03). Interactive only:
+    # --check/--yes never reach it, so scripted installs stay identical.
+    cur_region = settings_region_code()
+    say(f"feature region: {cur_region} (global = every feature shown; "
+        f"cn = mainland visibility tier)")
+    for attempt in range(1, MAX_TRIES + 1):
+        raw = read_value("region [global/cn] (ENTER keeps current)", False)
+        if raw is None:
+            break
+        if raw == "":
+            say(f"region: kept {cur_region}")
+            break
+        if raw in REGION_VALUES:
+            data = read_settings()
+            data["region"] = {"code": raw}
+            ok, detail = write_settings(data)
+            say(f"region set to {raw} — {detail}" if ok else f"region: {detail}")
+            if not ok:
+                return 1
+            cur_region = raw
+            break
+        say(f"region: invalid — expected global or cn "
+            f"(attempt {attempt}/{MAX_TRIES})")
+    else:
+        say("region: kept (invalid answers — 3 attempts)")
     # zero-key onboarding (interactive only): local model server detection,
     # inserted between settings.json creation and the manual base_url prompt
     local_choice = detect_local_model()

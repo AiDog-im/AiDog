@@ -433,7 +433,7 @@
             <label data-i18n="cron.title">CRON JOBS</label>
             <span class="save-state" id="cronMsg" role="status"></span>
           </div>
-          <div class="stat-note" data-i18n="cron.createHint" style="margin-top:0;">create a job by asking in chat or sending /cron in Telegram</div>
+          <div class="stat-note" data-i18n="cron.createHint" style="margin-top:0;">create a job by asking in chat or sending /cron from a connected channel</div>
           <!-- Wave 4 (X9): structured create — the NL path above stays -->
           <div class="cron-create" id="cronCreate">
             <input type="text" id="cronName" maxlength="64" autocomplete="off"
@@ -1644,6 +1644,9 @@
         <div class="card" data-setgroup="services" id="tgCard">
           <h2 data-i18n="act.bot">Bot & Service</h2>
           <div class="stat-note" id="tgBotState" hidden></div>
+          <!-- Car I (owner #16): the honest region line on the TG card —
+               shape-hidden outside the cn tier, never a fake state. -->
+          <div class="stat-note" id="tgRegionNote" hidden></div>
           <div id="tgCredList" hidden></div>
           <!-- onboarding (0.5.48 car 5): "how do I switch bots" folded the
                same way the mission card folds its constraints — closed by
@@ -1999,6 +2002,18 @@
 
         <div class="card" data-setgroup="creds">
           <h2 data-i18n="sec.channels">Channels</h2>
+          <!-- Car I (channel equality, owner #16): the Telegram row — the
+               SAME visual treatment as the nine adapter rows. State words
+               come from GET /api/setup presence (never a value); the row
+               focuses the Bot & Service card where the slots actually live. -->
+          <div id="chanTgRow" data-chan-route="telegram" hidden
+               style="margin-top:10px;padding-top:8px;border-top:1px dashed var(--line);cursor:pointer;">
+            <div class="ctl-row token-row">
+              <span style="font-family:var(--mono);font-size:12.5px;letter-spacing:.06em;color:var(--navy);">telegram</span>
+              <span class="chat-badge" id="chanTgChip">—</span>
+            </div>
+            <div class="stat-note" id="chanTgNote" data-i18n="chan.tgNote">the bot channel — token, allowlist and restart live in Bot &amp; Service</div>
+          </div>
           <div id="chanList"></div>
           <div class="ctl-row token-row" style="margin-top:14px">
             <label data-i18n="chan.testGo">SEND TEST</label>
@@ -2089,6 +2104,28 @@
           <div class="stat-note" id="ledStatus" role="status">–</div>
           <div class="ctl-actions">
             <span class="save-state" id="ledMsg" role="status"></span>
+          </div>
+        </div>
+
+        <!-- Car I (owner #16): the feature-visibility region — one explicit
+             local choice, NEVER detected (zero egress, zero upload). The
+             select rides the shared saveSettings() dirty-block contract;
+             under cn the note states exactly what changes (rulings Q2/Q3/Q5
+             in docs/design/regional_car_design.md). -->
+        <div class="card" data-setgroup="general" id="regionCard">
+          <h2 data-i18n="sec.region">Region</h2>
+          <div class="stat-note" data-i18n="region.hint">stored only on this machine — no detection, no upload. It controls feature visibility and the activation checklist, nothing else.</div>
+          <div class="ctl-row">
+            <label data-i18n="region.label">Feature region</label>
+            <select id="regionSel" aria-label="feature region">
+              <option value="global" data-i18n="region.global">Global (default)</option>
+              <option value="cn" data-i18n="region.cn">China mainland</option>
+            </select>
+          </div>
+          <div class="stat-note" id="regionCnNote" hidden
+               data-i18n="region.cnNote">mainland tier: the Exchange/Web3 panel is hidden, the Telegram/Discord/Slack/WhatsApp/Signal channel rows are marked as possibly needing a network route you provide yourself, and activation no longer requires a Telegram token.</div>
+          <div class="ctl-actions">
+            <span class="save-state" id="regionMsg" role="status"></span>
           </div>
         </div>
 

@@ -511,6 +511,46 @@ def main() -> int:
     check("POST negative fx_rate -> 400", s == 400, f"got {s}")
     s, body = post("/api/settings", {"fx_rate": True}, token)
     check("POST fx_rate bool -> 400", s == 400, f"got {s}")
+    # --- car I (owner #16): the region partition — accept + refuse pairs,
+    #     then restore the shipped default (same leave-it-found discipline
+    #     as the bridge block below). ---
+    s, body = post("/api/settings", {"region": {"code": "cn"}}, token)
+    check("POST region cn -> 200", s == 200, f"got {s} {body}")
+    s, stg = get("/api/settings")
+    check("GET settings region.code read-back cn",
+          s == 200 and isinstance(stg, dict)
+          and (stg.get("region") or {}).get("code") == "cn",
+          str(stg.get("region")) if isinstance(stg, dict) else str(stg))
+    s, body = post("/api/settings", {"region": {"code": "xx"}}, token)
+    check("POST region bad enum -> 400 naming region.code",
+          s == 400 and "region.code" in str(body), f"got {s} {body}")
+    s, body = post("/api/settings", {"region": {"code": "cn", "x": 1}}, token)
+    check("POST region unknown sub-key -> 400",
+          s == 400 and "unknown region key" in str(body), f"got {s} {body}")
+    s, body = post("/api/settings", {"region": "cn"}, token)
+    check("POST region non-object -> 400",
+          s == 400 and "region must be an object" in str(body),
+          f"got {s} {body}")
+    # Q5: region=cn drops the two TG slots out of the required set; back to
+    # global every row reports exactly the pre-car-I requiredness.
+    s, su = get("/api/setup")
+    tg_rows = ([i for i in su.get("items", [])
+                if i.get("id") in ("tg_token", "tg_allowlist")]
+               if isinstance(su, dict) else [])
+    check("cn: both TG rows report required=False (Q5 relaxation)",
+          s == 200 and len(tg_rows) == 2
+          and all(r.get("required") is False for r in tg_rows),
+          str(tg_rows))
+    s, body = post("/api/settings", {"region": {"code": "global"}}, token)
+    check("POST region restore global -> 200", s == 200, f"got {s} {body}")
+    s, su = get("/api/setup")
+    tg_rows = ([i for i in su.get("items", [])
+                if i.get("id") in ("tg_token", "tg_allowlist")]
+               if isinstance(su, dict) else [])
+    check("global: both TG rows required=True again (byte-identical)",
+          s == 200 and len(tg_rows) == 2
+          and all(r.get("required") is True for r in tg_rows),
+          str(tg_rows))
     s, body = post("/api/settings", {"mycore": {"model": "bad model!"}}, token)
     check("POST mycore bad model -> 400", s == 400, f"got {s}")
     s, body = post("/api/settings", {"mycore": {"base_url": "ftp://x"}}, token)
