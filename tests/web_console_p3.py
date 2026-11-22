@@ -1386,6 +1386,12 @@ def main() -> int:
               and (mblk.get("total_cny") is None
                    or isinstance(mblk.get("total_cny"), (int, float)))
               and isinstance(mblk.get("unpriced"), list), str(mblk)[:200])
+        # C2 B-1: a parameter-less read keeps the historical face (range
+        # null). Valid against a console that predates the range feature AND
+        # after the release restart — the leg must never depend on which.
+        check("GET /api/usage/self without params carries no range",
+              s == 200 and mine.get("range") is None,
+              str(mine.get("range")))
         # per-key probe: model slots only, endpoint required, unset = 400
         s, body = post("/api/mycore/upstreams/test",
                        {"url": "http://127.0.0.1:9/v1", "slot": "WEB_TOKEN"},

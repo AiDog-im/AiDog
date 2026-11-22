@@ -1260,6 +1260,26 @@ a.comm-title:hover { text-decoration: underline; }
 .sub-head { margin-top: 14px; padding-top: 8px;
   border-top: 1px dashed var(--line); font-size: 11px; letter-spacing: .1em;
   color: var(--muted); font-weight: 700; }
+/* C2 B-1 (0.5.86): the self-metered window row + daily budget rings */
+.self-range { display: flex; flex-wrap: wrap; align-items: center;
+  gap: 6px 8px; margin-top: 8px; }
+.self-range label { font-size: 11px; letter-spacing: .08em;
+  color: var(--muted); font-weight: 700; }
+.self-range input[type="date"] {
+  background: #fff; border: 1px solid var(--line); color: var(--text);
+  font: inherit; font-size: 12.5px; padding: 3px 6px; min-height: 28px;
+  border-radius: 6px; max-width: 142px; }
+.self-range input[type="date"]:focus { outline: none;
+  border-color: var(--blue); box-shadow: var(--glow); }
+.self-bud { display: flex; flex-wrap: wrap; gap: 14px; margin-top: 10px;
+  padding-top: 8px; border-top: 1px dashed var(--line); }
+.bud-item { display: flex; align-items: center; gap: 8px; }
+.bud-item .bud-track { fill: none; stroke: var(--line); stroke-width: 5; }
+.bud-item .bud-fill { fill: none; stroke-width: 5; stroke-linecap: round;
+  transition: stroke-dasharray .3s; }
+.bud-txt .k { font-size: 11px; letter-spacing: .06em; color: var(--muted);
+  font-weight: 700; text-transform: uppercase; }
+.bud-txt .v { font-size: 13px; font-variant-numeric: tabular-nums; }
 .ep-list { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
 .ep-row { border: 1px solid var(--line); border-radius: 8px; padding: 8px;
   background: #fbfcfe; display: flex; flex-direction: column; gap: 6px; }

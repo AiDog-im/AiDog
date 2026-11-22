@@ -8908,6 +8908,65 @@ def test_service_media() -> None:
             check("svc media: unauthorized voice -> silent, no getFile",
                   fake.sends == [] and reached == [])
 
+            # --- C2 B-2 (0.5.86): a round VIDEO note rides the same path ---
+            def mk_video(update_id, uid, chat_id, note_doc, thread_id=None):
+                msg = {"message_id": 1,
+                       "from": {"id": uid, "is_bot": False, "first_name": "x"},
+                       "chat": {"id": chat_id, "type": "private"},
+                       "date": 0, "video_note": note_doc}
+                if thread_id is not None:
+                    msg["message_thread_id"] = thread_id
+                return {"update_id": update_id, "message": msg}
+
+            vnote = {"file_id": "VID", "file_unique_id": "vu",
+                     "duration": 2, "byte_size": 4096}
+            stt_mod.transcribe = lambda data, **kw: {"text": "round hello",
+                                                     "language": "en",
+                                                     "duration": 0.4}
+            # getFile answers WITHOUT file_size: the update blob's byte_size
+            # is the only size source left and must still be honoured
+            s, fake = svc_for("video_happy")
+            pulled: list = []
+            s.tg.get_file = lambda fid: {"file_id": fid,
+                                         "file_path": "video/x.mp4"}
+            s.tg.download_file = lambda p: pulled.append(p) or b"RIFF-fake"
+            s.handle_update(mk_video(20, 111, 120, vnote))
+            check("svc media: video note -> STT -> the typed-text path",
+                  bool(pulled) and fake.sends == [("120", "pong")]
+                  and "STT_OK" in s.log.read_text()
+                  and "round hello" not in s.log.read_text(), str(fake.sends))
+
+            # byte_size is the ONLY size here: it must trip the same cap
+            s, fake = svc_for("video_big")
+            pulled = []
+            s.tg.get_file = lambda fid: {"file_id": fid,
+                                         "file_path": "video/x.mp4"}
+            s.tg.download_file = lambda p: pulled.append(p) or b"RIFF"
+            s.handle_update(mk_video(21, 111, 121,
+                                     dict(vnote, byte_size=6_000_000)))
+            check("svc media: video note byte_size trips the 5MB cap pre-download",
+                  pulled == [] and bool(fake.sends)
+                  and "file too large" in fake.sends[-1][1], str(fake.sends))
+
+            # no file_id anywhere -> honest failure, getFile never reached
+            s, fake = svc_for("video_nofile")
+            s.tg.get_file = never_get
+            s.handle_update(mk_video(22, 111, 122,
+                                     {"duration": 1, "byte_size": 100}))
+            check("svc media: video note without file_id fails honestly",
+                  bool(fake.sends)
+                  and "could not be transcribed" in fake.sends[-1][1]
+                  and "missing file_id" in fake.sends[-1][1], str(fake.sends))
+
+            # the 60s cap applies to video notes too (same honest line)
+            s, fake = svc_for("video_long")
+            s.tg.get_file = never_get
+            s.handle_update(mk_video(23, 111, 123,
+                                     dict(vnote, duration=120)))
+            check("svc media: >60s video note -> tooLong line, no getFile",
+                  bool(fake.sends) and "too long" in fake.sends[-1][1]
+                  and "120s" in fake.sends[-1][1], str(fake.sends))
+
             # --- image drain: text first, photo after, multipart really sent ---
             png = tdp / "gen.png"
             png.write_bytes(PNG_1PX)
@@ -18769,6 +18828,120 @@ def test_user_fixes() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_usage_range() -> None:
+    """C2 B-1 (0.5.86): GET /api/usage/self gains an explicit UTC-day range
+    while the default face stays byte-identical.
+
+    Legs: meter.read_range folds exactly the asked days and refuses a
+    malformed / inverted window instead of guessing one; a span past the
+    retention window clamps AND says so; read(days) keeps its shape; the
+    console route maps a refused range to 400 and a parameter-less call to
+    the historical answer (range:null). Offline — the production console is
+    only read, never restarted."""
+    import io as _io
+    from mycore import meter as umtr
+    from web import server as ws
+
+    def seed(d: Path, day: str, n: int = 1, ok: bool = True) -> None:
+        with open(d / f"{day}.jsonl", "a", encoding="utf-8") as fh:
+            for _ in range(n):
+                fh.write(json.dumps({"ts": 0.0, "day": day,
+                                     "ep": "http://x/v1", "model": "m",
+                                     "ok": ok, "in": 10, "out": 5}) + "\n")
+
+    def call(path: str) -> tuple:
+        """One GET through the real Handler (module-surgery: the response
+        lands in a box instead of a socket)."""
+        h = ws.Handler.__new__(ws.Handler)
+        h.path = path
+        h.headers = {}                      # no Host = the HTTP/1.0 case
+        box: dict = {}
+        h._json = lambda obj, code=200: box.setdefault("res", (code, obj))
+        h.do_GET()
+        return box.get("res", (0, None))
+
+    was_active, was_dir = umtr.active(), umtr.active_dir()
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            d = Path(td)
+            seed(d, "2026-11-10")
+            seed(d, "2026-11-11", 2)
+            seed(d, "2026-11-12", 3, ok=False)
+            umtr.activate(d)
+
+            r = umtr.read_range("2026-11-10", "2026-11-12")
+            check("usage range: read_range folds exactly the asked days",
+                  r.get("available") is True
+                  and r.get("days") == ["2026-11-10", "2026-11-11",
+                                         "2026-11-12"]
+                  and r.get("requests") == 6 and r.get("ok") == 3
+                  and r.get("fail") == 3 and r.get("clamped") is False,
+                  str({k: r.get(k) for k in ("days", "requests", "clamped")}))
+            one = umtr.read_range("2026-11-11", "2026-11-11")
+            check("usage range: a single day is a legal window",
+                  one.get("days") == ["2026-11-11"]
+                  and one.get("requests") == 2, str(one.get("days")))
+            check("usage range: impossible date -> honest bad_date refusal",
+                  umtr.read_range("2026-02-30", "2026-03-05").get("reason")
+                  == "bad_date"
+                  and umtr.read_range("nope", "2026-11-12").get("reason")
+                  == "bad_date",
+                  str(umtr.read_range("nope", "2026-11-12")))
+            check("usage range: inverted order -> empty_range, never a swap",
+                  umtr.read_range("2026-11-12", "2026-11-10").get("reason")
+                  == "empty_range")
+            big = umtr.read_range("2020-01-01", "2026-11-12")
+            check("usage range: a span past retention clamps and says so",
+                  big.get("clamped") is True
+                  and len(big.get("days") or []) == umtr.RANGE_MAX_DAYS
+                  and (big.get("days") or [])[-1] == "2026-11-12",
+                  str(len(big.get("days") or [])))
+            legacy = umtr.read(days=7)
+            check("usage range: the default read face is unchanged",
+                  legacy.get("available") is True and "clamped" not in legacy
+                  and len(legacy.get("days") or []) == 7,
+                  str(legacy.get("days")))
+
+            # --- console route: validation, the range echo, the old face ---
+            code, body = call("/api/usage/self?from=nope&to=2026-11-12")
+            check("usage range: malformed day -> HTTP 400 with the reason",
+                  code == 400 and body.get("ok") is False
+                  and "YYYY-MM-DD" in str(body.get("error")),
+                  f"{code} {body}")
+            code, body = call("/api/usage/self?from=2026-11-12&to=2026-11-10")
+            check("usage range: inverted range -> HTTP 400, not a swap",
+                  code == 400 and "after" in str(body.get("error")),
+                  f"{code} {body}")
+            code, body = call("/api/usage/self?from=2026-11-10")
+            check("usage range: a half-sent pair -> HTTP 400",
+                  code == 400 and "together" in str(body.get("error")),
+                  f"{code} {body}")
+            code, body = call("/api/usage/self?from=2026-11-10&to=2026-11-11")
+            check("usage range: a valid window answers 200 and echoes itself",
+                  code == 200 and body.get("available") is True
+                  and isinstance(body.get("range"), dict)
+                  and body["range"].get("from") == "2026-11-10"
+                  and body["range"].get("to") == "2026-11-11"
+                  and body["range"].get("clamped") is False
+                  and body.get("requests") == 3,
+                  f"{code} {body.get('range')} {body.get('requests')}")
+            code, body = call("/api/usage/self")
+            check("usage range: no parameters keep the historical face",
+                  code == 200 and body.get("available") is True
+                  and body.get("range") is None
+                  and len(body.get("window_days") or []) == 7,
+                  f"{code} {body.get('range')} {body.get('window_days')}")
+            code, body = call("/api/usage/self?from=2020-01-01&to=2026-11-12")
+            check("usage range: an over-wide window reports clamped:true",
+                  code == 200 and body.get("range", {}).get("clamped") is True
+                  and len(body.get("window_days") or []) == umtr.RANGE_MAX_DAYS,
+                  f"{code} {body.get('range')}")
+    finally:
+        umtr.deactivate()
+        if was_active and was_dir is not None:
+            umtr.activate(was_dir)
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -18852,6 +19025,7 @@ def main() -> int:
         test_cron_controls,
         test_rewind_fork,
         test_user_fixes,
+        test_usage_range,
     ]
     rows = []
     for fn in suites:

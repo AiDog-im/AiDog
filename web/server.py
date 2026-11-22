@@ -2910,18 +2910,59 @@ def collect_usage(settings: dict) -> dict:
         return data
 
 
-def collect_usage_self() -> dict:
+# C2 B-1: GET /api/usage/self?from=&to= — an explicit UTC-day range. Both
+# params travel together or neither; the grammar is validated HERE so one
+# place answers 400 for the HTTP face and the in-process callers alike.
+_DAY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def usage_range_error(frm: str, to: str) -> str:
+    """Empty string when the request carries no range (the historical
+    7-day window), otherwise the honest reason this range must be refused.
+    Reasons are plain facts, never a suggestion: a half-sent pair, a
+    malformed day, an impossible date (2026-02-30) and an inverted order
+    are all refused, never silently defaulted into a window the caller
+    did not ask for."""
+    if not frm and not to:
+        return ""
+    if not frm or not to:
+        return "from and to must be sent together"
+    for name, val in (("from", frm), ("to", to)):
+        if not _DAY_RE.match(val):
+            return f"{name} must be YYYY-MM-DD"
+        try:
+            datetime.strptime(val, "%Y-%m-%d")
+        except ValueError:
+            return f"{name} is not a real date"
+    if frm > to:                       # ISO day strings compare chronologically
+        return "from must not be after to"
+    return ""
+
+
+def collect_usage_self(from_day: str | None = None,
+                       to_day: str | None = None) -> dict:
     """GET /api/usage/self (v0.5.55) — the SELF-METERED panel: rows the
     mycore meter wrote for chat attempts in this profile (last 7 days), plus
     a CNY cost from settings usage.model_pricing.
+
+    C2 B-1: `from_day`/`to_day` (UTC YYYY-MM-DD, both or neither) narrow the
+    window to an arbitrary range; omitting both keeps the historical 7-day
+    behaviour byte-for-byte. An invalid range returns {ok:false, error} and
+    the route maps it to 400. A span beyond the meter's retention answers
+    clamped:true (the panel says the window was trimmed, never pretends).
 
     Independent of the external metrics source the legacy /api/usage reads,
     so an end user without that infrastructure still sees real numbers.
     Degradations stay honest: inactive meter -> available:false; a model
     with no configured price -> cost null + listed unpriced (never 0);
     display currency conversion reuses the FX machinery of /api/usage."""
+    bad = usage_range_error(from_day or "", to_day or "")
+    if bad:
+        return {"ok": False, "error": bad}
+    ranged = bool(from_day and to_day)
     settings = load_settings()
-    usage = model_meter.read()
+    usage = (model_meter.read_range(from_day, to_day) if ranged
+             else model_meter.read())
     out: dict = {"available": False}
     if not usage.get("available"):
         return {**out, "reason": usage.get("reason") or "inactive"}
@@ -2965,6 +3006,12 @@ def collect_usage_self() -> dict:
         "by_endpoint": usage.get("by_endpoint") or [],
         "by_model": usage.get("by_model") or [],
         "by_day": usage.get("by_day") or {},
+        # C2 B-1: the window this answer covers. null = the default 7-day
+        # face; {from,to,clamped} = an explicit range (clamped says the
+        # retention window trimmed the ask).
+        "range": ({"from": from_day, "to": to_day,
+                   "clamped": bool(usage.get("clamped"))}
+                  if ranged else None),
         "pricing": {"configured": bool(pricing),
                     "total_cny": cost["total_cny"],
                     "per_model": cost["per_model"],
@@ -7057,7 +7104,14 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/usage":
             return self._json(collect_usage(load_settings()))
         if path == "/api/usage/self":
-            return self._json(collect_usage_self())
+            q = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
+                if "?" in self.path else {}
+            payload = collect_usage_self(
+                from_day=(q.get("from") or [""])[0] or None,
+                to_day=(q.get("to") or [""])[0] or None)
+            if payload.get("ok") is False:   # local range validation, 400
+                return self._json(payload, 400)
+            return self._json(payload)
         if path == "/api/mycore/endpoints":
             return self._json(collect_endpoints())
         if path == "/api/events":

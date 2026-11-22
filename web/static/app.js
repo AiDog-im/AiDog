@@ -2471,9 +2471,20 @@ function epToggleKeys() {
 
 /* ---- self-metered usage block (Overview, /api/usage/self) -------------- */
 let selfData = null;      // last payload — repainted on language switch
+let selfRange = null;     // C2 B-1: {from,to} UTC days; null = default 7d
+const selfIso = d => d.toISOString().slice(0, 10);   // the meter's UTC day
+
 async function refreshSelf() {
   try {
-    const doc = await fetch("/api/usage/self").then(r => r.json());
+    let url = "/api/usage/self";
+    if (selfRange && selfRange.from && selfRange.to) {
+      url += "?from=" + encodeURIComponent(selfRange.from) +
+             "&to=" + encodeURIComponent(selfRange.to);
+    }
+    const res = await fetch(url);
+    const doc = await res.json().catch(() => null);
+    // a refused range arrives as {ok:false,error} (HTTP 400) and is KEPT:
+    // renderSelf says why the window did not load instead of a silent blank
     selfData = (doc && typeof doc === "object") ? doc : null;
     renderSelf(selfData);
   } catch (e) { selfData = null; renderSelf(null); }
@@ -2483,12 +2494,36 @@ function renderSelf(doc) {
   const head = document.getElementById("selfHead");
   const grid = document.getElementById("selfStats");
   const note = document.getElementById("selfNote");
+  const row = document.getElementById("selfRange");
+  const bud = document.getElementById("selfBudget");
   if (!head || !grid || !note) return;
-  if (!doc || doc.available !== true) {
+  const range = (doc && doc.range && typeof doc.range === "object")
+    ? doc.range : null;
+  // a refused range still counts as "the custom window" for the labels
+  const ranged = Boolean((range && range.from) || selfRange);
+  if (!doc || (doc.available !== true && doc.ok !== false)) {
     head.hidden = true; grid.hidden = true; note.hidden = true;
+    if (row) row.hidden = true;
+    if (bud) { bud.hidden = true; bud.innerHTML = ""; }
     return;                     // inactive meter = silent absence (honest)
   }
   head.hidden = false; grid.hidden = false; note.hidden = false;
+  if (row) row.hidden = false;
+  // the title must never claim a window the data does not cover
+  const hspan = head.querySelector("[data-i18n]");
+  if (hspan) {
+    const hk = ranged ? "usage.selfHeadRange" : "usage.selfHead";
+    hspan.dataset.i18n = hk;
+    hspan.textContent = t(hk, ranged ? "SELF-METERED (CUSTOM RANGE)"
+                                     : "SELF-METERED (7 DAYS)");
+  }
+  if (doc.ok === false) {        // a refused range: the reason, no numbers
+    grid.hidden = true;
+    note.textContent = String(doc.error || "invalid range");
+    renderSelfBudget();
+    return;
+  }
+  grid.hidden = false;
   const d = (doc.display && typeof doc.display === "object") ? doc.display : null;
   const rate = d && Number(d.rate_cny_per_unit) > 0 ? Number(d.rate_cny_per_unit) : 0;
   /* relayout P3 (audit item 7): every KPI carries context. The self meter
@@ -2536,13 +2571,16 @@ function renderSelf(doc) {
   // car B (mass-market 5.3): the cost-transparency pair — THIS month from
   // the same local meter; an unpriced table keeps the honest dash.
   const m = (doc.month && typeof doc.month === "object") ? doc.month : null;
+  // window-scoped labels: over a custom range a "7D" title would be a lie
+  const reqK = ranged ? "usage.selfReqRange" : "usage.selfReq";
+  const costK = ranged ? "usage.selfCostRange" : "usage.selfCost";
   grid.innerHTML =
-    chip("usage.selfReq", "REQUESTS 7D", num(doc.requests), spark("requests")) +
+    chip(reqK, ranged ? "REQUESTS" : "REQUESTS 7D", num(doc.requests), spark("requests")) +
     chip("usage.selfOk", "OK", num(doc.ok), spark("ok")) +
     chip("usage.selfFail", "FAIL", num(doc.fail), spark("fail")) +
     chip("usage.selfIn", "IN TOKENS", num(doc.in_tokens), spark("in_tokens")) +
     chip("usage.selfOut", "OUT TOKENS", num(doc.out_tokens), spark("out_tokens")) +
-    chip("usage.selfCost", "COST 7D", costTxt) +
+    chip(costK, ranged ? "COST" : "COST 7D", costTxt) +
     (m ? chip("usage.selfMonthReq", "REQUESTS THIS MONTH", num(m.requests)) : "") +
     (m ? chip("usage.selfMonthCost", "COST THIS MONTH",
        fmtCost(m.total_cny)) : "");
@@ -2561,7 +2599,147 @@ function renderSelf(doc) {
       ).replace("{n}", String(doc.no_usage)));
   }
   if (doc.truncated) bits.push(t("usage.selfTrunc", "older rows truncated"));
+  // C2 B-1: say the window was trimmed (never pretend the ask was honoured),
+  // and name an empty window instead of showing unexplained zeros
+  if (ranged && range && range.clamped) {
+    const n = Array.isArray(doc.window_days) ? doc.window_days.length : 0;
+    bits.push(t("usage.rangeClamped",
+      "range trimmed to the last {n} days (retention window)")
+      .replace("{n}", String(n)));
+  }
+  if (ranged && Number(doc.requests) === 0) {
+    bits.push(t("usage.selfEmpty", "no usage recorded in this window"));
+  }
   note.textContent = bits.join(" · ");
+  renderSelfBudget();
+}
+
+/* ---- C2 B-1: window controls + JSON export + daily budget rings --------
+   The range row drives refreshSelf(); both day inputs must be filled before
+   a window travels (one filled = wait, never a half-sent 400). The 7 DAYS
+   chip returns to the default face so the title can keep saying "7 DAYS".
+   Export writes EXACTLY what is on screen — the fetched window, no second
+   read — as a local Blob download (no endpoint, no upload, no server file). */
+function selfApplyInputs() {
+  const a = (document.getElementById("selfFrom") || {}).value || "";
+  const b = (document.getElementById("selfTo") || {}).value || "";
+  if (a && b) {
+    if (selfRange && selfRange.from === a && selfRange.to === b) return;
+    selfRange = { from: a, to: b };
+  } else if (!a && !b) {
+    selfRange = null;            // cleared inputs = the default 7-day face
+  } else {
+    return;                      // half a window: wait for the other input
+  }
+  refreshSelf();
+}
+
+function selfQuick(days) {       // days: 7 | 30 | "mtd" (all UTC, meter rule)
+  const end = new Date();
+  const start = days === "mtd"
+    ? new Date(Date.UTC(end.getUTCFullYear(), end.getUTCMonth(), 1))
+    : new Date(end.getTime() - (days - 1) * 86400000);
+  const from = selfIso(start), to = selfIso(end);
+  document.getElementById("selfFrom").value = from;
+  document.getElementById("selfTo").value = to;
+  if (days === 7) {
+    selfRange = null;            // the default window IS the last 7 days
+    refreshSelf();
+    return;
+  }
+  selfRange = { from: from, to: to };
+  refreshSelf();
+}
+
+function exportSelfJson() {
+  if (!selfData || selfData.ok === false) return;   // nothing real to export
+  const r = (selfData.range && selfData.range.from) ? selfData.range : null;
+  const stamp = r ? r.from + "_" + r.to
+    : "last" + ((selfData.window_days || []).length || 7) + "d";
+  const payload = {
+    exported_at: new Date().toISOString(),
+    source: "aidog self-metered usage (local log)",
+    window: r || { days: selfData.window_days || [] },
+    usage: selfData,
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)],
+                        { type: "application/json" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "aidog-usage-" + stamp + ".json";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 4000);
+}
+
+/* The daily budget rings: guardrails numbers straight from /api/control
+   (renderControl owns that payload and repaints us on every read). A cap of
+   0 is OFF -> no ring at all: an honest absence beats a decorative 0/0.
+   An unknown state draws the TRACK only — no arc is invented for a number
+   nobody could measure. Labels reuse the pack's own guardrail strings. */
+function renderSelfBudget() {
+  const box = document.getElementById("selfBudget");
+  if (!box) return;
+  const b = (controlData && controlData.budget
+             && typeof controlData.budget === "object") ? controlData.budget : null;
+  const lim = (b && b.limits && typeof b.limits === "object") ? b.limits : {};
+  const items = [];
+  const ring = (money, st, used, limit, key, fb) => {
+    const cap = Number(limit);
+    if (!Number.isFinite(cap) || cap <= 0) return;   // 0 = off: no ring
+    const label = t(key, fb);
+    const state = t(st === "over" ? "gr.over"
+      : st === "unknown" ? "gr.unknown" : st === "off" ? "gr.off" : "gr.ok",
+      st === "over" ? "OVER" : st === "unknown" ? "UNKNOWN"
+        : st === "off" ? "OFF" : "OK");
+    const num = v => money ? "$" + Number(v || 0).toFixed(2)
+                           : Number(v || 0).toLocaleString("en-US");
+    const has = Number.isFinite(Number(used));
+    const val = has ? `${state} ${num(used)} / ${num(cap)}`
+                    : `${state} / ${num(cap)}`;
+    const pct = has ? Math.max(0, Math.min(1, Number(used) / cap)) : null;
+    const C = 2 * Math.PI * 16;
+    const color = st === "over" ? "var(--urgent, #c0392b)"
+      : st === "unknown" ? "var(--muted, #8a97a5)" : "var(--blue, #2892ff)";
+    const dash = pct === null ? `0 ${C.toFixed(2)}`
+                              : `${(pct * C).toFixed(2)} ${C.toFixed(2)}`;
+    items.push(
+      `<div class="bud-item" title="${escapeHtml(label)}">` +
+      `<svg viewBox="0 0 42 42" width="40" height="40" aria-hidden="true" ` +
+      `focusable="false"><circle class="bud-track" cx="21" cy="21" r="16"></circle>` +
+      `<circle class="bud-fill" cx="21" cy="21" r="16" stroke="${color}" ` +
+      `stroke-dasharray="${dash}" transform="rotate(-90 21 21)"></circle></svg>` +
+      `<div class="bud-txt"><div class="k">${escapeHtml(label)}</div>` +
+      `<div class="v">${escapeHtml(val)}</div></div></div>`);
+  };
+  const usd = (b && b.usd && typeof b.usd === "object") ? b.usd : {};
+  const tok = (b && b.tokens && typeof b.tokens === "object") ? b.tokens : {};
+  ring(true, usd.state || "off", usd.used,
+       lim.usd_day != null ? lim.usd_day : usd.limit,
+       "gr.usdDay", "USD per day");
+  ring(false, tok.state || "off", tok.used,
+       lim.token_day != null ? lim.token_day : tok.limit,
+       "gr.tokenDay", "Tokens per day");
+  if (!items.length) { box.hidden = true; box.innerHTML = ""; return; }
+  box.innerHTML = items.join("");
+  box.hidden = false;
+}
+
+function wireSelfRange() {
+  const from = document.getElementById("selfFrom");
+  const to = document.getElementById("selfTo");
+  if (from) from.addEventListener("change", selfApplyInputs);
+  if (to) to.addEventListener("change", selfApplyInputs);
+  const bind = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", fn);
+  };
+  bind("selfQ7", () => selfQuick(7));
+  bind("selfQ30", () => selfQuick(30));
+  bind("selfQm", () => selfQuick("mtd"));
+  bind("selfExport", exportSelfJson);
 }
 
 /* X6 rows from statusData.modeltier (Wave 3 beta contract): tri-state by
@@ -6399,6 +6577,9 @@ function renderControl() {
     gstat.textContent = (usd.state === "unknown" && (b.reason || ""))
       ? String(b.reason) : "";
   }
+  // C2 B-1: the Overview rings read the SAME payload — repaint them here so
+  // the budget view is never a snapshot behind the Guardrails card
+  renderSelfBudget();
 }
 
 /* car 7 (D11): one POST /api/control for stop | pause | resume. */
@@ -12130,6 +12311,7 @@ renderExchange();    // exchange panel paints its honest fallback at once
 renderExtensions();  // car D: the curated board renders from settings
 refreshJourney();    // car D: adoption ladder + moments (local facts)
 wireExNav();         // 0.5.56: group chips + search + exchange nav toggle
+wireSelfRange();   // C2 B-1: window inputs + quick ranges + JSON export
 setInterval(tickClock, 1000); tickClock();
 setInterval(tickModeltier, 1000);   // X6 cooling countdown (hidden = no-op)
 setInterval(refreshUsage, 60000);

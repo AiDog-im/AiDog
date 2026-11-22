@@ -257,8 +257,30 @@
           <div class="sub-head" id="selfHead" hidden>
             <span data-i18n="usage.selfHead">SELF-METERED (7 DAYS)</span>
           </div>
+          <!-- C2 B-1 (0.5.86): the window controls. Two UTC day inputs
+               (apply on change) + quick windows + a JSON export of exactly
+               what is on screen. The row lives with the block it drives,
+               and hides with it. -->
+          <div class="self-range" id="selfRange" hidden>
+            <label for="selfFrom" data-i18n="usage.rangeFrom">FROM</label>
+            <input type="date" id="selfFrom" autocomplete="off">
+            <label for="selfTo" data-i18n="usage.rangeTo">TO</label>
+            <input type="date" id="selfTo" autocomplete="off">
+            <button type="button" class="btn tiny" id="selfQ7"
+                    data-i18n="usage.range7d">7 DAYS</button>
+            <button type="button" class="btn tiny" id="selfQ30"
+                    data-i18n="usage.range30d">30 DAYS</button>
+            <button type="button" class="btn tiny" id="selfQm"
+                    data-i18n="usage.rangeMtd">MONTH TO DATE</button>
+            <button type="button" class="btn tiny" id="selfExport"
+                    data-i18n="usage.exportJson">EXPORT JSON</button>
+          </div>
           <div class="stat-grid" id="selfStats" hidden></div>
           <div class="stat-note" id="selfNote" hidden></div>
+          <!-- C2 B-1: the daily budget rings. Rendered ONLY from a guardrail
+               cap that is actually set (both caps 0 = hidden): the data is
+               the console's own /api/control read, never an estimate. -->
+          <div class="self-bud" id="selfBudget" hidden></div>
         </div>
 
         <div class="card span-4">
