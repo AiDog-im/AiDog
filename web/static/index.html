@@ -551,11 +551,20 @@
       <div class="view-head">
         <div class="view-titles">
           <h2 data-i18n="view.skills.title">Skills</h2>
-          <p class="view-sub" data-i18n="view.skills.sub">Mounted skill records — body and external</p>
+          <p class="view-sub" data-i18n="view.skills.sub">Official catalog above, mounted skills below — install, switch, route</p>
         </div>
       </div>
+      <section class="card" id="sklCatalogCard">
+        <h2><span data-i18n="skl.catalog">OFFICIAL CATALOG</span><span class="gal-count" id="sklCatCount"></span></h2>
+        <div class="stat-note" data-i18n="skl.catalogNote">one source only: the reviewed catalog that shipped with this release — no third-party marketplaces. Installing copies files; it executes nothing.</div>
+        <div class="skl-cats" id="sklCats"></div>
+        <div class="skl-unavail stat-note" id="sklUnavail" hidden></div>
+        <div class="gal-grid" id="sklCatalog"></div>
+        <div class="ctl-actions"><span class="save-state" id="sklMsg" role="status"></span></div>
+      </section>
       <section class="card gallery">
         <h2><span data-i18n="sec.gallery">Skill Armory</span><span class="gal-count" id="galCount"></span></h2>
+        <div class="stat-note" data-i18n="skl.mountedNote">mounted = routable by the deterministic router; switch one off to keep it installed but never loaded. Installed (one-click) skills can be removed; the shipped five are permanent.</div>
         <div class="gal-grid" id="galGrid"></div>
       </section>
     </section>
@@ -1956,6 +1965,36 @@
           <pre class="br-code" id="brTemplate" hidden></pre>
           <div class="br-audit" id="brAudit"></div>
           <div class="ctl-actions"><span class="save-state" id="brStatusMsg" role="status"></span></div>
+        </div>
+
+        <!-- Car H (§3.4, owner ruling Q3=A): the OUTBOUND PROXY card — an
+             opt-in seam routing aidog's own http_fetch through a proxy the
+             owner hosts. Bridge-card pattern (own SAVE): TEST always reports
+             against the SAVED state, never against unsaved edits. The auth
+             credential is a secrets.env slot row — settings.json carries no
+             credentials by design (the `settings get` invariant). -->
+        <div class="card" data-setgroup="creds" id="proxyCard">
+          <h2 data-i18n="sec.proxy">Outbound proxy</h2>
+          <div class="stat-note" data-i18n="px.hint">optional — route aidog's own web fetches through a proxy YOU host. Off by default; once on, a proxy failure fails closed (never a silent direct request). Model calls, Telegram and deploys are not covered.</div>
+          <div class="ctl-row">
+            <label data-i18n="px.url">Proxy URL</label>
+            <input type="text" id="proxyUrl" maxlength="2048" autocomplete="off"
+                   spellcheck="false" data-i18n-ph="px.urlPh" placeholder="http://127.0.0.1:7890">
+          </div>
+          <div class="ctl-row">
+            <label data-i18n="px.enable">Route http_fetch through it</label>
+            <button class="toggle" id="proxyToggle" aria-pressed="false" type="button"><span></span></button>
+          </div>
+          <div id="proxyCred"></div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="proxySave" type="button"
+                    data-i18n="px.save">SAVE PROXY</button>
+            <button class="btn" id="proxyTest" type="button"
+                    data-i18n="px.test">TEST</button>
+            <span class="save-state" id="proxyMsg" role="status"></span>
+          </div>
+          <div class="ctl-actions"><span class="save-state" id="proxyTestOut" role="status"></span></div>
+          <div class="stat-note" data-i18n="px.guard">config stays local (never uploaded) · the URL carries no credentials — auth lives in the slot row above and reports never echo it · ambient NO_PROXY exemptions keep their standard meaning · TEST fetches an owned endpoint through the proxy (8s ceiling); with the auth slot armed an https target answers the honest word `auth` by design — test those proxies with an http:// target</div>
         </div>
 
         <div class="card" data-setgroup="creds">

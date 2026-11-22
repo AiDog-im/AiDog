@@ -305,6 +305,32 @@ Routes:
                                    ladder (bundled site copy, then an honest
                                    empty 200 — never 5xx), loopback read,
                                    no auth (same contract as GET /api/mission)
+  POST /api/skills/install     -> Bearer; {slug} — car H §3.2 one-click
+                                   install (owner rulings Q1=A staged source,
+                                   Q2=A one click): copies the staged package
+                                   shipped with this release into
+                                   data/skills — no network, no execution;
+                                   400 bad slug / 404 not in the catalog /
+                                   409 bundled, already-installed or package
+                                   missing; success answers
+                                   {ok, slug, files, source:"staged"}
+  POST /api/skills/uninstall   -> Bearer; {slug} — deletes ONLY under
+                                   data/skills (root-checked; the shipped
+                                   overlay is untouchable by construction);
+                                   404 when not installed
+  POST /api/skills/toggle      -> Bearer; {slug, enabled} — writes the
+                                   settings `skills.disabled` list through
+                                   the settings grammar and the single file
+                                   writer (idempotent; 400 on a bad
+                                   slug/flag or a full list)
+  POST /api/outbound_proxy/test -> Bearer; — car H §3.4 (Q3=A): fetch the
+                                   owned catalog endpoint THROUGH the
+                                   configured proxy, 8s ceiling ->
+                                   {ok, reason_word, ms}; off ->
+                                   "disabled", unusable URL -> "bad_url",
+                                   transport failure -> refused/timeout/
+                                   tls/dns/unreachable; the URL itself is
+                                   never echoed
   GET  /api/checkpoints        -> X10 read face (Wave 5): metadata-only
                                    checkpoint catalog {entries[{id, ts, when,
                                    path, file, size, sha256}], count} — a
@@ -366,6 +392,7 @@ if str(REPO) in sys.path:
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
+from lib import skill_route  # noqa: E402  (car H §3.2: gallery roots follow the router's ladder)
 from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, ledger, mission, mcp, modeltier, security, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore.assembly import (build_system_stack,  # noqa: E402
@@ -378,7 +405,8 @@ from mycore.service import state_dir as mycore_state_dir  # noqa: E402
 from mycore.session import (Session, export_session, list_sessions,  # noqa: E402
                              prune_old, session_file)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
-                          resolve_disabled_tools)
+                          resolve_disabled_tools, outbound_probe,
+                          outbound_validate)
 def _resolve_web_port() -> tuple[int, str]:
     """Car A2 (port standard, owner decree 2026-11-01): the console port is a
     machine-local setting with one product default (19167). Resolution order:
@@ -599,6 +627,11 @@ DEFAULT_SETTINGS: dict = {
     # SETTINGS — the constant stays the source of truth; the partition is
     # always present so the console renders the tier without an absence check.
     "mission": dict(mission.DEFAULT_SETTINGS),
+    # Outbound proxy (car H §3.4, ruling Q3=A): opt-in routing of aidog's own
+    # http_fetch through a self-hosted proxy. Grammar lives in mycore.tools
+    # (outbound_validate) next to the runtime read; shipped OFF = stock
+    # direct behavior byte-identical.
+    "outbound_proxy": {"enabled": False, "url": ""},
     # Bridge partition (car 6, line 5 / D9): a copy of mycore.bridge.
     # DEFAULT_SETTINGS — the constant is the source of truth and the block is
     # always present so the console renders the card without an absence check.
@@ -617,6 +650,10 @@ DEFAULT_SETTINGS: dict = {
     # DEFAULT_OBEDIENCE — empty lists = nothing injected into the stack
     # (the pre-car-7 system stack stays byte-for-byte).
     "obedience": dict(DEFAULT_OBEDIENCE),
+    # Car H (§3.2): the skills partition — the owner's switch-off list.
+    # The console toggle writes it through the settings grammar, skill_route
+    # reads it fail-soft. Absent == [] == every mounted skill enabled.
+    "skills": {"disabled": []},
     # Car D (novice onboarding, owner feedback #10): the Extensions board is
     # USER-curated — categories appear only when the owner adds them (a
     # preset example is inert until adopted). Empty = the shipped Finance
@@ -626,7 +663,8 @@ DEFAULT_SETTINGS: dict = {
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media", "web3", "mission",
-               "bridge", "guardrails", "obedience", "ledger", "extensions")
+               "bridge", "guardrails", "obedience", "ledger", "extensions",
+               "skills", "outbound_proxy")
 USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
@@ -728,14 +766,19 @@ SECRET_GROUPS: dict = {
     # Car 6 (D10): the Connections card — provider tokens with a READ-ONLY
     # default posture. Named after the upstream's own env-var names so an
     # operator can export the same value for wrangler / gh without invention.
-    "connections": ("CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN"),
+    # Car H adds AIDOG_PROXY_AUTH (proxy auth for the outbound-proxy seam):
+    # a CONNECTIONS-group slot rendered by the Outbound proxy card — the
+    # settings file itself must hold no credentials (the `settings get`
+    # invariant), so the auth lives here, presence/listen-only everywhere.
+    "connections": ("CLOUDFLARE_API_TOKEN", "GITHUB_TOKEN",
+                    "AIDOG_PROXY_AUTH"),
     # Car 8 (CKX-P2): the agent-backup passphrase. Presence-only like every
     # other row here; its VALUE never enters a response, a log line, argv or
     # the model context — mycore.ckxbackup hands it to ONE child environment.
     "backup": ("AIDOG_CKX_PASSWORD",),
 }
 SECRET_SLOTS: dict = {name: group for group, names in SECRET_GROUPS.items()
-                      for name in names}          # 37 editable slots
+                      for name in names}          # 38 editable slots
 SECRET_PRESENCE_ONLY = ("WEB_TOKEN",)             # listed, never writable
 SECRET_VALUE_MAX = 4096                           # chars, one line
 
@@ -754,9 +797,9 @@ BACKUP_MEMORY_FILES = ("MEMORY_curated.md", "USER_curated.md",
 BACKUP_MEMORY_MAX_BYTES = 512 * 1024      # per memory slot, in BOTH directions
 BACKUP_MAX_BODY = 4 * 1024 * 1024         # restore body budget: a whole
                                            # payload rides in on one request
-# Exportable slots = the 37 catalog slots + the model-key pool slots that
+# Exportable slots = the 38 catalog slots + the model-key pool slots that
 # are NOT catalogued (writable by POST /api/secrets but not listed): the two
-# overlap names are dropped, so the union is 45 today. WEB_TOKEN is
+# overlap names are dropped, so the union is 46 today. WEB_TOKEN is
 # presence-only and therefore can never appear in a backup.
 BACKUP_SECRET_SLOTS = tuple(SECRET_SLOTS) + tuple(
     name for name in MODEL_KEY_SLOTS if name not in SECRET_SLOTS)
@@ -1999,6 +2042,40 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
         errors.extend(obs_errors)
         if clean_obs:
             clean["obedience"] = clean_obs
+    if "skills" in patch:
+        # Car H (§3.2): the skills partition — `disabled` is a slug list the
+        # router filters out. Grammar fail-closed: slug shape, uniqueness,
+        # a 64-entry ceiling; an offending entry is never echoed (a slug is
+        # still arbitrary pasted text until validated).
+        sk = patch["skills"]
+        if not isinstance(sk, dict):
+            errors.append("skills must be an object")
+        elif any(k != "disabled" for k in sk):
+            errors.append("skills accepts only the disabled field")
+        elif "disabled" not in sk:
+            clean["skills"] = {}
+        else:
+            lst = sk["disabled"]
+            if not isinstance(lst, list):
+                errors.append("skills.disabled must be a list of slugs")
+            elif len(lst) > 64:
+                errors.append("skills.disabled must hold at most 64 slugs")
+            elif any(not isinstance(x, str) or not SKILL_SLUG_RE.match(x)
+                     for x in lst):
+                errors.append("skills.disabled entries must be lowercase "
+                              "hyphenated slugs")
+            elif len(set(lst)) != len(lst):
+                errors.append("skills.disabled entries must be unique")
+            else:
+                clean["skills"] = {"disabled": list(lst)}
+    if "outbound_proxy" in patch:
+        # Car H (§3.4, ruling Q3=A): grammar lives in mycore.tools next to
+        # the runtime read (bridge/decision precedent). Values are never
+        # echoed — the URL may carry user:pass@.
+        clean_op, op_errors = outbound_validate(patch["outbound_proxy"])
+        errors.extend(op_errors)
+        if clean_op:
+            clean["outbound_proxy"] = clean_op
     if "extensions" in patch:
         # Car D (novice onboarding #10): the user-curated Extensions
         # categories. Grammar: {categories: [{id: a-z0-9- slug, name: one
@@ -2778,17 +2855,40 @@ def _mycore_watchdog_events() -> list[dict]:
     return [_event(level, "mycore-watchdog", last, mtime, code="mycore.watchdog")]
 
 
+def _skills_disabled() -> list[str]:
+    """The owner's switch-off list (settings `skills.disabled`), only ever a
+    list of slug strings. Fail-soft: absent/corrupt block -> [] so every
+    mounted skill reports enabled."""
+    block = load_settings().get("skills")
+    if isinstance(block, dict) and isinstance(block.get("disabled"), list):
+        return [str(s) for s in block["disabled"]]
+    return []
+
+
+def _skill_source_label(root: Path, learned_dir: Path | None) -> str:
+    """Gallery badge for where a row was resolved from — the four values map
+    1:1 onto skill_route's ladder (car H §3.2: what the gallery shows is what
+    the router sees)."""
+    if root == REPO / "overlay" / "skills":
+        return "body"
+    if root == SKILLS_INSTALLED_DIR:
+        return "installed"
+    if learned_dir is not None and root == learned_dir:
+        return "learned"
+    return "external"
+
+
 def collect_skills() -> dict:
-    """Skill gallery data: real SKILL.md records from the body-layer skill dirs
-    (product overlay + configured external dirs). No fake entries, ever."""
-    roots: list[Path] = [REPO / "overlay" / "skills"]
-    for d in (read_config_bits().get("external_skill_dirs") or []):
-        try:
-            p = Path(d).expanduser()
-            if p.is_dir():
-                roots.append(p)
-        except OSError:
-            continue
+    """Skill gallery data: real SKILL.md records resolved from the SAME roots
+    the router resolves (car H §3.2 — lib/skill_route.skill_roots is the one
+    source of that order: flag/env/local dirs, profile learned, one-click
+    installs, shipped overlay), plus the owner's per-skill `enabled` switch.
+    No fake entries, ever."""
+    roots = skill_route.skill_roots(None)
+    disabled = set(_skills_disabled())
+    learned_dir: Path | None = None
+    if profile_paths.profile_name():
+        learned_dir = profile_paths.skills_dir(REPO)
     skills: list[dict] = []
     seen: set[str] = set()
     for root in roots:
@@ -2834,8 +2934,8 @@ def collect_skills() -> dict:
                 "id": child.name,
                 "name": name,
                 "desc": desc[:240],
-                "source": "body" if root.name == "skills" and root.parent.name == "overlay"
-                          else "external",
+                "source": _skill_source_label(root, learned_dir),
+                "enabled": child.name not in disabled,
             })
     skills.sort(key=lambda s: s["name"].lower())
     return {"skills": skills, "count": len(skills),
@@ -2851,6 +2951,14 @@ def collect_skills() -> dict:
 # constant carries no credential of any kind.
 SKILLS_REMOTE_URL = "https://aidog.im/skills/catalog.json"
 SKILLS_COPY_FILE = REPO / "site" / "skills" / "catalog.json"
+# Car H (§3.2): the one-click install surface. Packages = byte copies of the
+# public L2 repo staged with this release (owner ruling Q1=A: install is a
+# local file copy, zero network); the install dir is gitignored machine
+# state. The slug regex is the catalog's own shape — a slug can never hold
+# a separator, so there is no traversal path to sanitize.
+SKILLS_PACKAGES_DIR = REPO / "site" / "skills" / "packages"
+SKILLS_INSTALLED_DIR = REPO / "data" / "skills"
+SKILL_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 SKILLS_REMOTE_TIMEOUT = 5.0   # one outbound attempt, hard ceiling
 SKILLS_REMOTE_TTL = 60.0      # in-process reuse window (no stampede)
 _skills_lock = threading.Lock()
@@ -6450,6 +6558,14 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_image()
         if path == "/api/learn":
             return self._handle_learn()
+        if path == "/api/skills/install":
+            return self._handle_skill_install()
+        if path == "/api/skills/uninstall":
+            return self._handle_skill_uninstall()
+        if path == "/api/skills/toggle":
+            return self._handle_skill_toggle()
+        if path == "/api/outbound_proxy/test":
+            return self._handle_outbound_proxy_test()
         if path == "/api/evolution":
             return self._handle_evolution()
         if path == "/api/chat":
@@ -8993,6 +9109,151 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"ok": True, "action": action, "control": {
             "paused": state["paused"], "reason": state["reason"],
             "since": state["since"], "stop_seq": state["stop_seq"]}})
+
+    def _handle_outbound_proxy_test(self) -> None:
+        """POST /api/outbound_proxy/test — Bearer (car H §3.4). One live
+        diagnostic fetch THROUGH the owner's configured proxy (fail-closed
+        path, 8s ceiling) -> {ok, reason_word, ms}. Any HTTP status counts
+        as ok; an off block answers the honest word "disabled", an unusable
+        URL "bad_url". A body is OPTIONAL (bare POST = the owned default
+        target, which is what the skill documents); `{"target": ...}` may
+        override it — bearer-gated loopback, http(s) only (enforced by
+        outbound_probe), no credential attached to the target request. The
+        proxy URL is never echoed in any outcome."""
+        if not self._require_token():
+            return
+        doc: dict = {}
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            length = 0
+        if length > 0:
+            parsed = self._read_json_body()
+            if parsed is None:
+                return          # _read_json_body already answered (400/413)
+            doc = parsed
+        raw_target = doc.get("target")
+        target = raw_target if isinstance(raw_target, str) else SKILLS_REMOTE_URL
+        return self._json(outbound_probe(target, timeout=8.0))
+
+    def _handle_skill_install(self) -> None:
+        """POST /api/skills/install {slug} — Bearer (car H §3.2; owner
+        rulings Q1=A staged source, Q2=A one click). The whole action is a
+        file copy from the staged package that shipped with this release:
+        no network, no execution, deny-by-default on the slug (catalog
+        membership first — a slug outside the official catalog can never
+        land on disk). The response carries counts and words only, never a
+        path."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        slug = doc.get("slug")
+        if not isinstance(slug, str) or not SKILL_SLUG_RE.match(slug):
+            return self._json({"error": "validation failed",
+                               "details": ["slug must be a lowercase "
+                                           "hyphenated id"]}, 400)
+        rows = _skills_remote_ladder().get("skills") or []
+        entry = next((r for r in rows if isinstance(r, dict)
+                      and r.get("slug") == slug), None)
+        if entry is None:
+            return self._json({"error": "not found",
+                               "details": ["slug is not in the official "
+                                           "catalog"]}, 404)
+        if entry.get("install_status") == "bundled" or \
+                (REPO / "overlay" / "skills" / slug).is_dir():
+            return self._json({"error": "conflict",
+                               "details": ["bundled skills ship mounted "
+                                           "already"]}, 409)
+        pkg = SKILLS_PACKAGES_DIR / slug
+        target = SKILLS_INSTALLED_DIR / slug
+        if not pkg.is_dir() or pkg.resolve().parent != SKILLS_PACKAGES_DIR.resolve():
+            return self._json({"error": "unavailable",
+                               "details": ["staged package is not shipped "
+                                           "with this release"]}, 409)
+        if target.exists():
+            return self._json({"error": "conflict",
+                               "details": ["already installed"]}, 409)
+        try:
+            SKILLS_INSTALLED_DIR.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(pkg, target)
+        except OSError as e:  # noqa: BLE001 — type word only, no path
+            return self._json({"error": f"install failed: {type(e).__name__}"},
+                              500)
+        files = sum(1 for p in target.rglob("*") if p.is_file())
+        sys.stderr.write(f"skills install slug={slug} files={files}\n")
+        return self._json({"ok": True, "slug": slug, "files": files,
+                           "source": "staged"})
+
+    def _handle_skill_uninstall(self) -> None:
+        """POST /api/skills/uninstall {slug} — Bearer (car H §3.2). Deletes
+        ONLY under data/skills — the target must resolve inside that root,
+        so the shipped overlay is untouchable by construction. Bundled
+        skills answer an honest 404 (not installed): they are disabled via
+        the toggle, never removed."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        slug = doc.get("slug")
+        if not isinstance(slug, str) or not SKILL_SLUG_RE.match(slug):
+            return self._json({"error": "validation failed",
+                               "details": ["slug must be a lowercase "
+                                           "hyphenated id"]}, 400)
+        target = SKILLS_INSTALLED_DIR / slug
+        try:
+            inside = target.resolve().parent == SKILLS_INSTALLED_DIR.resolve()
+        except OSError:
+            inside = False
+        if not target.is_dir() or not inside:
+            return self._json({"error": "not found",
+                               "details": ["not installed"]}, 404)
+        files = sum(1 for p in target.rglob("*") if p.is_file())
+        try:
+            shutil.rmtree(target)
+        except OSError as e:  # noqa: BLE001 — type word only
+            return self._json({"error": f"remove failed: {type(e).__name__}"},
+                              500)
+        sys.stderr.write(f"skills uninstall slug={slug} files={files}\n")
+        return self._json({"ok": True, "slug": slug, "removed": files})
+
+    def _handle_skill_toggle(self) -> None:
+        """POST /api/skills/toggle {slug, enabled} — Bearer (car H §3.2).
+        Writes settings.skills.disabled through the settings grammar and the
+        single file writer (deep_merge replaces the list), so the Settings
+        view's dirty tracking stays the only OTHER writer and nothing here
+        can persist an unvalidated shape. Idempotent; responds with the full
+        new list so the card can repaint without a refetch."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        slug = doc.get("slug")
+        if not isinstance(slug, str) or not SKILL_SLUG_RE.match(slug):
+            return self._json({"error": "validation failed",
+                               "details": ["slug must be a lowercase "
+                                           "hyphenated id"]}, 400)
+        enabled = doc.get("enabled")
+        if not isinstance(enabled, bool):
+            return self._json({"error": "validation failed",
+                               "details": ["enabled must be a boolean"]}, 400)
+        current = _skills_disabled()
+        if enabled:
+            want = [s for s in current if s != slug]
+        else:
+            want = current if slug in current else [*current, slug]
+        clean, errors = validate_settings_patch({"skills": {"disabled": want}})
+        if errors:
+            return self._json({"error": "validation failed",
+                               "details": errors}, 400)
+        code, body = self._apply_clean_settings(clean)
+        if code >= 400:
+            return self._json(body, code)
+        return self._json({"ok": True, "slug": slug, "enabled": enabled,
+                           "disabled": want})
 
     def _handle_settings_write(self) -> None:
         """Validated, idempotent settings write. The token value never appears

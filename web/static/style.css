@@ -1503,7 +1503,8 @@ body { line-height: 1.5; }
 .sniff-err, .sniff-acked, .sniff-when code, .sniff-row-sub, .alert-foot,
 .preview-tag, .upd-cmd, .sub-head, .voice-state, .gal-count, .svc-summary,
 .metric-unit, .num, .m-detail, .test-out .test-row, .mt-row, .mt-name,
-.mt-state, .orch-val, .save-state, .btn.tiny { font-size: 12.5px; }
+.mt-state, .orch-val, .save-state, .btn.tiny, .skl-chip, .skl-req,
+.skl-ver { font-size: 12.5px; }
 /* grid/section sub-titles keep their own rung between card title and body */
 .gal-name, .comm-title, .md-ms-title, .sniff-id { font-size: 15px;
   font-weight: 700; }
@@ -1944,3 +1945,37 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 .ext-add { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
 .ext-presets { margin-top: 14px; padding-top: 12px;
   border-top: 1px dashed var(--line); }
+
+/* ------------------------ car H: skills catalog + outbound proxy -------- */
+/* Category chips over the official catalog (one source — the shipped
+   ladder). AA-safe tokens only (the contrast audit's verified palette). */
+.skl-cats { display: flex; flex-wrap: wrap; gap: 7px; margin: 12px 0 6px; }
+.skl-chip { padding: 4px 11px; border: 1px solid var(--line);
+  background: var(--panel); color: var(--muted); cursor: pointer;
+  font-family: var(--mono); letter-spacing: .05em; }
+.skl-chip:hover { border-color: var(--blue-dim); color: var(--blue-ink); }
+.skl-chip[aria-pressed="true"] { border-color: var(--blue-ink);
+  color: var(--blue-ink); background: var(--blue-wash); font-weight: 600; }
+.skl-unavail { margin-top: 8px; color: var(--amber); }
+.skl-ver { color: var(--muted); font-family: var(--mono);
+  margin-left: 7px; font-weight: 400; }
+.skl-reqs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 7px; }
+.skl-req { padding: 2px 8px; border: 1px solid var(--line);
+  font-family: var(--mono); color: var(--navy); background: var(--panel); }
+.skl-req.miss { color: var(--red); border-color: rgba(208, 42, 68, .4); }
+.skl-act { display: flex; align-items: center; gap: 9px; margin-top: 10px;
+  flex-wrap: wrap; }
+.skl-badge { font-size: 12.5px; font-family: var(--mono);
+  letter-spacing: .08em; color: var(--blue-ink);
+  border: 1px solid var(--blue-dim); padding: 4px 10px;
+  background: var(--blue-wash); }
+.skl-badge.done { color: var(--ok); border-color: rgba(10, 122, 82, .45);
+  background: transparent; }
+.skl-msg { flex: 1; min-width: 120px; }
+/* gallery card extras: the switch row + a remove action for installed-only */
+.gal-act { display: flex; align-items: center; gap: 9px; margin-top: 9px;
+  flex-wrap: wrap; }
+.gal-act .stat-note { margin: 0; }
+.gal-tag.installed { color: var(--blue-ink); border-color: var(--blue-dim);
+  background: var(--blue-wash); }
+.gal-tag.learned { color: var(--violet); border-color: rgba(101, 88, 214, .55); }

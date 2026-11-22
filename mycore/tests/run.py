@@ -2051,18 +2051,18 @@ def test_service() -> None:
                 check("service: /version up to date says so (installed shown)",
                       "0.5.69" in v_ok and "up to date" in v_ok, v_ok[:140])
 
-                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.70")
-                staged({"day": "x", "pending": "0.5.70"})
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.71")
+                staged({"day": "x", "pending": "0.5.71"})
                 svc.handle_update(mk_update(31, 111, 123456789, "/version"))
                 v_up = fake.sends[-1][1]
                 check("service: /version update -> latest + apply command",
-                      "0.5.70" in v_up and "aidog_update.py apply" in v_up,
+                      "0.5.71" in v_up and "aidog_update.py apply" in v_up,
                       v_up[:170])
                 st_after = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: /version consumes the staged notice (no dup)",
                       not st_after.get("pending")
-                      and st_after.get("notified") == "0.5.70",
+                      and st_after.get("notified") == "0.5.71",
                       str(st_after))
 
                 svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", None, fail=True)
@@ -2073,7 +2073,7 @@ def test_service() -> None:
                       and "RuntimeError" in v_err, v_err[:170])
 
                 # daily check: stages once, day-capped, then one-shot attach
-                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.70")
+                svc_mod._load_update_mod = lambda repo: _FakeRel("0.5.69", "0.5.71")
                 (state1 / "release_notice.json").unlink(missing_ok=True)
                 svc._maybe_release_check()
                 n1 = fetch_calls["n"]
@@ -2083,28 +2083,28 @@ def test_service() -> None:
                 stg = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: newer release stages exactly one pending notice",
-                      stg.get("pending") == "0.5.70", str(stg))
+                      stg.get("pending") == "0.5.71", str(stg))
 
                 svc.handle_update(mk_update(33, 111, 123456789, "hello again"))
                 note1 = fake.sends[-1][1]
                 check("service: next message carries the release note once",
-                      "0.5.70" in note1 and "pong" in note1, note1[:220])
+                      "0.5.71" in note1 and "pong" in note1, note1[:220])
                 svc.handle_update(mk_update(34, 111, 123456789, "and again"))
                 note2 = fake.sends[-1][1]
                 check("service: the note is one-shot (second message clean)",
                       note2 == "pong", repr(note2))
 
                 # commands never carry the note; the pending survives them
-                staged({"day": "x", "pending": "0.5.70"})
+                staged({"day": "x", "pending": "0.5.71"})
                 svc.handle_update(mk_update(35, 111, 123456789, "/help"))
                 h_txt = fake.sends[-1][1]
                 check("service: commands do not carry the release note",
-                      "/version" in h_txt and "0.5.70" not in h_txt,
+                      "/version" in h_txt and "0.5.71" not in h_txt,
                       h_txt[:90])
                 st_h = json.loads(
                     (state1 / "release_notice.json").read_text())
                 check("service: an unconsumed pending survives a command",
-                      st_h.get("pending") == "0.5.70", str(st_h))
+                      st_h.get("pending") == "0.5.71", str(st_h))
 
                 # already-upgraded guard: pending == VERSION on disk -> cleared
                 ver = (Path(svc.repo) / "VERSION").read_text().strip()
@@ -2343,6 +2343,259 @@ def test_skill_dirs_chain() -> None:
                   str(roots)[:200])
         finally:
             sr.REPO = real_repo
+
+
+def test_outbound_proxy() -> None:
+    """Car H §3.4 (owner ruling Q3=A / item #8): the opt-in outbound-proxy
+    seam — grammar fail-closed with zero echo, config states off/ready/
+    bad_url, http_fetch routed through a REAL local fake proxy (absolute-
+    form proof, target-origin silence), fail-closed on a dead proxy, and
+    the probe's documented words. Zero external network: every server here
+    binds 127.0.0.1."""
+    import importlib
+    import socket
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    _tools = importlib.import_module("mycore.tools")
+
+    # ---- grammar ----------------------------------------------------------
+    clean, errs = _tools.outbound_validate({"enabled": True,
+                                            "url": "http://127.0.0.1:7890"})
+    check("outbound: valid block accepted",
+          not errs and clean == {"enabled": True,
+                                 "url": "http://127.0.0.1:7890"},
+          f"{clean} {errs}")
+    clean, errs = _tools.outbound_validate(
+        {"url": "http://user:SECRETPASS@p.example:8080"})
+    check("outbound: userinfo in the URL refused — settings hold no "
+          "credentials (AIDOG_PROXY_AUTH named, value not echoed)",
+          len(errs) == 1 and "AIDOG_PROXY_AUTH" in errs[0]
+          and "SECRETPASS" not in errs[0], str(errs))
+    _, errs = _tools.outbound_validate({"enabled": "yes"})
+    check("outbound: non-boolean enabled refused",
+          any("boolean" in e for e in errs), str(errs))
+    _, errs = _tools.outbound_validate({"nope": 1})
+    check("outbound: unknown key refused",
+          any("only" in e for e in errs), str(errs))
+    _, errs = _tools.outbound_validate(["x"])
+    check("outbound: non-object block refused",
+          errs == ["outbound_proxy must be an object"], str(errs))
+    _, errs = _tools.outbound_validate({"url": "socks5://user:SECRETPASS@h:1"})
+    check("outbound: wrong scheme refused WITHOUT echoing the value",
+          len(errs) == 1 and "SECRETPASS" not in errs[0]
+          and "socks5" not in errs[0], str(errs))
+    _, errs = _tools.outbound_validate({"url": "http://has space/x"})
+    check("outbound: whitespace URL refused, value not echoed",
+          bool(errs) and "has space" not in " ".join(errs), str(errs))
+    _, errs = _tools.outbound_validate({"url": "http:///x"})
+    check("outbound: scheme without a host refused",
+          any("host" in e for e in errs), str(errs))
+    _, errs = _tools.outbound_validate({"url": "http://h/" + "a" * 2100})
+    check("outbound: over-long URL refused",
+          any("long" in e for e in errs), str(errs))
+
+    # ---- config states -----------------------------------------------------
+    check("outbound: absent block -> off",
+          _tools.outbound_config({}) == {"state": "off", "url": ""})
+    check("outbound: disabled block -> off (stock byte-identical path)",
+          _tools.outbound_config(
+              {"outbound_proxy": {"enabled": False,
+                                  "url": "http://p:1"}})["state"] == "off")
+    check("outbound: enabled + empty url -> bad_url (never a silent direct)",
+          _tools.outbound_config(
+              {"outbound_proxy": {"enabled": True, "url": ""}})["state"]
+          == "bad_url")
+    check("outbound: enabled + junk url -> bad_url",
+          _tools.outbound_config(
+              {"outbound_proxy": {"enabled": True,
+                                  "url": "notaurl"}})["state"] == "bad_url")
+    cfg = _tools.outbound_config(
+        {"outbound_proxy": {"enabled": True,
+                            "url": "  http://127.0.0.1:7890 "}})
+    check("outbound: enabled + good url -> ready (stripped)",
+          cfg == {"state": "ready", "url": "http://127.0.0.1:7890"}, str(cfg))
+    check("outbound: a hand-edited URL with embedded credentials -> bad_url",
+          _tools.outbound_config(
+              {"outbound_proxy": {"enabled": True,
+                                  "url": "http://u:p@h:1"}})["state"]
+          == "bad_url")
+
+    # ---- the documented reason words --------------------------------------
+    check("outbound: reason refused",
+          _tools.outbound_reason(ConnectionRefusedError(111, "refused"))
+          == "refused")
+    check("outbound: reason timeout",
+          _tools.outbound_reason(TimeoutError("timed out")) == "timeout")
+    check("outbound: reason tls",
+          _tools.outbound_reason(ValueError("ssl: CERTIFICATE_VERIFY_FAILED"))
+          == "tls")
+    check("outbound: reason dns",
+          _tools.outbound_reason(OSError("Name or service not known")) == "dns")
+    check("outbound: anything else -> unreachable",
+          _tools.outbound_reason(OSError("boom")) == "unreachable")
+
+    # ---- real local servers: routing proof + fail-closed proof ------------
+    class _Proxy(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: ARG002 — quiet test servers
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802
+            self.server.saw.append(self.path)  # type: ignore[attr-defined]
+            self.server.saw_auth = self.headers.get("Proxy-Authorization")  # type: ignore[attr-defined]
+            body = b"via-fake-proxy"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    class _Target(BaseHTTPRequestHandler):
+        def log_message(self, *a):  # noqa: ARG002
+            pass
+
+        def do_GET(self) -> None:  # noqa: N802
+            self.server.saw.append(self.path)  # type: ignore[attr-defined]
+            body = b"direct-body"
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+    proxy_srv = ThreadingHTTPServer(("127.0.0.1", 0), _Proxy)
+    target_srv = ThreadingHTTPServer(("127.0.0.1", 0), _Target)
+    proxy_srv.saw = []   # type: ignore[attr-defined]
+    target_srv.saw = []  # type: ignore[attr-defined]
+    for srv in (proxy_srv, target_srv):
+        threading.Thread(target=srv.serve_forever, daemon=True).start()
+    proxy_url = f"http://127.0.0.1:{proxy_srv.server_address[1]}"
+    target_url = f"http://127.0.0.1:{target_srv.server_address[1]}/x"
+    probe = socket.socket()
+    probe.bind(("127.0.0.1", 0))
+    dead_port = probe.getsockname()[1]
+    probe.close()
+    saved_env = {k: os.environ.get(k) for k in ("no_proxy", "NO_PROXY")}
+    try:
+        # Stock legs run under the AMBIENT env (loopback is exempt there —
+        # standard urllib semantics; without the exemption the machine's own
+        # http_proxy would intercept a 127.0.0.1 target and the "stock" leg
+        # would stop being stock).
+        _tools.set_outbound_settings_for_tests({})
+        out = _tools._http_fetch(target_url)
+        check("outbound: disabled fetch goes DIRECT (stock path)",
+              out == "direct-body", out[:80])
+        check("outbound: stock path never touches any proxy",
+              proxy_srv.saw == [], str(proxy_srv.saw))  # type: ignore[attr-defined]
+        target_srv.saw.clear()  # type: ignore[attr-defined]
+
+        # The OWNER-policy legs clear the ambient exemption for their run
+        # (restored in finally): stock urllib honors NO_PROXY and would
+        # otherwise silently bypass an enabled proxy for a loopback target —
+        # env ownership stays with the machine owner either way.
+        os.environ["no_proxy"] = os.environ["NO_PROXY"] = ""
+
+        # enabled -> routed through the fake proxy; the origin sees nothing
+        _tools.set_outbound_settings_for_tests(
+            {"outbound_proxy": {"enabled": True, "url": proxy_url}})
+        out = _tools._http_fetch(target_url)
+        check("outbound: enabled fetch returns the PROXY's body",
+              out == "via-fake-proxy", out[:80])
+        check("outbound: the proxy saw an absolute-form request (routing proof)",
+              bool(proxy_srv.saw) and proxy_srv.saw[0].startswith("http://"),  # type: ignore[attr-defined]
+              str(proxy_srv.saw))  # type: ignore[attr-defined]
+        check("outbound: the target origin saw NOTHING (no leak past the proxy)",
+              target_srv.saw == [], str(target_srv.saw))  # type: ignore[attr-defined]
+
+        # fail-closed: dead proxy -> word error; the direct target stays dark
+        _tools.set_outbound_settings_for_tests(
+            {"outbound_proxy": {"enabled": True,
+                                "url": f"http://127.0.0.1:{dead_port}"}})
+        try:
+            _tools._http_fetch(target_url)
+            check("outbound: a dead proxy RAISES instead of falling back", False)
+        except _tools.ToolError as e:
+            check("outbound: a dead proxy fails closed with the documented word",
+                  "proxy fetch failed (refused)" in str(e), str(e))
+        check("outbound: fail-closed — the direct target STILL saw nothing",
+              target_srv.saw == [], str(target_srv.saw))  # type: ignore[attr-defined]
+
+        # enabled + bad url -> bad_url before any socket opens
+        _tools.set_outbound_settings_for_tests(
+            {"outbound_proxy": {"enabled": True, "url": "not-a-url"}})
+        try:
+            _tools._http_fetch(target_url)
+            check("outbound: bad_url refuses the fetch", False)
+        except _tools.ToolError as e:
+            check("outbound: bad_url refuses the fetch, value never echoed",
+                  "bad_url" in str(e) and "not-a-url" not in str(e), str(e))
+
+        # slot-based proxy auth: the credential rides the PROXY hop only
+        import base64 as _b64
+        os.environ["AIDOG_PROXY_AUTH"] = "e2euser:SECRETPASS"
+        try:
+            _tools.set_outbound_settings_for_tests(
+                {"outbound_proxy": {"enabled": True, "url": proxy_url}})
+            out = _tools._http_fetch(target_url)
+            check("outbound: an http fetch routes with the slot credential",
+                  out == "via-fake-proxy", out[:80])
+            expected = "Basic " + _b64.b64encode(
+                b"e2euser:SECRETPASS").decode("ascii")
+            check("outbound: the proxy hop carried the Basic auth header",
+                  proxy_srv.saw_auth == expected,  # type: ignore[attr-defined]
+                  str(proxy_srv.saw_auth))  # type: ignore[attr-defined]
+            check("outbound: the slot credential never appears in the result",
+                  "SECRETPASS" not in out and "e2euser" not in out, out[:80])
+
+            seen_before = len(proxy_srv.saw)  # type: ignore[attr-defined]
+            try:
+                _tools._http_fetch("https://127.0.0.1:1/none")
+                check("outbound: https through an authenticated proxy refuses", False)
+            except _tools.ToolError as e:
+                check("outbound: https through an authenticated proxy refuses "
+                      "with the auth word (stdlib would leak it to the origin)",
+                      str(e) == "proxy fetch failed (auth)", str(e))
+            check("outbound: the refusal opened no socket",
+                  len(proxy_srv.saw) == seen_before,  # type: ignore[attr-defined]
+                  str(proxy_srv.saw))  # type: ignore[attr-defined]
+            res = _tools.outbound_probe("https://127.0.0.1:1/x")
+            check("outbound: probe refuses an https target with the auth word",
+                  res.get("ok") is False and res.get("reason_word") == "auth",
+                  str(res))
+        finally:
+            os.environ.pop("AIDOG_PROXY_AUTH", None)
+
+        # ---- probe words ---------------------------------------------------
+        _tools.set_outbound_settings_for_tests({})
+        res = _tools.outbound_probe(target_url)
+        check("outbound: probe on an off block answers 'disabled'",
+              res == {"ok": False, "reason_word": "disabled", "ms": 0}, str(res))
+        _tools.set_outbound_settings_for_tests(
+            {"outbound_proxy": {"enabled": True, "url": "not-a-url"}})
+        check("outbound: probe on a bad url answers 'bad_url'",
+              _tools.outbound_probe(target_url)["reason_word"] == "bad_url")
+        _tools.set_outbound_settings_for_tests(
+            {"outbound_proxy": {"enabled": True, "url": proxy_url}})
+        res = _tools.outbound_probe(target_url)
+        check("outbound: probe through the live fake proxy answers ok",
+              res.get("ok") is True and isinstance(res.get("ms"), int), str(res))
+        _tools.set_outbound_settings_for_tests(
+            {"outbound_proxy": {"enabled": True,
+                                "url": f"http://127.0.0.1:{dead_port}"}})
+        res = _tools.outbound_probe(target_url)
+        check("outbound: probe through a dead proxy answers ok:false + word",
+              res.get("ok") is False and res.get("reason_word") == "refused",
+              str(res))
+        check("outbound: no probe outcome carries a URL",
+              all("http://" not in str(v) for v in res.values()), str(res))
+    finally:
+        _tools.set_outbound_settings_for_tests(None)
+        for key, val in saved_env.items():
+            if val is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = val
+        proxy_srv.shutdown()
+        target_srv.shutdown()
+        proxy_srv.server_close()
+        target_srv.server_close()
 
 
 def test_evolution() -> None:
@@ -16344,6 +16597,7 @@ def main() -> int:
         test_model_gateway,
         test_sniff,
         test_skill_dirs_chain,
+        test_outbound_proxy,
         test_loop_budget,
         test_cli_precedence,
         test_tg,

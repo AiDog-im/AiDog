@@ -23,8 +23,10 @@ Skill roots, in resolution order (deduplicated, existing dirs only):
   2. AIDOG_SKILL_DIRS env var (os.pathsep-separated)
   3. SKILL_DIRS in deploy/memory_sources.local (gitignored machine config,
      os.pathsep-separated — P5-4, same local-config layer as memory)
-  4. <repo>/overlay/skills (repo-embedded product body-layer default)
-  5. profile config.yaml `external_dirs:` — LEGACY transition step, read only
+  4. the active profile's learned skills <profile>/body/skills (car F §13.1)
+  5. <repo>/data/skills — one-click installs (car H §3.2, gitignored)
+  6. <repo>/overlay/skills (repo-embedded product body-layer default)
+  7. profile config.yaml `external_dirs:` — LEGACY transition step, read only
      while deploy/upstream_shim.env exists (deleted in the P5-5 same-car swap;
      absent shim = skipped, product behavior unaffected)
 
@@ -55,6 +57,10 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 DEFAULT_SKILLS_DIR = REPO / "overlay" / "skills"
+# Car H (§3.2): one-click installs land here (gitignored machine state,
+# written only by POST /api/skills/install). Kept as a module constant so
+# tests can pin it; the shipped overlay below stays read-only.
+INSTALLED_SKILLS_DIR = REPO / "data" / "skills"
 
 # Car F (§13.1): the active profile's learned-skills layer. Both legitimate
 # import shapes are covered — `import profile_paths` when lib/ is this file's
@@ -302,8 +308,9 @@ def profile_config_dirs() -> list[str]:
 
 
 def skill_roots(dirs_flag: str | None) -> list[Path]:
-    """Roots in the documented order: flag > env > local config > repo default
-    > legacy profile config (shim-gated). Deduped, existing dirs only."""
+    """Roots in the documented order: flag > env > local config > profile
+    learned > one-click installs (data/skills, car H) > repo default >
+    legacy profile config (shim-gated). Deduped, existing dirs only."""
     raw: list[str] = []
     if dirs_flag:
         raw += [p for p in dirs_flag.split(os.pathsep) if p]
@@ -327,6 +334,12 @@ def skill_roots(dirs_flag: str | None) -> list[Path]:
         cand = _pp.skills_dir(REPO)
         if cand.is_dir() and cand not in roots:
             roots.append(cand)
+    # car H (§3.2): the owner's one-click installs — a user-installed layer
+    # that sits with the other user layers, BEFORE the shipped read-only
+    # product layer (install refuses bundled slugs, so no shadowing exists
+    # in practice; the order only keeps gallery and router consistent).
+    if INSTALLED_SKILLS_DIR.is_dir() and INSTALLED_SKILLS_DIR not in roots:
+        roots.append(INSTALLED_SKILLS_DIR)
     # repo-embedded default comes before the legacy profile step (P5-4 chain)
     if DEFAULT_SKILLS_DIR.is_dir() and DEFAULT_SKILLS_DIR not in roots:
         roots.append(DEFAULT_SKILLS_DIR)
@@ -340,7 +353,42 @@ def skill_roots(dirs_flag: str | None) -> list[Path]:
     return roots
 
 
+def set_settings_for_tests(doc: dict | None) -> None:
+    """Test seam: pin the settings document disabled_skills() reads (None
+    restores the production read). Production callers never pass it."""
+    global _settings_override
+    _settings_override = doc
+
+
+_settings_override: dict | None = None
+
+
+def disabled_skills() -> set[str]:
+    """Car H (§3.2): slugs the owner switched OFF in the machine-local
+    settings block `skills.disabled` (gitignored web/settings.json, written
+    through the console toggle). Fail-soft by construction: missing/corrupt
+    settings, absent block or a non-list value all yield the empty set, so
+    stock routing stays byte-identical when the feature is unused."""
+    if _settings_override is not None:
+        doc = _settings_override
+    else:
+        try:
+            doc = json.loads(_pp.settings_path(REPO).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return set()
+    if not isinstance(doc, dict):
+        return set()
+    block = doc.get("skills")
+    if not isinstance(block, dict):
+        return set()
+    lst = block.get("disabled")
+    if not isinstance(lst, list):
+        return set()
+    return {str(x) for x in lst}
+
+
 def load_skills(roots: list[Path]) -> list[dict]:
+    off = disabled_skills()   # car H: a switched-off skill never routes
     out: list[dict] = []
     for root in roots:
         try:
@@ -349,6 +397,8 @@ def load_skills(roots: list[Path]) -> list[dict]:
             continue
         for child in children:
             if not child.is_dir():
+                continue
+            if child.name in off:
                 continue
             text = read_text(child / "SKILL.md")
             if text is None:
