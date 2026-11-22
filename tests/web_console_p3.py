@@ -858,6 +858,16 @@ def main() -> int:
               # (value is null when nothing reported an input count)
               and "cached_ratio" in mine
               and "display" in mine, str(mine)[:300])
+        # car B (cost transparency 5.3): the month-to-date block rides the
+        # same local meter — same honest-null rule for an unpriced table
+        mblk = mine.get("month") if isinstance(mine, dict) else None
+        check("GET /api/usage/self month block (cost transparency)",
+              isinstance(mblk, dict)
+              and isinstance(mblk.get("requests"), int)
+              and isinstance(mblk.get("days"), int) and 1 <= mblk["days"] <= 31
+              and (mblk.get("total_cny") is None
+                   or isinstance(mblk.get("total_cny"), (int, float)))
+              and isinstance(mblk.get("unpriced"), list), str(mblk)[:200])
         # per-key probe: model slots only, endpoint required, unset = 400
         s, body = post("/api/mycore/upstreams/test",
                        {"url": "http://127.0.0.1:9/v1", "slot": "WEB_TOKEN"},
