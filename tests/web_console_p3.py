@@ -3596,6 +3596,14 @@ def main() -> int:
               and _cb.get("ok") is False
               and "number must be a positive integer"
               in str(_cb.get("details")), f"{_cs} {_cb}")
+    for _q in ("?category=Bad%20Slug!", "?category=UPPER", "?category=-lead",
+               "?category=x%21y"):
+        _cs, _cb = get("/api/discussions" + _q)
+        check(f"live discussions{_q} -> 400 slug validation, no outbound",
+              _cs == 400 and isinstance(_cb, dict)
+              and _cb.get("ok") is False
+              and "slug like task-hall" in str(_cb.get("details")),
+              f"{_cs} {_cb}")
 
     # (e) SUCCESS paths in-process: mock transport + temp files + local mocks
     class _BotOk(_BHR3):
@@ -3739,6 +3747,65 @@ def main() -> int:
               and _cat.get("reason") == "no_scope"
               and _SENT not in json.dumps(_cat), str(_cat))
         _c_mode["v"] = "ok"
+
+        # discussions list: local category filter (GitHub ignores the
+        # upstream ?category= param — car F verified), slug validation
+        # before any fetch, and `_raw` never leaves the module.
+        _srv.bust_discussions_cache()
+        _real_fetch = _srv._fetch_discussions
+        _fetch_hits = {"n": 0}
+        _FIX_RAW = [
+            {"number": 1, "title": "welcome",
+             "category": {"name": "Announcements", "slug": "announcements"},
+             "user": {"login": "alice"}, "comments": 0,
+             "updated_at": "2026-11-02T00:00:00Z",
+             "html_url": "https://github.com/AiDog-im/AiDog/discussions/1"},
+            {"number": 8, "title": "coc task hall",
+             "category": {"name": "Task Hall", "slug": "task-hall"},
+             "user": {"login": "bob"}, "comments": 2,
+             "updated_at": "2026-11-02T01:00:00Z",
+             "html_url": "https://github.com/AiDog-im/AiDog/discussions/8"},
+        ]
+
+        def _fake_fetch():
+            _fetch_hits["n"] += 1
+            return {"available": True,
+                    "discussions": _srv._discussion_rows(_FIX_RAW),
+                    "checked_at": "2026-11-02T02:00:00+00:00",
+                    "_raw": _FIX_RAW}
+
+        _srv._fetch_discussions = _fake_fetch
+        try:
+            _all = _srv.collect_discussions(fresh=True)
+            check("in-process discussions list -> two rows, no _raw leaked",
+                  _all.get("available") is True
+                  and len(_all.get("discussions", [])) == 2
+                  and "_raw" not in _all
+                  and set(_all) == {"available", "discussions", "checked_at"},
+                  str(sorted(_all)))
+            _one = _srv.collect_discussions(category="task-hall")
+            check("in-process discussions ?category= filters locally by slug",
+                  len(_one.get("discussions", [])) == 1
+                  and _one["discussions"][0]["title"] == "coc task hall"
+                  and _one["discussions"][0]["category"] == "Task Hall"
+                  and "_raw" not in _one, str(_one))
+            check("in-process category filter serves from cache (one fetch)",
+                  _fetch_hits["n"] == 1, str(_fetch_hits))
+            _miss = _srv.collect_discussions(category="no-such-cat")
+            check("in-process unknown-but-valid slug -> honest empty list",
+                  _miss.get("available") is True
+                  and _miss.get("discussions") == [], str(_miss))
+            _bad = _srv.collect_discussions(category="Bad Slug!")
+            check("in-process bad slug -> 400 shape BEFORE any fetch",
+                  _bad.get("ok") is False
+                  and "slug like task-hall" in str(_bad.get("details"))
+                  and _fetch_hits["n"] == 1, str(_bad))
+            check("in-process discussions payloads carry no credential",
+                  _SENT not in json.dumps(_all)
+                  and _SENT not in json.dumps(_one), "sentinel echoed")
+        finally:
+            _srv._fetch_discussions = _real_fetch
+            _srv.bust_discussions_cache()
 
         # replies: mapped rows + href scrub + 60s cache + ?fresh=1 busts it
         _srv.bust_replies_cache()
