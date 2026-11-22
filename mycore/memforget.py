@@ -25,8 +25,14 @@ The ledger row's `scope` says WHICH surfaces a tombstone silences; the
 `channel` is the axis that is ENFORCED — a tombstone never crosses stores,
 because the channel is part of the source id.
 
+`describe_entry` is the READ half of the owner-facing forget control: it
+answers what a forget WOULD do (the admission channel, the opaque source
+id, how many sections it would filter) without touching anything and
+without ever returning the entry text, a path or a credential.
+
 Stdlib only. English comments (repo i18n policy).
 """
+
 from __future__ import annotations
 
 import errno
@@ -522,10 +528,19 @@ def split_sections(text: str, min_level: int = 1,
     return "".join(preamble), chunks
 
 
-def _levels_for(channel: str) -> tuple[int, int]:
-    # The learned slot is written as "## <date> (learn)" entries; a curated
-    # file is human-authored and may nest headings.
+def levels_for(channel: str) -> tuple[int, int]:
+    """The heading levels that delimit ONE stored entry of a memory slot.
+
+    The learned slot is written as "## <date> (learn)" entries; a curated
+    file is human-authored and may nest headings. Every surface that counts
+    or addresses an entry (the read filter, the memory view, the forget
+    control) MUST use this one rule, so they can never disagree about which
+    text an entry owns."""
     return (2, 2) if channel == CHANNEL_LEARNED else (1, 6)
+
+
+# Historic private name — kept so an old caller keeps working.
+_levels_for = levels_for
 
 
 def filter_text(text: str, channel: str, *, repo: Path | None = None,
@@ -540,8 +555,14 @@ def filter_text(text: str, channel: str, *, repo: Path | None = None,
     snapshot = tombstones if tombstones is not None else load_set(repo, state)
     if not snapshot:
         return text
-    min_level, max_level = _levels_for(channel)
+    min_level, max_level = levels_for(channel)
     preamble, chunks = split_sections(text, min_level, max_level)
+    if not chunks:
+        # A file with no heading at all is ONE entry: the whole file. A
+        # tombstone on it drops the file from every read path.
+        if snapshot.contains_section(channel, preamble):
+            return ""
+        return text
     kept = [preamble]
     for chunk in chunks:
         if snapshot.contains_section(channel, chunk["body"]):
@@ -560,6 +581,68 @@ def filter_slot(path: Path | str, text: str, *,
                         tombstones=tombstones)
 
 
+def _find_chunk(chunks: list[dict], wanted: str) -> dict | None:
+    """The stored section whose heading is `wanted` — exact first, then
+    case-insensitive. None when there is no such entry."""
+    if not chunks:
+        return None
+    found = [c for c in chunks if c["heading"] == wanted]
+    if not found:
+        low = wanted.casefold()
+        found = [c for c in chunks if c["heading"].casefold() == low]
+    return found[0] if found else None
+
+
+def describe_entry(path: Path | str, title: str, *,
+                   repo: Path | None = None,
+                   state: Path | str | None = None) -> dict:
+    """Describe ONE stored entry of a memory file, addressed by its heading.
+
+    READ-ONLY: nothing is written, nothing is changed. The answer is the
+    provenance a forget control needs BEFORE the owner acts:
+
+      {"channel":    the admission channel (the store the entry lives in),
+       "source_id":  the opaque, deterministic id a forget would record,
+       "entries":    how many sections a forget of this entry would filter,
+       "title":      the heading as it is stored}
+
+    The answer carries NO entry text, NO file path and NO credential: the
+    source id is opaque by construction (D2) and the count is a number.
+
+    A file with no heading at all is ONE entry (the whole file) — the shape
+    stays honest rather than inventing structure."""
+    target = Path(path)
+    try:
+        text = target.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise MemforgetError("the memory slot could not be read")
+    channel = channel_for_path(target)
+    min_level, max_level = levels_for(channel)
+    preamble, chunks = split_sections(text, min_level, max_level)
+    wanted = str(title or "").strip()
+    if not chunks:
+        if wanted:
+            raise MemforgetError("no entry with that heading")
+        body = text
+        heading = ""
+        matches = 1
+    else:
+        chunk = _find_chunk(chunks, wanted)
+        if chunk is None:
+            raise MemforgetError("no entry with that heading")
+        heading = chunk["heading"]
+        body = strip_markers(chunk["body"])
+        digest = digest_of(body)
+        # Every section that carries the SAME body would be filtered by this
+        # tombstone — that is the honest count of what the forget removes.
+        matches = sum(1 for c in chunks
+                      if digest_of(strip_markers(c["body"])) == digest)
+    return {"channel": channel,
+            "source_id": source_id(channel, body, repo=repo),
+            "entries": matches,
+            "title": heading}
+
+
 def forget_entry(path: Path | str, title: str, *,
                  repo: Path | None = None,
                  state: Path | str | None = None,
@@ -568,23 +651,25 @@ def forget_entry(path: Path | str, title: str, *,
 
     The heading is matched exactly first, then case-insensitively. The
     source text that is tombstoned is the entry body WITHOUT its marker
-    line — the same text the reader derives the id from."""
+    line — the same text the reader derives the id from, so the read paths
+    and the ledger can never disagree about which text an entry owns."""
     target = Path(path)
     try:
         text = target.read_text(encoding="utf-8", errors="replace")
     except OSError:
         raise MemforgetError("the memory slot could not be read")
     channel = channel_for_path(target)
-    min_level, max_level = _levels_for(channel)
+    min_level, max_level = levels_for(channel)
     _, chunks = split_sections(text, min_level, max_level)
     wanted = str(title or "").strip()
-    found = [c for c in chunks if c["heading"] == wanted]
-    if not found:
-        low = wanted.casefold()
-        found = [c for c in chunks if c["heading"].casefold() == low]
-    if not found:
+    if not chunks:
+        # A file with no heading at all is ONE entry: the whole file.
+        if wanted:
+            raise MemforgetError("no entry with that heading")
+        return forget(channel, text, repo=repo, state=state, now=now)
+    chunk = _find_chunk(chunks, wanted)
+    if chunk is None:
         raise MemforgetError("no entry with that heading")
-    chunk = found[0]
     body = strip_markers(chunk["body"])
     return forget(channel, body, repo=repo, state=state, now=now)
 

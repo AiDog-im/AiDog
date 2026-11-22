@@ -22548,6 +22548,239 @@ except mf.MemforgetError as exc:
                 os.environ[k] = saved[k]
 
 
+def test_memory_forget_api() -> None:
+    """The owner-facing forget control — the API half (stage 2).
+
+    Design authority: docs/design/memory_suppression_design.md — D1 (a
+    tombstone, never a deletion), D2 (opaque deterministic ids), D5 (the
+    read paths filter the set), D10 (honest limits), D11 (a suppression
+    never crosses stores), D12 (a restore writes the ACTIVE profile's body
+    root — so every leg here runs under a TEMPORARY profile).
+
+    Covered: the memory view carries the provenance of every entry (the
+    admission channel and the opaque source id); the preview is READ-ONLY,
+    counts what a forget would filter and carries no excerpt, no path and
+    no credential; an unknown slot or an unknown title answers an honest
+    error; the forget records a TOMBSTONE only (the file is unchanged); the
+    read paths drop the entry immediately (the view, the prompt injection,
+    the owner profile); a second source keeps working; a repeat is
+    idempotent; the PROFILE's own slots are used — the repository's overlay
+    files are never addressed; the ledger row and the answer carry no
+    excerpt, no path and no credential."""
+    from mycore import memforget as mf
+    from mycore import memoryview as mv
+    from mycore import profiling as pf
+    from mycore.assembly import build_system_stack
+    from web import server as ws
+
+    keys = ("AIDOG_PROFILE", "AIDOG_PROFILES_DIR", "AIDOG_MC_STATE")
+    saved = {k: os.environ.get(k) for k in keys}
+    repo_overlay = REPO / "overlay" / "memory" / "MEMORY_curated.md"
+    overlay_before = repo_overlay.read_bytes()
+
+    def _env(state=None, profile=None, profiles=None) -> None:
+        for k in keys:
+            os.environ.pop(k, None)
+        if state is not None:
+            os.environ["AIDOG_MC_STATE"] = str(state)
+        if profiles is not None:
+            os.environ["AIDOG_PROFILES_DIR"] = str(profiles)
+        if profile is not None:
+            os.environ["AIDOG_PROFILE"] = profile
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            profiles = Path(td) / "profiles"
+            mem_dir = profiles / "alpha" / "body" / "memory"
+            mem_dir.mkdir(parents=True)
+            state = Path(td) / "state"
+            state.mkdir()
+            memory_text = ("# Facts\n\nthe owner prefers local tools\n\n"
+                           "# Notes\n\nsecond entry about the console\n")
+            user_text = "# Profile\n\nwrites in Chinese\n"
+            learned_text = ("# LEARNED MEMORY\n\n## 2026-01-02 (learn)\n\n"
+                            "- the deploy pipeline runs on fridays\n\n")
+            (mem_dir / "MEMORY_curated.md").write_text(memory_text,
+                                                       encoding="utf-8")
+            (mem_dir / "USER_curated.md").write_text(user_text, encoding="utf-8")
+            (mem_dir / "EVOLUTION_learned.md").write_text(learned_text,
+                                                          encoding="utf-8")
+            _env(state=state, profiles=profiles, profile="alpha")
+
+            # --------------------------------------- 1. the view's provenance --
+            view = mv.collect(REPO)
+            entries = [e for s in view["slots"] for e in s["entries"]]
+            check("forget-api: the memory view carries the admission channel "
+                  "of every entry",
+                  entries and all(e.get("channel") in
+                                  (mf.CHANNEL_CURATED_MEMORY,
+                                   mf.CHANNEL_CURATED_USER) for e in entries),
+                  str(entries)[:160])
+            check("forget-api: the memory view carries the opaque source id "
+                  "of every entry",
+                  entries and all(str(e.get("source_id") or "").startswith("src_")
+                                  for e in entries), str(entries)[:160])
+            facts = [e for e in entries if e["title"] == "Facts"]
+            check("forget-api: the source id is the deterministic id of the "
+                  "text the entry owns",
+                  len(facts) == 1
+                  and facts[0]["source_id"] == mf.source_id(
+                      mf.CHANNEL_CURATED_MEMORY, "the owner prefers local tools"),
+                  str(facts)[:160])
+
+            # -------------------------------------------- 2. the read-only preview --
+            payload, code = ws.collect_memory_forget_preview("memory", "Facts")
+            check("forget-api: the preview answers 200 with the provenance "
+                  "of the entry",
+                  code == 200 and payload.get("slot") == "memory"
+                  and payload.get("channel") == mf.CHANNEL_CURATED_MEMORY
+                  and payload.get("source_id") == facts[0]["source_id"],
+                  str(payload)[:160])
+            check("forget-api: the preview counts the sections a forget would "
+                  "filter",
+                  payload.get("entries") == 1, str(payload)[:160])
+            check("forget-api: the preview names the surfaces the forget "
+                  "silences",
+                  payload.get("affects") == {"injection": True,
+                                             "memory_view": True,
+                                             "profile_coverage": True},
+                  str(payload.get("affects"))[:160])
+            check("forget-api: the preview carries the honest D10 limits",
+                  "NOT deleted" in str(payload.get("limits"))
+                  and "transcript" in str(payload.get("limits")),
+                  str(payload.get("limits"))[:120])
+            check("forget-api: the preview carries exactly the contracted "
+                  "keys",
+                  set(payload) == {"slot", "title", "channel", "source_id",
+                                   "entries", "affects", "limits"},
+                  str(sorted(payload)))
+            blob = json.dumps(payload, ensure_ascii=False)
+            check("forget-api: the preview carries no excerpt, no path and no "
+                  "credential",
+                  "the owner prefers local tools" not in blob
+                  and str(mem_dir) not in blob and "MEMORY_curated.md" not in blob
+                  and "WEB_TOKEN" not in blob, blob[:160])
+            check("forget-api: the preview wrote nothing",
+                  not (state / "memforget").exists(),
+                  str(sorted(p.name for p in state.iterdir())))
+
+            # -------------------------------------------- 3. the honest errors --
+            payload, code = ws.collect_memory_forget_preview("nope", "Facts")
+            check("forget-api: an unknown slot answers an honest error",
+                  code == 400 and "unknown memory slot" in str(payload.get("error")),
+                  f"code={code} payload={payload}")
+            payload, code = ws.collect_memory_forget_preview("memory",
+                                                             "No Such Heading")
+            check("forget-api: an unknown title answers an honest error, "
+                  "never a silent empty",
+                  code == 404 and payload.get("error"),
+                  f"code={code} payload={payload}")
+
+            # -------------------------------------------- 4. the forget itself --
+            payload, code = ws.apply_memory_forget("memory", "Facts")
+            check("forget-api: the forget answers ok with the id, the channel "
+                  "and the already flag",
+                  code == 200 and payload.get("ok") is True
+                  and payload.get("id") == facts[0]["source_id"]
+                  and payload.get("channel") == mf.CHANNEL_CURATED_MEMORY
+                  and payload.get("already") is False,
+                  str(payload)[:160])
+            check("forget-api: the answer carries the honest D10 limits",
+                  "NOT deleted" in str(payload.get("limits")),
+                  str(payload.get("limits"))[:120])
+            check("forget-api: the answer carries exactly the contracted keys",
+                  set(payload) == {"ok", "id", "channel", "already", "limits"},
+                  str(sorted(payload)))
+            answer = json.dumps(payload, ensure_ascii=False)
+            check("forget-api: the answer holds no excerpt, no path and no "
+                  "credential",
+                  "the owner prefers local tools" not in answer
+                  and str(mem_dir) not in answer
+                  and "MEMORY_curated.md" not in answer, answer[:160])
+            check("forget-api: NOTHING was deleted — the entry is still in "
+                  "its file",
+                  (mem_dir / "MEMORY_curated.md").read_text() == memory_text,
+                  (mem_dir / "MEMORY_curated.md").read_text()[:120])
+
+            # ------------------------------------------------- 5. the ledger --
+            rows = mf.load_rows()
+            raw = mf.ledger_path().read_text(encoding="utf-8")
+            check("forget-api: the ledger holds exactly one row",
+                  len(rows) == 1, str(rows)[:160])
+            check("forget-api: the ledger row holds no excerpt, no path and "
+                  "no credential",
+                  "the owner prefers local tools" not in raw
+                  and str(mem_dir) not in raw
+                  and "MEMORY_curated.md" not in raw, raw[:160])
+            check("forget-api: the ledger lives in the PROFILE's own state",
+                  (state / "memforget" / "tombstones.jsonl").is_file(),
+                  str(sorted(p.name for p in state.iterdir())))
+
+            # ------------------------------- 6. the read paths react at once --
+            view2 = mv.collect(REPO)
+            titles = [e["title"] for s in view2["slots"] for e in s["entries"]]
+            check("forget-api: the forgotten entry left the memory view at "
+                  "once",
+                  "Facts" not in titles and "Notes" in titles
+                  and "Profile" in titles, str(titles))
+            joined = "\n".join(m["content"] for m in build_system_stack())
+            check("forget-api: the forgotten entry left the prompt injection "
+                  "at once",
+                  "local tools" not in joined and "second entry" in joined,
+                  joined[:160])
+            coverage = pf.curated_memory_text(REPO)
+            check("forget-api: the forgotten entry left the owner profile at "
+                  "once",
+                  "local tools" not in coverage and "second entry" in coverage,
+                  coverage[:120])
+
+            # --------------------------------- 7. idempotence + a second source --
+            payload, code = ws.apply_memory_forget("memory", "Facts")
+            check("forget-api: repeating the forget is a no-op that reports "
+                  "already",
+                  code == 200 and payload.get("already") is True
+                  and len(mf.load_rows()) == 1, str(payload)[:160])
+            payload, code = ws.apply_memory_forget("memory", "Notes")
+            titles = [e["title"] for s in mv.collect(REPO)["slots"]
+                      for e in s["entries"]]
+            check("forget-api: a second source keeps working",
+                  code == 200 and payload.get("already") is False
+                  and "Notes" not in titles and "Profile" in titles
+                  and len(mf.load_rows()) == 2, str(titles))
+
+            # --------------------------------------------- 8. the learned slot --
+            payload, code = ws.collect_memory_forget_preview(
+                "learned", "2026-01-02 (learn)")
+            check("forget-api: the learned slot is addressable and reports "
+                  "the surfaces it touches",
+                  code == 200 and payload.get("channel") == mf.CHANNEL_LEARNED
+                  and payload.get("affects") == {"injection": True,
+                                                 "memory_view": False,
+                                                 "profile_coverage": False},
+                  str(payload)[:200])
+            payload, code = ws.apply_memory_forget("learned", "2026-01-02 (learn)")
+            joined = "\n".join(m["content"] for m in build_system_stack())
+            check("forget-api: the forgotten learned entry left the prompt "
+                  "injection",
+                  code == 200 and "fridays" not in joined, joined[:160])
+
+            # ------------------------ 9. the profile's slots, never the repo's --
+            check("forget-api: the repository's own curated memory was never "
+                  "addressed",
+                  repo_overlay.read_bytes() == overlay_before
+                  and "Facts" not in repo_overlay.read_text(),
+                  repo_overlay.read_text()[:120])
+            check("forget-api: the default profile's state root was never "
+                  "written",
+                  not (REPO / "data" / "mycore_service" / "memforget").exists(),
+                  str(sorted(p.name for p in
+                             (REPO / "data" / "mycore_service").iterdir()))[:200])
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
 
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
@@ -22648,6 +22881,7 @@ def main() -> int:
         test_exchange_scope,
         test_pipeline_brain,
         test_memforget,
+        test_memory_forget_api,
     ]
     rows = []
     for fn in suites:

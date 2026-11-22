@@ -159,15 +159,28 @@ the rule, never the content.
   the memory view, restore filtering with a traveling set, and idempotent
   repeats.
 - **Standing gates**: `python3 -m mycore.tests.run` → **2859/2859** ·
-  `python3 tests/web_console_p3.py` → **610/610** · locale packs **1827** keys
+  `python3 tests/web_console_p3.py` → **610/610** · locale packs **1861** keys
   per pack.
+
+## Stage 3 — the owner-facing control
+
+- `GET /api/memory/forget/preview?slot=&title=` — read-only; reports the
+  slot, the heading, the channel, the opaque source id, the number of
+  sections that would be filtered, which surfaces are affected and the
+  honest limits sentence. No entry body, no path, no credential.
+- `POST /api/memory/forget` — Bearer `WEB_TOKEN`; `{slot, title}`; records
+  a tombstone for that entry. Repeating it is a no-op that reports
+  `already`. The slot is resolved through the ACTIVE PROFILE's seams, so a
+  named profile never addresses the repository's overlay files.
+- The console's memory view shows the channel and the short source id per
+  entry and opens a confirmation that shows the preview before the write.
 
 ## Honest limits of the evidence
 
-- The acceptance list of the design (a shared synthetic source across memory,
-  recall and profiling; overlapping attribution; an interrupted rebuild;
-  profile isolation) is exercised by the core leg and the independent
-  cross-process check — but the **console has no user-facing control**, so no
-  end-to-end operator flow is claimed yet.
+- The console **does** have a user-facing control since stage 3: the memory
+  view lists each entry with its channel and opaque source id, and a
+  confirmed FORGET records a tombstone (nothing is deleted). Covered by
+  `tests/memory_forget_api.py` (39/39) and `tests/memory_forget_ui.py`
+  (48/48, offline browser).
 - Stage 1 is deliberately incomplete on the transcript store; a source that
   exists **only** in a session transcript is not suppressed by this slice.

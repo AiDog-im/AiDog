@@ -373,6 +373,32 @@ Routes:
                                    state-file guard — NO --force on this
                                    route, the default profile is refused
                                    before any subprocess runs)
+  GET  /api/memory             -> the read-only browsable view of the curated
+                                   memory slots (local-only, no auth): every
+                                   entry carries its provenance — the
+                                   admission channel (curated:memory |
+                                   curated:user) and the opaque source id
+                                   (mycore.memforget.source_id) of the text
+                                   it owns
+  GET  /api/memory/forget/preview
+                               -> READ-ONLY (no auth, like the other read
+                                   faces): ?slot=memory|user|learned &title=
+                                   -> {slot, title, channel, source_id,
+                                   entries, affects{injection, memory_view,
+                                   profile_coverage}, limits} — what a forget
+                                   WOULD do and nothing more: counts, the
+                                   opaque id, the channel, the honest D10
+                                   limits. Never the entry text, never a file
+                                   path, never a credential. 400 unknown slot
+                                   | 404 unknown title (never a silent empty)
+  POST /api/memory/forget     -> Bearer WEB_TOKEN; {slot, title} -> {ok, id,
+                                   channel, already, limits}. Records a
+                                   TOMBSTONE (D1): NOTHING is deleted, the
+                                   source stays in its file and the read
+                                   paths drop it from the next request on (no
+                                   restart). A repeat is a no-op that reports
+                                   already=true. 400 bad shape | 404 unknown
+                                   slot or title
   GET  /static/i18n/<lang>.json -> locale packs served from the SSOT
                                    overlay/locales/ (en default, zh switchable)
 """
@@ -6511,6 +6537,114 @@ def collect_memory(query: str = "") -> dict:
                 "note": f"memory view unavailable ({type(e).__name__})"}
 
 
+# ------------------------------------- the owner-facing forget control -----
+# The API half of "forget this source" (stage 2 of the memory-suppression
+# design). The ledger and the read filters already ship (mycore.memforget,
+# stage 1); this is the surface the console calls.
+#
+# A forget records a TOMBSTONE — NOTHING is deleted (D1): the source stays
+# in its file, and the read paths (the prompt injection, the memory view,
+# the owner profile, recall, restores) drop it from the next request on, with
+# no restart. Every answer carries the honest D10 limits.
+#
+# The slots are the ACTIVE PROFILE's own slots (car F): a named profile's
+# memory lives in that profile's body root, never in the repository's
+# overlay files.
+FORGET_SLOTS = {
+    "memory": memforget.CHANNEL_CURATED_MEMORY,   # MEMORY_curated.md
+    "user": memforget.CHANNEL_CURATED_USER,       # USER_curated.md
+    "learned": memforget.CHANNEL_LEARNED,         # EVOLUTION_learned.md
+}
+
+
+def _forget_slot_path(slot: str) -> Path:
+    """The ACTIVE PROFILE's own file for one memory slot.
+
+    Resolved at CALL time through the profile seams, so a named profile
+    forgets its OWN memory and the repository's overlay files are never
+    addressed by a named profile."""
+    mem, usr = profile_paths.memory_slots(REPO)
+    if slot == "memory":
+        return mem
+    if slot == "user":
+        return usr
+    return profile_paths.learned_path(REPO)
+
+
+def _forget_affects(slot: str) -> dict:
+    """Which surfaces a forget of this slot silences.
+
+    injection: the system stack injects all three memory slots (assembly).
+    memory_view: the console memory view lists the two CURATED slots — the
+    learned slot is not part of that view.
+    profile_coverage: the owner profile is built from the curated slots
+    (profiling.curated_memory_text) — the learned slot is not part of it."""
+    return {"injection": True,
+            "memory_view": slot in ("memory", "user"),
+            "profile_coverage": slot in ("memory", "user")}
+
+
+def _forget_slot_error() -> dict:
+    """The honest answer for an unknown slot: what the slot may be, and
+    nothing else."""
+    return {"error": "unknown memory slot",
+            "details": ["slot must be one of: "
+                        + ", ".join(sorted(FORGET_SLOTS))]}
+
+
+def collect_memory_forget_preview(slot: str, title: str) -> tuple[dict, int]:
+    """GET /api/memory/forget/preview — READ-ONLY, no auth (like the other
+    read faces).
+
+    What a forget of this entry WOULD do, and nothing more: the slot, the
+    heading (already visible in the memory view), the admission channel, the
+    opaque source id, the number of sections the forget would filter, the
+    surfaces it silences and the honest D10 limits.
+
+    It carries NO entry text, NO file path and NO credential — the source id
+    is opaque by construction (D2) and the count is a number."""
+    key = str(slot or "").strip().lower()
+    if key not in FORGET_SLOTS:
+        return _forget_slot_error(), 400
+    try:
+        described = memforget.describe_entry(_forget_slot_path(key), title)
+    except memforget.MemforgetError as exc:
+        return {"error": str(exc)}, 404
+    return {
+        "slot": key,
+        "title": described.get("title") or str(title or "").strip(),
+        "channel": described["channel"],
+        "source_id": described["source_id"],
+        "entries": described["entries"],
+        "affects": _forget_affects(key),
+        "limits": memforget.LIMITS_NOTE,
+    }, 200
+
+
+def apply_memory_forget(slot: str, title: str) -> tuple[dict, int]:
+    """POST /api/memory/forget — record the tombstone for one entry.
+
+    Nothing is deleted: the source stays in its file and the ledger records
+    that it must not be shown, injected, profiled or restored again (D1).
+    Repeating the same forget is a NO-OP that reports already=True, so the
+    control is idempotent."""
+    key = str(slot or "").strip().lower()
+    if key not in FORGET_SLOTS:
+        return _forget_slot_error(), 400
+    wanted = str(title or "").strip()
+    try:
+        result = memforget.forget_entry(_forget_slot_path(key), wanted)
+    except memforget.MemforgetError as exc:
+        return {"error": str(exc)}, 404
+    return {
+        "ok": True,
+        "id": result["id"],
+        "channel": result["channel"],
+        "already": bool(result["already"]),
+        "limits": result["limits"],
+    }, 200
+
+
 def collect_fleet() -> dict:
     """GET /api/fleet — local-only, read-only fleet board. Fail-soft to an
     honest empty structure when the ledger is inactive or unavailable."""
@@ -7905,6 +8039,14 @@ class Handler(BaseHTTPRequestHandler):
                 q = (urllib.parse.parse_qs(
                     self.path.split("?", 1)[1]).get("q") or [""])[0]
             return self._json(collect_memory(q))
+        if path == "/api/memory/forget/preview":
+            params = {}
+            if "?" in self.path:
+                params = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+            payload, code = collect_memory_forget_preview(
+                (params.get("slot") or [""])[0],
+                (params.get("title") or [""])[0])
+            return self._json(payload, code)
         if path == "/api/sniff":
             return self._json(collect_sniff())
         if path == "/api/profiling":
@@ -7946,6 +8088,8 @@ class Handler(BaseHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/settings":
             return self._handle_settings_write()
+        if path == "/api/memory/forget":
+            return self._handle_memory_forget()
         if path == "/api/console/port":
             return self._handle_console_port_write()
         if path == "/api/control":
@@ -9697,6 +9841,41 @@ class Handler(BaseHTTPRequestHandler):
             return p.resolve().relative_to(REPO.resolve()).as_posix()
         except (OSError, ValueError):
             return p.name
+
+    def _handle_memory_forget(self) -> None:
+        """POST /api/memory/forget — Bearer WEB_TOKEN; {slot, title}.
+
+        The owner-facing forget control. It records a TOMBSTONE (D1):
+        NOTHING is deleted — the source stays in its file and the read paths
+        (the prompt injection, the memory view, the owner profile, recall,
+        restores) drop it from the next request on, with no restart.
+
+        The write is gated like every other write route, and the answer
+        carries the opaque id, the channel, the already flag and the honest
+        D10 limits — never the entry text, never a path, never a credential."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        if "slot" not in doc:
+            return self._json({"error": "validation failed",
+                               "details": ["slot is required"]}, 400)
+        if "title" not in doc:
+            return self._json({"error": "validation failed",
+                               "details": ["title is required"]}, 400)
+        slot = doc.get("slot")
+        title = doc.get("title")
+        if not isinstance(slot, str) or not isinstance(title, str):
+            return self._json({"error": "validation failed",
+                               "details": ["slot and title must be strings"]},
+                              400)
+        payload, code = apply_memory_forget(slot, title)
+        if code == 200:
+            sys.stderr.write("memory forget slot=%s already=%s\n"
+                             % (str(slot).strip().lower(),
+                                payload.get("already")))
+        return self._json(payload, code)
 
     def _handle_learn(self) -> None:
         """Console leg of /learn: same gate (lint + skill_route pre-screen),

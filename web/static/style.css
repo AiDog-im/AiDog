@@ -2539,3 +2539,86 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 }
 .fleet-facts dt { color: var(--muted); }
 .fleet-facts dd { margin: 0; }
+
+/* ------------------------------------------------ memory + forget ------- *
+   The browsable memory entries and the owner-facing FORGET confirmation.
+   Same paper/ink language as the rest of the console: hairline rules,
+   square corners, serif headings, mono stamps, tech blue for the action. */
+.mem-entry {
+  border: 1px solid var(--line-solid); border-left: 2px solid var(--rule);
+  background: #fff; padding: 9px 11px; margin-top: 8px; min-width: 0;
+}
+.mem-entry > summary { cursor: pointer; list-style: none; }
+.mem-entry > summary::-webkit-details-marker { display: none; }
+.mem-entry-title {
+  display: block; font-family: var(--serif); font-size: 15px;
+  color: var(--ink); overflow-wrap: anywhere;
+}
+.mem-entry-prov {
+  display: block; margin-top: 3px; font-family: var(--mono); font-size: 11px;
+  letter-spacing: .05em; color: var(--muted); overflow-wrap: anywhere;
+}
+.mem-src-id {
+  font-family: var(--mono); color: var(--blue-ink);
+  background: var(--blue-wash); padding: 0 4px;
+}
+.mem-entry-body { margin-top: 9px; }
+.mem-entry-text { margin-top: 0; font-size: 13px; overflow-wrap: anywhere; }
+.mem-entry-actions {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+  margin-top: 11px;
+}
+.mem-forget-hint { margin-top: 0; font-size: 12px; }
+.mem-status { margin-top: 10px; font-size: 13px; color: var(--blue-ink);
+  overflow-wrap: anywhere; }
+.mem-status.is-err { color: var(--red); }
+
+.mem-dialog {
+  position: fixed; inset: 0; margin: auto; border: 1px solid var(--ink);
+  background: var(--paper); color: var(--text); padding: 20px 22px 18px;
+  width: min(560px, 92vw); max-width: 92vw; max-height: 88vh; overflow-y: auto;
+  box-shadow: 0 18px 50px rgba(0, 22, 51, .22);
+}
+.mem-dialog:not([open]) { display: none; }
+.mem-dialog::backdrop { background: rgba(0, 22, 51, .42); }
+.mem-dialog h2 {
+  font-family: var(--serif); font-weight: 400; font-size: 19px;
+  color: var(--ink); margin-bottom: 6px;
+}
+.mem-dialog-sub { margin-top: 0; font-size: 12.5px; }
+.mem-preview {
+  margin-top: 12px; border-top: 1px solid var(--line-solid); padding-top: 10px;
+}
+.mem-pv-title {
+  font-family: var(--serif); font-size: 15px; color: var(--ink);
+  overflow-wrap: anywhere;
+}
+.mem-pv-line { margin-top: 6px; font-size: 13px; overflow-wrap: anywhere; }
+.mem-pv-head {
+  margin-top: 12px; font-family: var(--mono); font-size: 11px;
+  letter-spacing: .12em; text-transform: uppercase; color: var(--muted);
+}
+.mem-pv-list { list-style: none; margin-top: 6px; }
+.mem-pv-item {
+  display: flex; gap: 10px; align-items: baseline; padding: 3px 0;
+  font-size: 13px;
+}
+.mem-pv-flag {
+  flex: none; font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em;
+  text-transform: uppercase; padding: 1px 7px; border: 1px solid var(--rule);
+  color: var(--muted); white-space: nowrap;
+}
+.mem-pv-flag.is-on {
+  border-color: var(--blue); color: var(--blue-ink); background: var(--blue-wash);
+}
+.mem-pv-what { overflow-wrap: anywhere; }
+.mem-pv-limits { margin-top: 6px; font-size: 13px; color: var(--text); }
+.mem-pv-limits-detail {
+  margin-top: 5px; font-size: 12px; color: var(--muted); overflow-wrap: anywhere;
+}
+.mem-dialog-err { margin-top: 10px; color: var(--red); font-size: 12.5px; }
+.mem-dialog-err[hidden] { display: none; }
+.mem-dialog-actions {
+  display: flex; flex-wrap: wrap; gap: 10px; margin-top: 16px;
+}
+.mem-dialog-actions .btn:disabled { opacity: .45; cursor: not-allowed; }

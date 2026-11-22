@@ -93,6 +93,8 @@ async function loadLang(lang) {
   renderCommunity();           // delta4: reason note / filter / rows re-translate
   renderHall();                // car F: task-hall card text follows the language too
   renderFleet(); renderFleetApprovals();
+  if (memBrowseData) renderMemoryBrowse();   // the memory entries + provenance
+  if (memForgetState) memForgetRender();     // the open confirmation follows
   renderHelpCmds();            // discoverability: the TG command table repaints too
   chatBadge(chatBusy);            // badge label follows the active language
   renderCtx(lastCtx);             // X14: context line label follows too
@@ -10409,15 +10411,43 @@ function renderMemoryBrowse() {
     parts.push(`<div class="stat-note" style="margin-top:6px;">${escapeHtml(
       t("memory.browseSlot", "slot") + " " + s.slot)}</div>`);
     for (const e of entries) {
-      parts.push(`<details class="fleet-row"><summary>${escapeHtml(
-        e.title || t("memory.browseUntitled", "(untitled)"))}</summary>` +
-        `<div class="stat-note" style="margin-top:0;">${escapeHtml(
-          e.excerpt || "")}</div></details>`);
+      parts.push(memBrowseEntryHtml(e, s.slot));
     }
   }
   if (badge) badge.textContent = String(memBrowseData.entries_total ?? total);
   box.innerHTML = parts.join("") || `<div class="stat-note">${escapeHtml(
     t("memory.browseEmpty", "nothing recorded yet"))}</div>`;
+}
+
+/* One browsable entry: the heading, its PROVENANCE (the admission channel
+   in plain words + the opaque source id) and the per-entry FORGET action.
+   The action is rendered only for a slot the forget API can address — the
+   UI never invents an endpoint and never guesses a slot. */
+function memBrowseEntryHtml(entry, groupSlot) {
+  const rawTitle = String((entry && entry.title) || "");
+  const title = rawTitle || t("memory.browseUntitled", "(untitled)");
+  const slot = memForgetSlotFor(entry, groupSlot);
+  const body = `<div class="stat-note mem-entry-text">${escapeHtml(
+    entry.excerpt || "")}</div>`;
+  // The action needs a REAL heading: the forget API addresses an entry by
+  // its heading, so an entry without one (a whole file with no heading)
+  // is shown honestly but cannot be addressed from here.
+  const action = (slot && rawTitle)
+    ? `<div class="ctl-actions mem-entry-actions">` +
+      `<button class="btn mem-forget-btn" type="button" ` +
+      `title="${escapeHtml(t("memory.forget.btnTitle",
+        "Forget this entry — it is silenced, never deleted"))}" ` +
+      `data-mem-slot="${escapeHtml(slot)}" ` +
+      `data-mem-title="${escapeHtml(rawTitle)}">${escapeHtml(
+        t("memory.forget.btn", "FORGET"))}</button>` +
+      `<span class="stat-note mem-forget-hint">${escapeHtml(
+        t("memory.forget.hint",
+          "silences this source — nothing is deleted"))}</span></div>`
+    : "";
+  return `<details class="mem-entry"><summary>` +
+    `<span class="mem-entry-title">${escapeHtml(title)}</span>` +
+    `<span class="mem-entry-prov">${memForgetProvHtml(entry)}</span>` +
+    `</summary><div class="mem-entry-body">${body}${action}</div></details>`;
 }
 
 const memBrowseBtnEl = document.getElementById("memBrowseBtn");
@@ -10430,6 +10460,317 @@ const memSearchEl = document.getElementById("memSearch");
 if (memSearchEl) memSearchEl.addEventListener("input", () => {
   refreshMemoryBrowse(memSearchEl.value.trim());
 });
+
+/* ----------------------------------- owner-facing forget control (UI) ---- *
+   The console half of the tombstone ledger (mycore.memforget): a forget
+   SILENCES one source, it never deletes text. The contract is the
+   server's, not ours — this UI invents no endpoint and guesses no slot:
+     GET  /api/memory                    the read face; every entry carries
+                                         its admission channel + opaque id
+     GET  /api/memory/forget/preview     READ-ONLY: what a forget WOULD do
+     POST /api/memory/forget             Bearer-gated: records the tombstone
+   The preview is fetched and shown BEFORE any write, and the write only
+   happens on an explicit confirm. Cancelling writes nothing. No credential
+   is ever rendered: the token is read from localStorage at call time and
+   stays inside the request header. */
+const MEM_FORGET_SLOTS = ["memory", "user", "learned"];
+const MEM_FORGET_SLOT_BY_CHANNEL = {
+  "curated:memory": "memory",
+  "curated:user": "user",
+  "learned": "learned",
+};
+
+let memForgetState = null;    // the entry the confirmation is about
+let memForgetBusy = false;     // a write is in flight
+
+/* The slot the forget API addresses. The channel is the authority (it is
+   the store the entry lives in); the group slot is only the fallback. */
+function memForgetSlotFor(entry, groupSlot) {
+  const byChannel = MEM_FORGET_SLOT_BY_CHANNEL[
+    String((entry && entry.channel) || "")];
+  if (byChannel) return byChannel;
+  const slot = String(groupSlot || "").toLowerCase();
+  return MEM_FORGET_SLOTS.indexOf(slot) >= 0 ? slot : "";
+}
+
+/* The channel in plain words — never the raw id alone. */
+function memForgetChannelText(channel) {
+  const key = String(channel || "");
+  if (key === "curated:memory") {
+    return t("memory.forget.chanMemory", "Curated memory");
+  }
+  if (key === "curated:user") {
+    return t("memory.forget.chanUser", "User profile");
+  }
+  if (key === "learned") {
+    return t("memory.forget.chanLearned", "Learned memory");
+  }
+  return t("memory.forget.chanOther", "Curated file");
+}
+
+/* The opaque id, shortened for the eye. The full id stays in the title
+   attribute — it identifies a source, it does not reveal one. */
+function memForgetShortId(id) {
+  const raw = String(id || "");
+  if (!raw) return "";
+  return raw.length > 12 ? raw.slice(0, 12) + "…" : raw;
+}
+
+function memForgetProvHtml(entry) {
+  const chan = memForgetChannelText(entry && entry.channel);
+  const id = String((entry && entry.source_id) || "");
+  const short = memForgetShortId(id);
+  if (!short) return escapeHtml(chan);
+  return escapeHtml(chan) +
+    " · <code class=\"mem-src-id\" title=\"" + escapeHtml(id) + "\">" +
+    escapeHtml(short) + "</code>";
+}
+
+/* The status line under the memory list — honest in both directions. */
+function memForgetStatus(text, kind) {
+  const el = document.getElementById("memForgetStatus");
+  if (!el) return;
+  el.textContent = text || "";
+  el.className = "stat-note mem-status" + (kind === "err" ? " is-err" : "");
+}
+
+function memForgetAffectRow(key, fallback, value) {
+  return `<li class="mem-pv-item"><span class="mem-pv-flag ` +
+    (value ? "is-on" : "is-off") + `">${escapeHtml(value
+      ? t("memory.forget.yes", "affected")
+      : t("memory.forget.no", "not affected"))}</span>` +
+    `<span class="mem-pv-what">${escapeHtml(t(key, fallback))}</span></li>`;
+}
+
+/* Paint the confirmation from the server's preview. Until the preview has
+   arrived the confirm button stays disabled: the owner always sees WHAT
+   would change before anything is written. */
+function memForgetRender() {
+  const st = memForgetState;
+  const body = document.getElementById("memForgetPreview");
+  const err = document.getElementById("memForgetError");
+  const confirmBtn = document.getElementById("memForgetConfirm");
+  if (!body) return;
+  if (!st) {
+    body.innerHTML = "";
+    if (err) { err.textContent = ""; err.hidden = true; }
+    if (confirmBtn) confirmBtn.disabled = true;
+    return;
+  }
+  const rows = [];
+  rows.push(`<div class="mem-pv-title">${escapeHtml(st.title || "")}</div>`);
+  const p = st.preview;
+  if (p) {
+    const n = Number(p.entries);
+    const counted = Number.isFinite(n) ? n : 0;
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      counted === 1
+        ? t("memory.forget.entriesOne",
+          "1 entry would be filtered out of what it remembers.")
+        : t("memory.forget.entries",
+          "{n} entries would be filtered out of what it remembers.")
+          .replace("{n}", String(counted)))}</div>`);
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      t("memory.forget.source", "source"))}: ` +
+      `${escapeHtml(memForgetChannelText(p.channel))} · ` +
+      `<code class="mem-src-id">${escapeHtml(
+        memForgetShortId(p.source_id))}</code></div>`);
+    rows.push(`<div class="mem-pv-head">${escapeHtml(
+      t("memory.forget.affects", "Affected surfaces"))}</div>`);
+    const affects = p.affects || {};
+    rows.push(`<ul class="mem-pv-list">` +
+      memForgetAffectRow("memory.forget.affectInjection",
+        "prompt injection — what it reads before answering",
+        affects.injection) +
+      memForgetAffectRow("memory.forget.affectView",
+        "the memory view on this page", affects.memory_view) +
+      memForgetAffectRow("memory.forget.affectProfile",
+        "the owner profile coverage", affects.profile_coverage) +
+      `</ul>`);
+    rows.push(`<div class="mem-pv-head">${escapeHtml(
+      t("memory.forget.limitsLabel", "What this does not do"))}</div>`);
+    rows.push(`<div class="mem-pv-limits">${escapeHtml(
+      t("memory.forget.limitsSummary",
+        "Nothing is deleted — the original text stays in the file; the "
+        + "ledger only silences it."))}</div>`);
+    const limits = String(p.limits || "").trim();
+    rows.push(`<div class="mem-pv-limits-detail">${escapeHtml(limits
+      ? limits
+      : t("memory.forget.limitsFallback",
+        "The source is removed from active memory only; the original file "
+        + "keeps the text."))}</div>`);
+  } else if (!st.error) {
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      t("memory.forget.previewLoading",
+        "reading what this would change…"))}</div>`);
+  }
+  body.innerHTML = rows.join("");
+  if (err) {
+    err.textContent = st.error || "";
+    err.hidden = !st.error;
+  }
+  if (confirmBtn) {
+    confirmBtn.disabled = !p || memForgetBusy;
+    confirmBtn.textContent = memForgetBusy
+      ? t("memory.forget.working", "working…")
+      : t("memory.forget.confirm", "CONFIRM FORGET");
+  }
+}
+
+/* The READ-ONLY preview: what the forget WOULD do. It never writes. */
+async function memForgetLoadPreview() {
+  const st = memForgetState;
+  if (!st) return;
+  try {
+    const url = "/api/memory/forget/preview?slot=" +
+      encodeURIComponent(st.slot) + "&title=" + encodeURIComponent(st.title);
+    const res = await fetch(url);
+    const body = await res.json().catch(() => null);
+    if (memForgetState !== st) return;      // the owner moved on
+    if (!res.ok || !body || typeof body !== "object") {
+      st.preview = null;
+      st.error = res.status === 404
+        ? t("memory.forget.previewMissing",
+          "that entry is no longer there — nothing was written")
+        : res.status === 400
+          ? t("memory.forget.previewBadSlot",
+            "that memory slot cannot be forgotten from here")
+          : t("memory.forget.previewFailed",
+            "the preview could not be loaded — nothing was written");
+      memForgetRender();
+      return;
+    }
+    st.preview = body;
+    st.error = "";
+    memForgetRender();
+  } catch (e) {
+    if (memForgetState !== st) return;
+    st.preview = null;
+    st.error = t("memory.forget.network",
+      "the console could not be reached — nothing was written");
+    memForgetRender();
+  }
+}
+
+/* One Bearer-gated write, in the product's own shape (the Access card's
+   token + an Authorization header). The token is read at call time and
+   never rendered: it cannot reach the DOM. */
+async function memForgetPost(path, payload) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) return { ok: false, reason: "need_token", body: {} };
+  try {
+    const res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload),
+    });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) {
+      return { ok: false, reason: "unauthorized", body };
+    }
+    if (!res.ok) return { ok: false, reason: "refused", body };
+    if (!body || body.ok !== true) return { ok: false, reason: "refused", body };
+    return { ok: true, body };
+  } catch (e) {
+    return { ok: false, reason: "network", body: {} };
+  }
+}
+
+function memForgetOpen(slot, title) {
+  if (!slot || !title) return;
+  const dlg = document.getElementById("memForgetDialog");
+  if (!dlg) return;
+  memForgetState = { slot: slot, title: title, preview: null, error: "" };
+  memForgetStatus("", null);
+  memForgetRender();
+  if (typeof dlg.showModal === "function") {
+    if (!dlg.open) dlg.showModal();
+  } else {
+    dlg.setAttribute("open", "");
+  }
+  memForgetLoadPreview();
+}
+
+function memForgetClose() {
+  const dlg = document.getElementById("memForgetDialog");
+  if (!dlg) return;
+  if (typeof dlg.close === "function") {
+    if (dlg.open) dlg.close();
+  } else {
+    dlg.removeAttribute("open");
+  }
+}
+
+/* The write — only ever reached from an explicit CONFIRM, and only after
+   the preview has been shown. Nothing is deleted: the server records a
+   tombstone and the read paths drop the source from the next request on. */
+async function memForgetConfirm() {
+  const st = memForgetState;
+  if (!st || !st.preview || memForgetBusy) return;
+  memForgetBusy = true;
+  memForgetRender();
+  const res = await memForgetPost("/api/memory/forget",
+    { slot: st.slot, title: st.title });
+  memForgetBusy = false;
+  if (!res.ok) {
+    st.error = res.reason === "need_token"
+      ? t("memory.forget.needToken",
+        "sign in required — set the access token in Settings → Access")
+      : res.reason === "unauthorized"
+        ? t("memory.forget.unauthorized",
+          "sign in required (401) — the access token was rejected")
+        : res.reason === "network"
+          ? t("memory.forget.network",
+            "the console could not be reached — nothing was written")
+          : t("memory.forget.failed",
+            "the forget was refused — nothing was written");
+    memForgetRender();
+    return;                       // no fake success: the dialog stays open
+  }
+  const body = res.body || {};
+  const already = body.already === true;
+  memForgetClose();
+  memForgetState = null;
+  memForgetRender();
+  memForgetStatus(already
+    ? t("memory.forget.already",
+      "already forgotten — the ledger was already silencing it. "
+      + "Nothing was deleted.")
+    : t("memory.forget.done",
+      "Forgotten: {title}. Nothing was deleted — the original text stays "
+      + "in the file; the ledger only silences it.").replace("{title}", st.title),
+    null);
+  const search = document.getElementById("memSearch");
+  await refreshMemoryBrowse(search ? search.value.trim() : "");
+}
+
+const memBrowseListEl = document.getElementById("memBrowseList");
+if (memBrowseListEl) memBrowseListEl.addEventListener("click", (ev) => {
+  const btn = ev.target && ev.target.closest
+    ? ev.target.closest(".mem-forget-btn") : null;
+  if (!btn) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  memForgetOpen(btn.getAttribute("data-mem-slot") || "",
+                btn.getAttribute("data-mem-title") || "");
+});
+
+const memForgetDialogEl = document.getElementById("memForgetDialog");
+if (memForgetDialogEl) {
+  const confirmBtn = document.getElementById("memForgetConfirm");
+  const cancelBtn = document.getElementById("memForgetCancel");
+  if (confirmBtn) confirmBtn.addEventListener("click", memForgetConfirm);
+  if (cancelBtn) cancelBtn.addEventListener("click", () => {
+    memForgetClose();              // cancelling writes NOTHING
+    memForgetState = null;
+    memForgetRender();
+  });
+  memForgetDialogEl.addEventListener("cancel", () => {
+    memForgetState = null;
+    memForgetRender();
+  });
+}
 
 /* --------------------------------------------------- X13 sessions panel --- */
 async function refreshSessions(q) {

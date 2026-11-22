@@ -15,6 +15,10 @@ Design rules (the same ones the rest of the product follows):
     guess; a file that cannot be read is reported as unavailable.
   * BOUNDED. Entries, characters and the excerpt length are all capped, so
     one enormous memory file cannot become a giant response.
+  * PROVENANT. Every entry carries its admission channel and the opaque,
+    deterministic source id of the text it owns (mycore.memforget.source_id)
+    — the two facts the owner-facing forget control needs, and nothing
+    more: no path, no credential, no new body text.
 
 Stdlib only; English comments (repo i18n policy).
 """
@@ -42,26 +46,40 @@ def _read(path: Path) -> tuple[str, str]:
         return "", type(e).__name__
 
 
-def _entries(text: str) -> list[dict]:
-    """Split a Markdown memory file into browsable entries.
+def _norm(text: str) -> str:
+    """The reader's form of a body: no trailing spaces, no outer blank
+    lines. The same shape the view has always shown."""
+    return "\n".join(line.rstrip() for line in (text or "").splitlines()).strip()
+
+
+def _entries(text: str, channel: str) -> list[dict]:
+    """Split a memory file into browsable entries.
+
+    The split is the SAME one the suppression filter uses
+    (mycore.memforget.split_sections with the channel's heading levels), so
+    the source id computed here is the id a forget would record — the view
+    and the filter can never disagree about which text an entry owns.
 
     A heading starts a new entry; the lines under it are its body. A file
     with no heading is ONE entry (the whole file) — the shape stays honest
-    rather than inventing structure."""
+    rather than inventing structure. Text that precedes the first heading
+    stays with the first entry, so nothing the file holds is dropped from
+    the view."""
+    preamble, chunks = memforget.split_sections(
+        text, *memforget.levels_for(channel))
     out: list[dict] = []
-    title = ""
-    body: list[str] = []
-    for raw in (text or "").splitlines():
-        line = raw.rstrip()
-        if line.lstrip().startswith("#"):
-            if title or body:
-                out.append({"title": title.strip(), "body": "\n".join(body).strip()})
-            title = line.lstrip("#").strip()
-            body = []
-        else:
-            body.append(line)
-    if title or body:
-        out.append({"title": title.strip(), "body": "\n".join(body).strip()})
+    for index, chunk in enumerate(chunks):
+        # The marker line (D8) is never shown to the reader, and the id is
+        # derived from the body WITHOUT it — the text a forget tombstones.
+        body = memforget.strip_markers(chunk["body"])
+        out.append({"title": chunk["heading"],
+                    "display": _norm((preamble + body) if index == 0 else body),
+                    "body": body,
+                    "source_id": memforget.source_id(channel, body)})
+    if not chunks and (text or "").strip():
+        # a file with no heading at all is ONE entry: the whole file
+        out.append({"title": "", "display": _norm(text), "body": text,
+                    "source_id": memforget.source_id(channel, text)})
     return [e for e in out if e["title"] or e["body"]]
 
 
@@ -91,11 +109,12 @@ def collect(repo: Path | None = None, query: str = "",
         # Memory suppression (D5): a tombstoned entry is not shown here.
         # With nothing suppressed the text is unchanged, byte for byte.
         text = memforget.filter_slot(path, text)
-        entries = _entries(text)
+        channel = memforget.channel_for_path(path)
+        entries = _entries(text, channel)
         total += len(entries)
         if q:
             entries = [e for e in entries
-                       if q in e["title"].lower() or q in e["body"].lower()]
+                       if q in e["title"].lower() or q in e["display"].lower()]
         slots.append({
             "slot": label,
             "available": True,
@@ -103,9 +122,14 @@ def collect(repo: Path | None = None, query: str = "",
             "chars": len(text),
             "entries": [{
                 "title": e["title"][:120],
-                "excerpt": e["body"][:MAX_EXCERPT],
-                "truncated": len(e["body"]) > MAX_EXCERPT,
-                "chars": len(e["body"]),
+                "excerpt": e["display"][:MAX_EXCERPT],
+                "truncated": len(e["display"]) > MAX_EXCERPT,
+                "chars": len(e["display"]),
+                # The provenance of the entry: the admission channel (the
+                # store it lives in) and the opaque, deterministic id of the
+                # text it owns. No path, no credential, no new body text.
+                "channel": channel,
+                "source_id": e["source_id"],
             } for e in entries[:MAX_ENTRIES]],
             "entries_total": len(entries),
             "truncated": len(entries) > MAX_ENTRIES,

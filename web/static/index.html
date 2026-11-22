@@ -389,6 +389,10 @@
                  data-i18n-ph="memory.browseSearch"
                  placeholder="search the memory…">
           <div id="memBrowseList"></div>
+          <!-- The forget control's own honest status line: it says what
+               happened (and that nothing was deleted), never a fake
+               success. Empty until an action runs. -->
+          <div class="stat-note mem-status" id="memForgetStatus" role="status"></div>
         </div>
 
         <!-- UX round 2 (B2): the backup entry point Overview was missing — a
@@ -2729,6 +2733,26 @@
      carries the three honest check outcomes verbatim -->
 <div id="updToast" role="status" hidden
      style="position:fixed;top:calc(var(--topbar-h,56px) + 12px);left:50%;transform:translateX(-50%);z-index:70;max-width:min(560px,92vw);background:#fff;border:1px solid var(--line);border-left:3px solid var(--blue);border-radius:10px;box-shadow:0 8px 24px rgba(0,22,51,.18);padding:10px 14px;font-size:12.5px;color:var(--navy);overflow-wrap:anywhere;"></div>
+
+<!-- The owner-facing FORGET confirmation (the tombstone ledger, D1/D10).
+     The server's READ-ONLY preview arrives here BEFORE any write: it says
+     how many entries would be filtered, which surfaces are affected and
+     what is NOT deleted. Only an explicit CONFIRM writes; cancelling
+     writes nothing. No credential is rendered in this dialog — the access
+     token stays inside the request header. -->
+<dialog id="memForgetDialog" class="mem-dialog" aria-labelledby="memForgetTitle">
+  <h2 id="memForgetTitle" data-i18n="memory.forget.title">Forget this memory?</h2>
+  <div class="stat-note mem-dialog-sub"
+       data-i18n="memory.forget.subtitle">Nothing is written until you confirm.</div>
+  <div id="memForgetPreview" class="mem-preview"></div>
+  <div class="stat-note mem-dialog-err" id="memForgetError" role="alert" hidden></div>
+  <div class="ctl-actions mem-dialog-actions">
+    <button class="btn primary" id="memForgetConfirm" type="button" disabled
+            data-i18n="memory.forget.confirm">CONFIRM FORGET</button>
+    <button class="btn" id="memForgetCancel" type="button"
+            data-i18n="memory.forget.cancel">CANCEL</button>
+  </div>
+</dialog>
 
 <script src="/static/app.js"></script>
 </body>
