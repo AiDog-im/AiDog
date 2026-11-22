@@ -27,13 +27,22 @@ Stdlib only; English comments (repo i18n policy).
 """
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
+import os
 import re
+import stat
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
+
+try:
+    import fcntl
+except ImportError:  # Native Windows desktop attaches to the WSL core.
+    fcntl = None
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile seam)
@@ -41,6 +50,9 @@ from lib import profile_paths as pp  # noqa: E402  (car F: per-profile seam)
 RETENTION_DAYS = 30          # day files kept (pruned on activate)
 MAX_ROW_CHARS = 2048         # hard cap per JSONL row
 MAX_ROWS_PER_DAY = 2000      # hard cap on clone rows per day
+_LOCK_WAIT = 0.25            # seconds before dropping a contended write
+_LOCK_RETRY = 0.005
+_SCAN_CHUNK = 64 * 1024
 EXCERPT_CAP = 200            # hard cap on the stored task excerpt
 READ_MAX_BYTES = 256 * 1024  # per-file read cap (largest file -> truncated)
 READ_MAX_ROWS = 400          # hard cap on the rows one read may return
@@ -56,11 +68,40 @@ SECRET_LINTS = ("secret-assignment", "secret-shape", "private-key",
 
 _PATH_RE = re.compile(r"(?:/mnt/|/home/|/root/|/Users/)[^\s'\"`,;)]*")
 _WIN_PATH_RE = re.compile(r"[A-Za-z]:\\[^\s'\"`,;)]*")
+_DAY_RE = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
 
-_lock = threading.Lock()
+_lock = threading.Lock()    # protects activation state, not the ledger
 _dir: Path | None = None     # None = inactive (the default)
-_counts: dict[str, int] = {}  # day -> rows written (the per-day cap)
 _local = threading.local()  # the CURRENT turn's pending fleets
+
+
+def _open_nonblocking(path: str, flags: int) -> int:
+    # Opening a non-regular path must not bypass the bounded lock wait.
+    return os.open(path, flags | os.O_NONBLOCK | os.O_NOFOLLOW, 0o666)
+
+
+@contextmanager
+def _mutation_lock(directory: Path):
+    """Serialize writers and pruning on Linux/WSL and macOS. The lock file
+    must stay in place so all processes lock the same inode. Closing it
+    (including on process exit) releases the lock."""
+    if fcntl is None:
+        raise OSError(errno.ENOSYS, "fleet ledger requires POSIX flock")
+    with open(directory / ".lock", "a+b", opener=_open_nonblocking) as handle:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise OSError(errno.EINVAL, "fleet lock is not a regular file")
+        deadline = time.monotonic() + _LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                remaining = deadline - time.monotonic()
+                if (remaining <= 0 or exc.errno not in
+                        (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)):
+                    raise
+                time.sleep(min(_LOCK_RETRY, remaining))
+        yield
 
 
 # --------------------------------------------------------------- activation --
@@ -73,38 +114,34 @@ def activate(directory: Path | str | None = None) -> Path:
         pp.state_dir(REPO) / "fleet")
     try:
         d.mkdir(parents=True, exist_ok=True)
-        cutoff = time.time() - RETENTION_DAYS * 86400
-        for old in d.glob("*.jsonl"):
-            try:
-                if old.stat().st_mtime < cutoff:
-                    old.unlink()
-            except OSError:
-                pass
     except OSError:
         return d
+    try:
+        with _mutation_lock(d):
+            cutoff = time.time() - RETENTION_DAYS * 86400
+            today = f"{_today()}.jsonl"
+            for old in d.glob("*.jsonl"):
+                try:
+                    if old.name != today and old.stat().st_mtime < cutoff:
+                        old.unlink()
+                except OSError:
+                    pass
+    except OSError:
+        pass  # skip pruning if the lock is unavailable
     with _lock:
         _dir = d
-        _counts.clear()
-        today = _today()
-        current = d / f"{today}.jsonl"
-        try:
-            with current.open("rb") as fh:
-                _counts[today] = sum(1 for _ in fh)
-        except OSError:
-            _counts[today] = 0
     return d
 
 
 def deactivate() -> None:
-    """Stop writing (the receipt keeps working — it is in-memory)."""
+    """Stop new writes (the receipt keeps working — it is in-memory)."""
     global _dir
     with _lock:
         _dir = None
-        _counts.clear()
 
 
 def active() -> bool:
-    """True when the ledger is writing (the receipt does not need this)."""
+    """True when the ledger is enabled (the receipt does not need this)."""
     with _lock:
         return _dir is not None
 
@@ -120,32 +157,59 @@ def _today() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
+def _append_if_room(path: Path, line: bytes) -> bool:
+    """Count physical rows, including damaged rows, under the mutation lock."""
+    # UTF-8 uses at most four bytes per character. Allow for legacy CRLF.
+    max_bytes = MAX_ROWS_PER_DAY * (4 * MAX_ROW_CHARS + 2)
+    with open(path, "a+b", buffering=0, opener=_open_nonblocking) as fh:
+        info = os.fstat(fh.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
+            return False
+        count = 0
+        last = b"\n"
+        fh.seek(0)
+        remaining = info.st_size
+        while remaining:
+            chunk = fh.read(min(remaining, _SCAN_CHUNK))
+            if not chunk:
+                return False  # unexpected EOF: cannot verify room
+            remaining -= len(chunk)
+            count += chunk.count(b"\n")
+            if count >= MAX_ROWS_PER_DAY:
+                return False
+            last = chunk[-1:]
+        if last != b"\n":
+            # A crash or short write may leave a final unterminated row.
+            # Count its slot and separate it from the next complete row.
+            count += 1
+            line = b"\n" + line
+        if count >= MAX_ROWS_PER_DAY or info.st_size + len(line) > max_bytes:
+            return False
+        return fh.write(line) == len(line)
+
+
 def record_clone(row: dict) -> bool:
-    """Append ONE clone row. Never raises; an inactive ledger, a full day
-    or an unwritable file drops the row (honest absence, never a failure).
-    Returns True when the row was written."""
-    with _lock:
-        d = _dir
-        if d is None:
-            return False
+    """Append ONE clone row. A disabled, full, contended or unverifiable
+    ledger drops the row without failing the turn."""
+    d = active_dir()
+    if d is None:
+        return False
+    try:
         day = str(row.get("day") or _today())
-        n = _counts.get(day, 0)
-        if n >= MAX_ROWS_PER_DAY:
+        if not _DAY_RE.fullmatch(day):
             return False
-        try:
-            line = json.dumps(row, ensure_ascii=False, separators=(",", ":"),
-                              default=str)
-        except (TypeError, ValueError):
+        text = json.dumps(row, ensure_ascii=False, separators=(",", ":"),
+                          default=str)
+        if len(text) > MAX_ROW_CHARS:
             return False
-        if len(line) > MAX_ROW_CHARS:
-            return False
-        try:
-            with (d / f"{day}.jsonl").open("a", encoding="utf-8") as fh:
-                fh.write(line + "\n")
-        except OSError:
-            return False
-        _counts[day] = n + 1
-        return True
+        line = (text + "\n").encode("utf-8")
+    except Exception:  # noqa: BLE001 — serialization cannot break a turn
+        return False
+    try:
+        with _mutation_lock(d):
+            return _append_if_room(d / f"{day}.jsonl", line)
+    except OSError:
+        return False
 
 
 def begin_turn() -> None:

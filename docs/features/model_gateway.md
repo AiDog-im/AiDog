@@ -100,6 +100,7 @@ untouched — two sources, each honest about its own availability.
 | Route | Gate | Contract |
 |---|---|---|
 | `GET /api/mycore/endpoints` | none (loopback) | `{source: env\|endpoints\|upstreams\|none\|invalid, endpoints:[{url, model, primary, keys:[{slot, set}]}], rotation, max_rpm, max_tpm, note, key_presence:{10 slots: bool}}` — slot NAMES + presence booleans only, values never |
+| `GET /api/mycore/endpoints?view=cooldown` | none (loopback) | `{scope: "console-process", available, endpoints:[{index, slots:[{index, state[, label][, remaining_s]}]}]}`. Positions are 1-based; endpoint 1 is primary. Only catalog model slots have labels. No endpoint URLs, model IDs, custom slot names, or credential values. |
 | `POST /api/mycore/upstreams/test` | Bearer | now accepts `{url, slot}` — per-key probe of a model slot (`slot` alone → 400; non-model slot → 400; unset slot → 400). Capability is no more than save-then-test; the value resolves for ONE header in this frame (X5 rule unchanged) |
 | `POST /api/secrets` | Bearer | additionally accepts `MODEL_UP_K[1-8]` (group `model`, value rule `^\S{8,}$`). **`GET /api/secrets` catalog unchanged (38 rows)** — the pool slots are managed from the Model panel, whose presence comes from `key_presence` |
 | `POST /api/settings` | Bearer | `mycore.endpoints/rotation/max_rpm/max_tpm` + `usage.model_pricing` validated (`_validate_model_pricing`); bool rejected for the caps (`True` is not a cap) |
@@ -113,6 +114,17 @@ untouched — two sources, each honest about its own availability.
   TEST (uses the row's first SET slot) and remove. Source chip:
   `ENV OVERRIDES` (read-only rows) / `CONFIG INVALID` (red + note) /
   `STRUCTURED` / `ONE-LINE`.
+* **Key slot cooldowns** reads an on-open or manually refreshed snapshot for
+  the effective configuration (not unsaved edits). `unobserved` means no
+  backoff record in this process; `not-cooling` means the slot was observed
+  but is not cooling, not that it is healthy. `cooling` includes seconds
+  remaining at capture. An upstream with no explicit pool inherits the
+  primary slot. The snapshot shares the actual registry used by web chat
+  and the console's OpenAI-compatible handler: per-turn `ChatClient`
+  instances default to the same module-level `SHARED_HEALTH`. Telegram,
+  other service/CLI processes, and previous console processes are outside
+  its scope. Reading does not call a provider, look up a key value, or
+  change the registry. The `/api/status` aggregate remains unchanged.
 * **KEY SLOTS** toggles the 10-slot pool: presence dots + a password input
   per slot writing through `POST /api/secrets` — the input is cleared the
   moment SET is pressed and the value never enters any other node (the UI

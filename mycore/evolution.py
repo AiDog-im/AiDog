@@ -63,6 +63,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile body/state)
+from mycore import memforget  # noqa: E402  (memory suppression, D5)
 
 BEIJING = timezone(timedelta(hours=8), "+08:00")   # fixed offset, no DST
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -107,7 +108,7 @@ _MACHINE_PATH_PARTS = ("/mnt/", "/home/", "/root/")
 RULES = ("secret-assignment", "secret-shape", "private-key", "bearer",
          "machine-path", "windows-path", "bot-handle", "control-char",
          "name-slug", "description", "empty", "size-cap", "frontmatter",
-         "exists", "duplicate", "io", "name-mismatch")
+         "exists", "duplicate", "io", "name-mismatch", "source-suppressed")
 
 
 @dataclass
@@ -352,11 +353,20 @@ def learn_memory(text: str, *, now: float | None = None,
     """Lint + append one entry to overlay/memory/EVOLUTION_learned.md + log.
 
     An entry identical to one already present is a no-op success (the
-    artifact exists; nothing is written, nothing is logged twice)."""
+    artifact exists; nothing is written, nothing is logged twice).
+
+    A source that was SUPPRESSED is refused before anything is written and
+    the refusal is reported (D5) — a forgotten source must not come back
+    under a new admission."""
     text = (text or "").strip()
     errs = lint_memory(text)
     if errs:
         return LearnResult(ok=False, path=None, errors=sorted(errs))
+    if memforget.is_suppressed(memforget.CHANNEL_LEARNED, text, repo=repo):
+        return LearnResult(ok=False, path=None, errors=["source-suppressed"],
+                           prescreen=["this source is suppressed — the "
+                                      "tombstone ledger refuses a new "
+                                      "admission of it"])
     bnow = _bnow(now if now is not None else time.time())
     target = learned_memory_path(repo)
     try:

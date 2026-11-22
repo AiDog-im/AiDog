@@ -6,6 +6,8 @@ is read in-process from secrets.env and never printed or written anywhere.
 Exit code 0 = all assertions passed; exit 77 = skipped (no provisioned
 install on this machine — secrets.env absent; the suite drives a live
 console and has nothing to smoke without one).
+Live voice calls can consume provider quota. They are off by default.
+Set AIDOG_SMOKE_LIVE_VOICE=edge or byok to make one request to that engine.
 English comments per repo i18n policy.
 """
 from __future__ import annotations
@@ -253,6 +255,29 @@ def main() -> int:
     token = tok_m.group(1) if tok_m else None
     check("secrets.WEB_TOKEN present", bool(token))
 
+    # --- a leftover pause from an INTERRUPTED run of this suite ----------
+    # This suite pauses the console to prove the fail-closed switch and
+    # resumes it afterwards. An interrupted run (timeout, kill) left the
+    # console paused with OUR reason, which then refused every later turn
+    # — including this run's live chat legs and the owner's own use of the
+    # console. A test switch must not outlive the test: resume a pause that
+    # carries our reason, and never touch a pause the owner set.
+    s, ctl0 = get("/api/control")
+    ctl0 = ctl0 if isinstance(ctl0, dict) else {}
+    owner_paused = ctl0.get("paused") is True
+    if owner_paused and ctl0.get("reason") == "smoke" and token:
+        s, _body = post("/api/control", {"action": "resume"}, token)
+        print(f"INFO  resumed a leftover smoke pause from an interrupted run "
+              f"(rc={s})")
+        owner_paused = False
+        s, ctl0 = get("/api/control")
+        ctl0 = ctl0 if isinstance(ctl0, dict) else {}
+        owner_paused = ctl0.get("paused") is True
+    elif owner_paused:
+        print("SKIP  the console is paused by the owner; the live chat legs "
+              "and the unpaused assertion are skipped (the pause is left "
+              "untouched)")
+
     s, health = get("/api/health")
     check("GET /api/health", s == 200 and isinstance(health, dict) and health.get("status") == "ok")
 
@@ -311,6 +336,55 @@ def main() -> int:
     finally:
         _srv.SHIM_PRESENT = _saved
 
+    # Currency cache isolation: changing display units must fetch the new
+    # rate, even while a previous currency's cache is still fresh.
+    from unittest.mock import patch as _patch
+    import io as _io
+    _old_fx = dict(_srv._fx_cache)
+    try:
+        _srv._fx_cache.update(ts=0.0, data=None)
+        def _fx_reply(req, **kwargs):
+            cur = str(req).rsplit("/", 1)[-1]
+            return _io.BytesIO(json.dumps({"result": "success",
+                "rates": {"CNY": {"USD": 7.0, "EUR": 8.0}[cur]}}).encode())
+        with _patch.object(_srv.urllib.request, "urlopen", side_effect=_fx_reply) as _fetch:
+            _usd = _srv.display_fx({"currency": "USD"})
+            _eur = _srv.display_fx({"currency": "EUR"})
+            _again = _srv.display_fx({"currency": "EUR"})
+        check("FX cache is isolated by display currency",
+              _usd["rate_cny_per_unit"] == 7.0
+              and _eur["rate_cny_per_unit"] == 8.0
+              and _again == _eur and _fetch.call_count == 2)
+        check("FX manual and native paths preserve source semantics",
+              _srv.display_fx({"currency": "JPY", "fx_rate": 0.05})["rate_cny_per_unit"] == 0.05
+              and _srv.display_fx({"currency": "CNY", "fx_rate": 8})["rate_cny_per_unit"] == 1.0)
+        _srv._fx_cache.update(ts=0.0, data=None)
+        with _patch.object(_srv.urllib.request, "urlopen", side_effect=OSError("offline")):
+            _missing = _srv.display_fx({"currency": "GBP"})
+        check("FX outage keeps selected unit with unknown rate",
+              _missing["currency"] == "GBP"
+              and _missing["rate_cny_per_unit"] is None
+              and _missing["source"] == "unavailable")
+        _old_usage = dict(_srv._usage_cache)
+        try:
+            with _patch.object(_srv, "_load_pricing", return_value={
+                    "available": False, "bytes_per_token": 3,
+                    "input_per_1m": 0, "output_per_1m": 0}), \
+                 _patch.object(_srv, "_aggregate_daily", return_value={
+                    "input_bytes": 30, "output_bytes": 60}):
+                _srv._usage_cache.update(ts=0.0, data=None)
+                _unpriced = _srv.collect_usage({"currency": "CNY"})
+                _switched = _srv.collect_usage({"currency": "EUR", "fx_rate": 8})
+            check("usage without pricing keeps cost unknown",
+                  _unpriced["today"]["cost"] is None)
+            check("usage cache refreshes display currency without stale units",
+                  _switched["display"]["currency"] == "EUR"
+                  and _switched["display"]["rate_cny_per_unit"] == 8)
+        finally:
+            _srv._usage_cache.update(_old_usage)
+    finally:
+        _srv._fx_cache.update(_old_fx)
+
     s, settings = get("/api/settings")
     check("GET /api/settings", s == 200 and isinstance(settings, dict) and "language" in settings)
     myc = settings.get("mycore") if isinstance(settings, dict) else None
@@ -366,56 +440,20 @@ def main() -> int:
     s, _ct, _b = post_raw("/api/say", {"text": "hi"}, origin="https://evil.example")
     check("POST /api/say cross-origin -> 403", s == 403, f"got {s}")
 
-    # --- /api/say live synthesis: 200+audio, or an honest degradation code.
-    # 429 = rate budget spent by a previous run in the same window (by design),
-    # 502 = engine/network failure surfaced as JSON (never fake audio). ---
-    s, ct, body = post_raw("/api/say", {"text": "Console voice self test.", "lang": "en"})
-    if s == 200:
-        # mp3 sync/magic: "ID3" tag or a 0xFFEx/0xFFFx frame-sync header
-        head3 = body[:3]
-        head2 = body[:2]
-        ok = (ct.startswith("audio/") and len(body) > 1000 and
-              (head3 == b"ID3" or head2 in (b"\xff\xfb", b"\xff\xf3", b"\xff\xf2", b"\xff\xfa")))
-        check("POST /api/say synth -> mp3", ok, f"ct={ct} len={len(body)} head={head3!r}")
-    elif s == 429:
-        check("POST /api/say synth -> mp3", True, "rate-limited (prior run in window)")
-        print(f"INFO  /api/say rate-limited as designed (429)")
-    elif s == 502:
-        err = json.loads(body.decode() or "{}")
-        check("POST /api/say synth -> mp3", isinstance(err.get("error"), str) and err["error"],
-              f"502 without error detail: {body[:80]!r}")
-        print(f"INFO  /api/say engine degraded honestly: {err.get('error', '')[:80]}")
-    elif s == 503:
-        check("POST /api/say synth -> mp3", True, "engine absent (reported by capability)")
-        print("INFO  /api/say: voice engine not installed — 503 as designed")
-    else:
-        check("POST /api/say synth -> mp3", False, f"got {s} ct={ct} body={body[:80]!r}")
-
-    # --- car 4c: /api/say engine parameter — a bad engine is refused before
-    # the rate budget; an explicit byok leg must answer HONESTLY (200 audio
-    # or a 503 that names the real reason — never a silent edge fallback). --
     s, _ct, _b = post_raw("/api/say", {"text": "hi", "engine": "bogus"})
     check("POST /api/say engine=bogus -> 400", s == 400, f"got {s}")
-    s, ct, body = post_raw("/api/say", {"text": "Console byok honesty test.",
-                                        "engine": "byok"}, timeout=40)
-    if s == 429:
-        check("POST /api/say engine=byok honest -> audio or 503", True,
-              "rate-limited (prior run in window)")
-        print("INFO  /api/say byok leg rate-limited as designed (429)")
-    elif s == 200:
-        check("POST /api/say engine=byok honest -> audio or 503",
-              str(ct).startswith("audio/") and len(body) > 500,
-              f"ct={ct} len={len(body)}")
+
+    voice_engine = os.environ.get("AIDOG_SMOKE_LIVE_VOICE", "")
+    if voice_engine in ("edge", "byok"):
+        s, ct, body = post_raw("/api/say", {"text": "Console voice self test.",
+                                            "lang": "en", "engine": voice_engine})
+        check(f"POST /api/say live {voice_engine} -> audio",
+              s == 200 and ct.startswith("audio/") and len(body) > 500,
+              f"got HTTP {s}, audio={ct.startswith('audio/')}, bytes={len(body)}")
+    elif voice_engine:
+        check("AIDOG_SMOKE_LIVE_VOICE must be edge or byok", False)
     else:
-        try:
-            byok_err = json.loads(body.decode("utf-8"))
-        except (ValueError, UnicodeDecodeError):
-            byok_err = {}
-        check("POST /api/say engine=byok honest -> audio or 503",
-              s == 503 and isinstance(byok_err, dict)
-              and isinstance(byok_err.get("error"), str)
-              and bool(byok_err.get("error")),
-              f"got {s} {body[:100]!r}")
+        print("SKIP  live voice synthesis (AIDOG_SMOKE_LIVE_VOICE=edge|byok)")
 
     # --- car 4c: /api/stt local contract — every validation leg answers
     # before the rate window, so they are stable in any order. ---
@@ -472,30 +510,33 @@ def main() -> int:
               f"got {s} {body}")
         # live model over SSE: >=1 delta + an authoritative done frame.
         # A red line here with the gateway up is a REAL signal, not flake.
-        s, ct, evs = post_sse("/api/chat",
-                              {"text": "Reply with exactly: pong"}, token)
-        kinds = [e for e, _ in evs]
-        done = next((d for e, d in evs if e == "done"), None)
-        check("POST /api/chat live model -> SSE stream",
-              s == 200 and ct.startswith("text/event-stream")
-              and kinds and kinds[0] == "meta", f"got {s} ct={ct} evs={kinds[:6]}")
-        check("POST /api/chat live model -> delta + done",
-              "delta" in kinds and "done" in kinds
-              and isinstance(done, dict)
-              and isinstance(done.get("text"), str)
-              and done.get("stop") in ("final", "max_iters", "model_error"),
-              f"kinds={kinds} done={str(done)[:120]}")
-        if isinstance(done, dict):
-            check("POST /api/chat done carries turn stats",
-                  isinstance(done.get("iterations"), int)
-                  and isinstance(done.get("tool_calls"), int),
-                  str({k: done.get(k) for k in ("iterations", "tool_calls")}))
-        # history grew by the live turn; then archive it (idempotent clear)
-        s, hist = get("/api/chat/history")
-        roles = [m["role"] for m in hist.get("messages", [])]
-        check("POST /api/chat turn persisted to the session",
-              s == 200 and roles.count("user") >= 1
-              and roles.count("assistant") >= 1, str(roles[-4:]))
+        if owner_paused:
+            print("SKIP  live chat legs (the console is paused by the owner)")
+        else:
+            s, ct, evs = post_sse("/api/chat",
+                                  {"text": "Reply with exactly: pong"}, token)
+            kinds = [e for e, _ in evs]
+            done = next((d for e, d in evs if e == "done"), None)
+            check("POST /api/chat live model -> SSE stream",
+                  s == 200 and ct.startswith("text/event-stream")
+                  and kinds and kinds[0] == "meta", f"got {s} ct={ct} evs={kinds[:6]}")
+            check("POST /api/chat live model -> delta + done",
+                  "delta" in kinds and "done" in kinds
+                  and isinstance(done, dict)
+                  and isinstance(done.get("text"), str)
+                  and done.get("stop") in ("final", "max_iters", "model_error"),
+                  f"kinds={kinds} done={str(done)[:120]}")
+            if isinstance(done, dict):
+                check("POST /api/chat done carries turn stats",
+                      isinstance(done.get("iterations"), int)
+                      and isinstance(done.get("tool_calls"), int),
+                      str({k: done.get(k) for k in ("iterations", "tool_calls")}))
+            # history grew by the live turn; then archive it (idempotent clear)
+            s, hist = get("/api/chat/history")
+            roles = [m["role"] for m in hist.get("messages", [])]
+            check("POST /api/chat turn persisted to the session",
+                  s == 200 and roles.count("user") >= 1
+                  and roles.count("assistant") >= 1, str(roles[-4:]))
         s, body = post("/api/chat", {"action": "clear"}, token)
         check("POST /api/chat clear archives the session",
               s == 200 and isinstance(body, dict) and body.get("ok") is True
@@ -679,7 +720,7 @@ def main() -> int:
           and isinstance(ctl.get("gate"), dict),
           f"got {s} keys={sorted(ctl) if isinstance(ctl, dict) else ctl}")
     check("GET /api/control starts unpaused after boot",
-          isinstance(ctl, dict) and ctl.get("paused") is False,
+          (not owner_paused) and isinstance(ctl, dict) and ctl.get("paused") is False,
           str(ctl.get("paused")))
     bud = ctl.get("budget") if isinstance(ctl, dict) else {}
     check("GET /api/control budget blocks off by default",
@@ -747,29 +788,33 @@ def main() -> int:
     s, body = post("/api/control", {"action": "pause", "reason": "x" * 300}, token)
     check("POST /api/control overlong reason -> 400", s == 400, f"got {s}")
     # pause -> a NEW chat turn is refused with the honest code; always resume.
-    s, body = post("/api/control", {"action": "pause", "reason": "smoke"}, token)
-    check("POST /api/control pause -> 200 + state echo",
-          s == 200 and isinstance(body, dict)
-          and body.get("ok") is True
-          and body.get("control", {}).get("paused") is True,
-          f"got {s} {body}")
-    s, ctl2 = get("/api/control")
-    check("pause visible on the read face (fail-closed switch)",
-          s == 200 and ctl2.get("paused") is True
-          and ctl2.get("gate", {}).get("allowed") is False
-          and ctl2.get("gate", {}).get("code") == "paused",
-          str(ctl2.get("gate")))
-    s, body = post("/api/chat", {"text": "hi"}, token)
-    check("paused -> POST /api/chat refused 409 with gate code",
-          s == 409 and isinstance(body, dict)
-          and body.get("error") == "paused"
-          and isinstance(body.get("details"), list)
-          and body.get("details"), f"got {s} {body}")
-    s, body = post("/api/control", {"action": "resume"}, token)
-    check("POST /api/control resume -> 200 (the human fail-closed click)",
-          s == 200 and isinstance(body, dict)
-          and body.get("control", {}).get("paused") is False,
-          f"got {s} {body}")
+    # The resume runs in a finally block: an exception between pause and
+    # resume must never leave the owner's console paused by a test.
+    try:
+        s, body = post("/api/control", {"action": "pause", "reason": "smoke"}, token)
+        check("POST /api/control pause -> 200 + state echo",
+              s == 200 and isinstance(body, dict)
+              and body.get("ok") is True
+              and body.get("control", {}).get("paused") is True,
+              f"got {s} {body}")
+        s, ctl2 = get("/api/control")
+        check("pause visible on the read face (fail-closed switch)",
+              s == 200 and ctl2.get("paused") is True
+              and ctl2.get("gate", {}).get("allowed") is False
+              and ctl2.get("gate", {}).get("code") == "paused",
+              str(ctl2.get("gate")))
+        s, body = post("/api/chat", {"text": "hi"}, token)
+        check("paused -> POST /api/chat refused 409 with gate code",
+              s == 409 and isinstance(body, dict)
+              and body.get("error") == "paused"
+              and isinstance(body.get("details"), list)
+              and body.get("details"), f"got {s} {body}")
+    finally:
+        s, body = post("/api/control", {"action": "resume"}, token)
+        check("POST /api/control resume -> 200 (the human fail-closed click)",
+              s == 200 and isinstance(body, dict)
+              and body.get("control", {}).get("paused") is False,
+              f"got {s} {body}")
     s, ctl3 = get("/api/control")
     check("resume re-opens the gate",
           s == 200 and ctl3.get("paused") is False

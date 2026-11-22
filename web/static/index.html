@@ -268,7 +268,7 @@
               <span class="live-dot" id="usageLive" hidden></span></h2>
           <div class="ov-kpi">
             <div class="kpi hero">
-              <div class="metric-unit" id="costUnit">$ TODAY</div>
+              <div class="metric-unit" id="costUnit" data-i18n="usage.unitCny">COST TODAY</div>
               <div class="metric-val" id="costVal">–</div>
               <div class="stat-note" id="usageNote"></div>
             </div>
@@ -1130,10 +1130,25 @@
         <h2><span data-i18n="sec.artifacts">ARTIFACTS</span><span class="chat-badge" id="artBadge">–</span></h2>
         <div class="art-grid" id="artList"></div>
       </section>
-      <section class="card">
-        <h2><span data-i18n="sec.fleets">FLEETS</span><span class="chat-badge" id="fleetBadge">–</span></h2>
-        <div id="fleetPending" hidden></div>
-        <div id="fleetList"></div>
+      <section class="card fleet-board">
+        <h2 data-i18n="sec.fleets">FLEETS</h2>
+        <section class="fleet-section" aria-labelledby="fleetApprovalsHeading">
+          <div class="fleet-task-head">
+            <h3 id="fleetApprovalsHeading" data-i18n="fleet.approvalsHeading">Dispatch approvals</h3>
+            <button class="btn" type="button" id="fleetGoApprovals" hidden
+                    data-i18n="fleet.goApprovals">REVIEW</button>
+          </div>
+          <p class="stat-note" data-i18n="fleet.approvalsScope">Approval records show permission to dispatch.</p>
+          <div id="fleetApprovals"><p class="stat-note" data-i18n="fleet.loading">Loading…</p></div>
+        </section>
+        <section class="fleet-section" aria-labelledby="fleetHistoryHeading">
+          <div class="fleet-task-head">
+            <h3 id="fleetHistoryHeading" data-i18n="fleet.historyHeading">Terminal execution history</h3>
+            <span class="chat-badge" id="fleetBadge">–</span>
+          </div>
+          <p class="stat-note" data-i18n="fleet.historyScope">Recent recorded clone results only. Turns interrupted before saving and results outside the read window may be missing.</p>
+          <div id="fleetList"><p class="stat-note" data-i18n="fleet.loading">Loading…</p></div>
+        </section>
       </section>
     </section>
 
@@ -1745,6 +1760,7 @@
               <label data-i18n="ctl.fx">FX rate (0 = auto)</label>
               <input type="number" id="fxInput" min="0" max="100000" step="0.01" value="0">
             </div>
+            <div class="stat-note" data-i18n="ctl.currencyScope">Model and token costs use this display currency. Guardrail spend budgets and exchange limits remain USD. The rate is CNY per display unit; unavailable rates show unknown costs.</div>
             <div class="ctl-row">
               <label data-i18n="ctl.usageMetrics">Metrics URL (loopback)</label>
               <input type="text" id="usageMetricsUrl" maxlength="512" autocomplete="off"
@@ -1963,14 +1979,20 @@
                        spellcheck="false" placeholder="url[|key_env[|model]], …">
               </div>
             </details>
-            <!-- Wave 4 gamma: X5 connectivity test + X6 failover health -->
+            <!-- Explicit connectivity test; cooldown reads below are passive. -->
             <div class="ctl-actions">
               <button class="btn" id="upTestBtn" type="button"
                       data-i18n="myc.testBtn">TEST ENDPOINTS</button>
               <span class="save-state" id="upTestMsg" role="status"></span>
             </div>
             <div id="upTestOut" class="test-out" hidden></div>
-            <div id="modeltierBox" class="stat-note mt-box" hidden></div>
+            <details id="endpointCooldown" class="ep-adv">
+              <summary data-i18n="myc.cooldownHead">Key slot cooldowns</summary>
+              <div class="stat-note" data-i18n="myc.cooldownScope">Snapshot of configured routes in this console process only (unsaved edits are not included). Telegram and other service processes are not shown. This does not test connectivity.</div>
+              <button class="btn" id="endpointCooldownRefresh" type="button"
+                      data-i18n="myc.cooldownRefresh">REFRESH SNAPSHOT</button>
+              <div id="modeltierBox" class="stat-note mt-box" role="status"></div>
+            </details>
             <div class="ctl-row">
               <label data-i18n="ctl.mycShell">Terminal backend</label>
               <input type="text" id="mycShell" maxlength="256" autocomplete="off"
@@ -2049,7 +2071,7 @@
             <div class="ctl-row">
               <label data-i18n="ctl.ttsUrl">Voice endpoint</label>
               <input type="text" id="ttsBaseUrl" maxlength="256" autocomplete="off"
-                     data-i18n-ph="ctl.offPh" placeholder="empty = kernel endpoint">
+                     data-i18n-ph="ctl.ttsUrlPh" placeholder="required for BYOK; never inherits chat endpoint">
             </div>
             <div class="ctl-row">
               <label data-i18n="ctl.ttsModel">Voice model</label>

@@ -56,6 +56,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from lib import profile_paths as pp  # noqa: E402  (profile state seam)
+from mycore import memforget  # noqa: E402  (memory suppression, D5/D7)
 
 REPO = Path(__file__).resolve().parent.parent
 
@@ -591,15 +592,23 @@ def collect_rhythm(root: Path) -> dict:
 
 def curated_memory_text(repo: Path | None = None) -> str:
     """The two curated relationship-memory files, concatenated (casefolded).
-    Absent files are simply absent — a missing profile is not an error."""
-    root = (repo or REPO) / "overlay" / "memory"
+    Absent files are simply absent — a missing profile is not an error.
+
+    Two fixes live here. The slots resolve through the ACTIVE PROFILE
+    (pp.memory_slots) instead of the fixed <repo>/overlay/memory path, so a
+    profile's profile is built from ITS OWN curated slots — the default
+    profile resolves to the very same files as before. And every
+    tombstoned entry is filtered out (D5), so a rebuilt profile cannot
+    reintroduce a forgotten source (D7)."""
+    root = Path(repo) if repo is not None else REPO
+    mem, usr = pp.memory_slots(root)
     parts: list[str] = []
-    for name in ("USER_curated.md", "MEMORY_curated.md"):
+    for path in (usr, mem):          # the historical order: user, then memory
         try:
-            parts.append((root / name).read_text(encoding="utf-8",
-                                                 errors="replace"))
+            text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
+        parts.append(memforget.filter_slot(path, text))
     return "\n".join(parts).casefold()
 
 

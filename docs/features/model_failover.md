@@ -71,11 +71,11 @@ including error messages.
 - `ModelConfig.describe()` appends the cooling state **scoped to that
   config's units**; it appears in the CLI `[mycore] ...` stderr line and in
   `ChatClient.__repr__`.
-- The web console status card reports the *configured* chain
-  (`fallback_enabled` from `mycore.upstreams` in settings, via
-  `/api/status` → `_mycore_config_bits`) plus settings-validation errors;
-  it does **not** yet render process cooldown (the web layer does not call
-  `describe()` — surfacing it there would be a web-layer addition).
+- `/api/status` provides the console process's endpoint-level aggregate.
+  Settings → Model → **Key slot cooldowns** shows individual slots via
+  [`/api/mycore/endpoints?view=cooldown`](model_gateway.md#4-faces). This
+  reads backoff in the console process only, not Telegram/CLI activity or
+  provider health. The cooldown response omits URLs and credential values.
 
 ## Configuration
 
@@ -147,8 +147,8 @@ a 400 before anything is stored) and the `#envOverrideChip` honestly names
 any `MYCORE_UPSTREAMS`/`MYCORE_BASE_URL`/… export that beats it. Evidence:
 `tmp/e2e_frontend_coverage.py` `L3` (write → `upstreams_configured`) and
 `L5` (env override name-only), `tmp/e2e_frontend_ui.js` `U1` — see
-[frontend_coverage.md](frontend_coverage.md). Process cooldown state is
-still **not** rendered (unchanged, documented below).
+[frontend_coverage.md](frontend_coverage.md). For the current cooldown UI,
+see [visibility of cooldown state](#v2-visibility-of-cooldown-state).
 
 **Model key resolution (activation car, 0.5.40).** `ChatClient._headers`
 resolves the API key as `os.environ.get(name)` first, then the own-line

@@ -42,6 +42,7 @@ REPO = Path(__file__).resolve().parent.parent
 # the active profile — never cached at import, so AIDOG_PROFILE flips (and the
 # offline suite's env save/restore) always win.
 from lib import profile_paths as pp  # noqa: E402
+from mycore import memforget  # noqa: E402  (memory suppression, D5)
 
 MAX_SLOT_CHARS = 8000        # per-file cap (budget discipline, honest truncation)
 MAX_CTX_REFS = 16            # @reference bound per context file (abuse/budget cap)
@@ -66,6 +67,32 @@ def _read_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
         return None
     if not text.strip():
         return None
+    return text if len(text) <= cap else text[:cap] + f"\n... [truncated at {cap} chars]"
+
+
+def _read_memory_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
+    """Read one MEMORY-shaped body file, apply the suppression filter, then
+    cap it.
+
+    Two deliberate details:
+      * the filter runs BEFORE the cap, so a suppressed entry is dropped
+        even when it sits past the cap (a cap applied first would cut the
+        entry in half and change its digest);
+      * "" means "the file is there but everything in it is suppressed" —
+        the caller injects nothing, while a MISSING file still gets its
+        one-line notice.
+
+    With no suppression recorded the result is byte-identical to
+    _read_slot() — the normal state before anything is forgotten."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if not text.strip():
+        return None
+    text = memforget.filter_slot(path, text)
+    if not text.strip():
+        return ""
     return text if len(text) <= cap else text[:cap] + f"\n... [truncated at {cap} chars]"
 
 
@@ -338,17 +365,19 @@ def build_system_stack(constitution_path: Path | None = None,
                       "content": _obedience_message(user_rules)})
 
     for p in memory_paths:
-        text = _read_slot(p)
+        text = _read_memory_slot(p)
         if text is None:
             stack.append({"role": "system",
                           "content": f"[body layer] memory slot missing: {p.name} — "
                                      "treat personal context as unknown, ask instead of guessing."})
-        else:
+        elif text:
+            # "" = present but fully suppressed: nothing is injected, and no
+            # "missing" notice is told either (the file is not missing).
             stack.append({"role": "system", "content": text})
 
     if learned_path is not None:
-        learned = _read_slot(learned_path)
-        if learned is not None:                # present-only: absent = normal
+        learned = _read_memory_slot(learned_path)
+        if learned:                      # present-only: absent = normal
             stack.append({"role": "system", "content": learned})
 
     # Car C (agent foundation): the curated product capability map —

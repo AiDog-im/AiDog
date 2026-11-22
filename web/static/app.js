@@ -92,6 +92,7 @@ async function loadLang(lang) {
   renderExchange();            // venue rows / probe labels follow the language too
   renderCommunity();           // delta4: reason note / filter / rows re-translate
   renderHall();                // car F: task-hall card text follows the language too
+  renderFleet(); renderFleetApprovals();
   renderHelpCmds();            // discoverability: the TG command table repaints too
   chatBadge(chatBusy);            // badge label follows the active language
   renderCtx(lastCtx);             // X14: context line label follows too
@@ -256,12 +257,19 @@ async function playBuf(buf) {
   } finally { URL.revokeObjectURL(url); }
 }
 
-function speakLocal(text) {   // zero-dependency fallback (browser TTS)
+function speakLocal(text, onDeviceOnly = false) {
   return new Promise((resolve) => {
     try {
       if (!("speechSynthesis" in window)) return resolve(false);
       const u = new SpeechSynthesisUtterance(text);
       u.lang = document.documentElement.lang === "zh" ? "zh-CN" : "en-GB";
+      if (onDeviceOnly) {
+        const lang = u.lang.toLowerCase();
+        const local = speechSynthesis.getVoices().filter(voice => voice.localService);
+        u.voice = local.find(voice => voice.lang.toLowerCase() === lang)
+          || local.find(voice => voice.lang.toLowerCase().split("-")[0] === lang.split("-")[0]);
+        if (!u.voice) return resolve(false);
+      }
       u.volume = voiceVolume();
       u.onend = () => resolve(true);
       u.onerror = () => resolve(false);
@@ -271,13 +279,14 @@ function speakLocal(text) {   // zero-dependency fallback (browser TTS)
   });
 }
 
-async function speak(text) {
+async function speak(text, { onDeviceOnly = false } = {}) {
   if (!text || voiceBusy) return false;      // one utterance at a time
   const now = Date.now();
   if (text === voiceLastText && now - voiceLastAt < 8000) return false;  // anti-repetition
   voiceLastText = text; voiceLastAt = now;
   voiceBusy = true; renderVoice();
   try {
+    if (onDeviceOnly) return await speakLocal(text, true);
     const res = await fetch("/api/say", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -298,7 +307,7 @@ async function armVoice() {
   voiceReady = true;                          // must happen inside a user gesture
   if (!voiceEngine) await refreshVoiceCap();
   renderVoice();
-  speak(t("voice.greet", "Voice channel online."));
+  if (settings.sound) speak(t("voice.greet", "Voice channel online."), { onDeviceOnly: true });
 }
 
 /* ---------------------------------------------------- media face (4c) ----
@@ -681,7 +690,8 @@ function vsAwaitReplyStart() {
 
 async function vsSpeakReply(text) {
   const serverOk = !!(voiceEngine && voiceEngine.available);
-  const spoken = await speak(text);   // existing chain: /api/say -> local fallback
+  if (!settings.sound) return;
+  const spoken = await speak(text);   // microphone reply: selected engine -> browser fallback
   if (spoken && serverOk) {
     vsState(t("voice.vs.spoken", "reply spoken"), false);
   } else if (spoken) {
@@ -1536,8 +1546,6 @@ function renderStatus() {
 
   // Wave 3 (X3): the raw status.mycore block — the panels only summarize it.
   renderMycoreFacts();
-  // Wave 4 (X6): failover health rows in Settings -> Model (shape-hides)
-  renderModeltier();
 
   // memory gauges
   const mem = statusData.memory || {};
@@ -1568,7 +1576,7 @@ function renderStatus() {
       const line = adv.level === "info" ? t("ticker.ok", "All systems nominal.")
         : adv.level === "urgent" ? t("ticker.urgent", "Intervention required.")
         : t("ticker.warn", "Attention advised.");
-      speak(line);
+      speak(line, { onDeviceOnly: true });
     }
   }
   lastAdvLevel = adv.level;
@@ -1598,7 +1606,7 @@ function applyAlert(adv) {
     document.getElementById("alertActions").hidden = true;   // URGENT carries no actions
     beep(420, 0.12);
     if (newlyShown && voiceReady && settings.sound) {
-      speak(t("alert.speak", "Urgent. Intervention required."));
+      speak(t("alert.speak", "Urgent. Intervention required."), { onDeviceOnly: true });
     }
   }
 }
@@ -1709,16 +1717,16 @@ document.addEventListener("click", e => {
 /* --------------------------------------------------------------- usage -- */
 function dispInfo() {
   // cost is computed in source CNY; display converts per /api/usage `display`.
-  // Honest fallback: FX unavailable -> show source CNY + rate-unavailable note.
+  // Missing FX keeps the chosen unit and an unknown amount.
   const d = (usageData && usageData.display) || null;
   const rate = d && typeof d.rate_cny_per_unit === "number" && d.rate_cny_per_unit > 0
     ? d.rate_cny_per_unit : null;
-  if (!d) return { sym: "¥", code: "CNY", rate: 1, fxOff: false };
-  if (rate) return { sym: d.symbol, code: d.currency, rate, fxOff: false };
-  return { sym: "¥", code: "CNY", rate: 1, fxOff: d.currency !== "CNY" };
+  if (!d) return { sym: "", code: "", rate: null, fxOff: true };
+  return { sym: d.currency + " ", code: d.currency, rate, fxOff: !rate };
 }
 function fmtCost(cny) {
   const d = dispInfo();
+  if (cny == null || !Number.isFinite(Number(cny)) || !d.rate) return "?";
   const v = cny / d.rate;
   const n = v >= 100 ? Math.round(v).toLocaleString()
     : v >= 1 ? v.toFixed(1) : v.toFixed(2);
@@ -2946,10 +2954,11 @@ function renderSelf(doc) {
     const cny = Number(cnyVal);
     if (d && d.currency !== "CNY" && rate > 0) {
       const v = cny / rate;
-      return (d.symbol || "") + (v >= 100 ? Math.round(v).toLocaleString()
+      return d.currency + " " + (v >= 100 ? Math.round(v).toLocaleString()
         : v >= 1 ? v.toFixed(1) : v.toFixed(2));
     }
-    return (d && d.currency === "CNY" ? "¥" : "") +
+    if (!d || !rate) return "?";
+    return d.currency + " " +
       (cny >= 100 ? Math.round(cny).toLocaleString()
         : cny >= 1 ? cny.toFixed(1) : cny.toFixed(2));
   };
@@ -2973,6 +2982,7 @@ function renderSelf(doc) {
     (m ? chip("usage.selfMonthCost", "COST THIS MONTH",
        fmtCost(m.total_cny)) : "");
   const bits = [];
+  if (d && !rate) bits.push(t("usage.fxOff", "rate unavailable — cost unknown"));
   // the server groups the unpriced list under `pricing` (D2 contract);
   // reading a top-level `doc.unpriced` made this note dead code (car B fix)
   const unpriced = Array.isArray(pricing.unpriced) ? pricing.unpriced : [];
@@ -3082,9 +3092,9 @@ function renderSelfBudget() {
       : st === "unknown" ? "gr.unknown" : st === "off" ? "gr.off" : "gr.ok",
       st === "over" ? "OVER" : st === "unknown" ? "UNKNOWN"
         : st === "off" ? "OFF" : "OK");
-    const num = v => money ? "$" + Number(v || 0).toFixed(2)
+    const num = v => money ? "USD " + Number(v || 0).toFixed(2)
                            : Number(v || 0).toLocaleString("en-US");
-    const has = Number.isFinite(Number(used));
+    const has = used != null && Number.isFinite(Number(used));
     const val = has ? `${state} ${num(used)} / ${num(cap)}`
                     : `${state} / ${num(cap)}`;
     const pct = has ? Math.max(0, Math.min(1, Number(used) / cap)) : null;
@@ -3106,7 +3116,7 @@ function renderSelfBudget() {
   const tok = (b && b.tokens && typeof b.tokens === "object") ? b.tokens : {};
   ring(true, usd.state || "off", usd.used,
        lim.usd_day != null ? lim.usd_day : usd.limit,
-       "gr.usdDay", "USD per day");
+       "gr.usdDay", "SPEND PER DAY (USD)");
   ring(false, tok.state || "off", tok.used,
        lim.token_day != null ? lim.token_day : tok.limit,
        "gr.tokenDay", "Tokens per day");
@@ -3130,81 +3140,81 @@ function wireSelfRange() {
   bind("selfExport", exportSelfJson);
 }
 
-/* X6 rows from statusData.modeltier (Wave 3 beta contract): tri-state by
-   design — true = observed & not cooling, false = cooling now (with a live
-   countdown), null = never observed in this process. available:false or an
-   absent block hides the whole box: an honest absence, never a guess. */
-function renderModeltier() {
-  const box = document.getElementById("modeltierBox");
-  if (!box) return;
-  const mt = statusData && statusData.modeltier;
-  const rows = (mt && typeof mt === "object" && Array.isArray(mt.endpoints))
-    ? mt.endpoints : [];
-  if (!mt || typeof mt !== "object" || mt.available !== true || !rows.length) {
-    box.hidden = true;
-    box.textContent = "";
-    return;
+/* Independent of status polling (which has unrelated connectivity probes)
+   and endpoint editor inputs (which can contain unsaved changes). */
+let endpointCooldownData = null;
+let endpointCooldownLoading = false;
+
+async function refreshEndpointCooldown() {
+  if (endpointCooldownLoading) return;
+  const btn = document.getElementById("endpointCooldownRefresh");
+  endpointCooldownLoading = true;
+  endpointCooldownData = null;
+  if (btn) btn.disabled = true;
+  renderEndpointCooldown();
+  try {
+    const res = await fetch("/api/mycore/endpoints?view=cooldown");
+    if (res.ok) endpointCooldownData = await res.json();
+  } catch (e) { /* unavailable, not an empty or healthy chain */ }
+  finally {
+    endpointCooldownLoading = false;
+    if (btn) btn.disabled = false;
+    renderEndpointCooldown();
   }
-  const frag = document.createDocumentFragment();
-  const head = document.createElement("div");
-  head.className = "mt-head";
-  head.textContent = t("myc.tierHead", "failover health");
-  frag.appendChild(head);
-  rows.forEach(r => {
-    const row = (r && typeof r === "object") ? r : {};
-    const el = document.createElement("div");
-    el.className = "mt-row";
-    const name = document.createElement("span");
-    name.className = "mt-name";
-    name.textContent = String(row.name || "endpoint");
-    el.appendChild(name);
-    const state = document.createElement("span");
-    const healthy = row.healthy;
-    if (healthy === true) {
-      state.className = "mt-state ok";
-      state.textContent = t("myc.tierOk", "healthy ✓");
-    } else if (healthy === false) {
-      state.className = "mt-state bad";
-      const rem = Number(row.cooling_remaining_s);
-      const pattern = t("myc.tierCool", "cooling {s}s");
-      if (Number.isFinite(rem) && rem > 0) {
-        state.dataset.coolPattern = pattern;
-        state.dataset.coolUntil = String(Date.now() + rem * 1000);
-        state.textContent = pattern.replace("{s}", String(Math.ceil(rem)));
-      } else {
-        state.textContent = t("myc.tierCoolNow", "cooling");
-      }
-    } else {
-      state.className = "mt-state unknown";
-      state.textContent = t("myc.tierUnk", "not observed yet");
-    }
-    el.appendChild(state);
-    if (row.primary === true) {
-      const p = document.createElement("span");
-      p.className = "mt-primary";
-      p.textContent = t("myc.tierPrimary", "PRIMARY");
-      el.appendChild(p);
-    }
-    frag.appendChild(el);
-  });
-  box.textContent = "";
-  box.appendChild(frag);
-  box.hidden = false;
 }
 
-function tickModeltier() {
-  /* 1s countdown for cooling rows; the server stays the source of truth
-     (each status repaint re-projects the remainder from its own clock). */
+function renderEndpointCooldown() {
   const box = document.getElementById("modeltierBox");
-  if (!box || box.hidden) return;
-  box.querySelectorAll("[data-cool-until]").forEach(el => {
-    const until = Number(el.dataset.coolUntil);
-    if (!Number.isFinite(until)) return;
-    const left = Math.max(0, Math.ceil((until - Date.now()) / 1000));
-    el.textContent = String(el.dataset.coolPattern || "cooling {s}s")
-      .replace("{s}", String(left));
-  });
+  if (!box || !document.getElementById("endpointCooldown")?.open) return;
+  const doc = endpointCooldownData;
+  if (endpointCooldownLoading) {
+    box.textContent = t("myc.cooldownLoading", "Reading cooldown snapshot…");
+    return;
+  }
+  if (doc?.available !== true || doc.scope !== "console-process" ||
+      !Array.isArray(doc.endpoints) || !doc.endpoints.length) {
+    box.textContent = t("myc.cooldownUnavailable", "Cooldown snapshot unavailable.");
+    return;
+  }
+  box.textContent = "";
+  for (const endpoint of doc.endpoints) {
+    if (!Number.isInteger(endpoint?.index) || !Array.isArray(endpoint.slots)) continue;
+    const head = document.createElement("div");
+    head.className = "mt-head";
+    head.textContent = endpoint.index === 1 ? t("myc.tierPrimary", "PRIMARY") :
+      t("myc.cooldownRoute", "Upstream {n}").replace("{n}", String(endpoint.index - 1));
+    box.appendChild(head);
+    for (const slot of endpoint.slots) {
+      if (!Number.isInteger(slot?.index)) continue;
+      const el = document.createElement("div");
+      el.className = "mt-row";
+      const name = document.createElement("span");
+      name.className = "mt-name";
+      name.textContent = EP_SLOT_OPTIONS.includes(slot.label) ? slot.label :
+        t("myc.cooldownSlot", "Slot {n}").replace("{n}", String(slot.index));
+      const state = document.createElement("span");
+      state.className = "mt-state unknown";
+      if (slot.state === "cooling") {
+        state.className = "mt-state bad";
+        state.textContent = Number.isFinite(slot.remaining_s) && slot.remaining_s > 0
+          ? t("myc.tierCool", "cooling {s}s").replace("{s}", String(Math.ceil(slot.remaining_s)))
+          : t("myc.tierCoolNow", "cooling");
+      } else if (slot.state === "not-cooling") {
+        state.textContent = t("myc.cooldownClear", "not cooling");
+      } else {
+        state.textContent = t("myc.tierUnk", "not observed yet");
+      }
+      el.append(name, state);
+      box.appendChild(el);
+    }
+  }
 }
+
+const endpointCooldownDetails = document.getElementById("endpointCooldown");
+endpointCooldownDetails?.addEventListener("toggle", () => {
+  if (endpointCooldownDetails.open) refreshEndpointCooldown();
+});
+document.getElementById("endpointCooldownRefresh")?.addEventListener("click", refreshEndpointCooldown);
 
 function renderUsage() {
   if (!usageData) return;
@@ -3214,8 +3224,7 @@ function renderUsage() {
   const d = dispInfo();
   const unitEl = document.getElementById("costUnit");
   const setUnit = () => {
-    unitEl.textContent = (d.code === "CNY" ? t("usage.unitCny", "CNY TODAY")
-                                           : t("usage.unit", "{c} TODAY").replace("{c}", d.code));
+    unitEl.textContent = t("usage.unitCny", "COST TODAY");
   };
   /* relayout P3 (audit item 7 — "same value twice with no context"): a KPI
      tile may carry a THIRD line, its context. Here the context is a number
@@ -3247,6 +3256,7 @@ function renderUsage() {
     st(["usage.err", "ERRORS"], String(today.errors), `${errPct}%`) +
     st(["usage.avg", "AVG LATENCY"], (today.avg_ms / 1000).toFixed(1) + "s");
   const numOf = (cny) => {   // vs7 puts the symbol separately via {s}
+    if (!d.rate) return "?";
     const v = cny / d.rate;
     return v >= 100 ? Math.round(v).toLocaleString()
       : v >= 1 ? v.toFixed(1) : v.toFixed(2);
@@ -3257,7 +3267,7 @@ function renderUsage() {
           .replace("{s}", d.sym)
        : t("usage.noRef", "no 7-day baseline yet")) +
     (price.available ? "" : " · " + t("usage.noPrice", "pricing unavailable")) +
-    (d.fxOff ? " · " + t("usage.fxOff", "rate unavailable — source CNY shown") : "");
+    (d.fxOff ? " · " + t("usage.fxOff", "rate unavailable — cost unknown") : "");
   renderOvTech();            // relayout P3: pool counters live here now
 }
 
@@ -6972,11 +6982,11 @@ function renderControl() {
       : st === "off" ? t("gr.off", "OFF") : t("gr.ok", "OK");
     let val = label;
     if (st === "ok" || st === "over") {
-      const n = v => money ? "$" + Number(v || 0).toFixed(2)
+      const n = v => money ? "USD " + Number(v || 0).toFixed(2)
                            : Number(v || 0).toLocaleString("en-US");
       val = `${label} ${n(used)} / ${n(limit)}`;
     } else if (st === "unknown" && limit > 0) {
-      val = `${label} / ${money ? "$" + Number(limit).toFixed(2)
+      val = `${label} / ${money ? "USD " + Number(limit).toFixed(2)
                                 : Number(limit).toLocaleString("en-US")}`;
     } else if (st === "off") {
       val = t("gr.off", "OFF");
@@ -7434,6 +7444,7 @@ function settingsRelang() {
     b.setAttribute("aria-label", t("cred.more", "more actions")));
   repaintSaveState();      // activation car: saved row + restart hint follow
   renderEndpoints();       // v0.5.55: manager rows rebuilt with pack strings
+  renderEndpointCooldown();
   paintChanChips();
   updateHookCounts();
   document.querySelectorAll(".cred-status[data-err-detail]").forEach(el => {
@@ -10204,94 +10215,153 @@ function renderArtifacts() {
 }
 
 /* ----------------------------------------------------- fleet board -------- */
-let fleetData = null;
-async function refreshFleet() {
+// Independent snapshots: sign-off records authorization, the ledger records
+// terminal clone results. A plan id or state cannot establish execution.
+let fleetData, fleetPlansData;   // undefined = loading, null = unavailable
+let fleetRefresh = null;
+
+async function readFleetSnapshot(url, key) {
   try {
-    const r = await fetch("/api/fleet");
-    const d = r.ok ? await r.json() : null;
-    fleetData = (d && Array.isArray(d.fleets)) ? d : null;
-  } catch (e) { fleetData = null; }
-  renderFleet();
-  refreshFleetPlanBadge();   // a waiting fleet must be actionable here
+    const res = await fetch(url);
+    const doc = res.ok ? await res.json() : null;
+    return doc && !doc.note && Array.isArray(doc[key]) ? doc : null;
+  } catch (e) { return null; }
+}
+
+function refreshFleet() {
+  if (fleetRefresh) return fleetRefresh;
+  fleetRefresh = Promise.all([
+    readFleetSnapshot("/api/fleet", "fleets").then(doc => {
+      fleetData = doc;
+      renderFleet();
+    }),
+    readFleetSnapshot("/api/fleet/plans", "plans").then(doc => {
+      fleetPlansData = doc;
+      renderFleetApprovals();
+    }),
+  ]).finally(() => { fleetRefresh = null; });
+  return fleetRefresh;
+}
+
+function fleetNote(text) {
+  return `<p class="stat-note">${escapeHtml(text)}</p>`;
+}
+
+function fleetText(value) {
+  return typeof value === "string" && value ? escapeHtml(value)
+    : escapeHtml(t("fleet.unknown", "Unknown"));
+}
+
+function fleetTime(ts) {
+  if (typeof ts !== "number" || ts <= 0) return "";
+  const date = new Date(ts * 1000);
+  return Number.isFinite(date.getTime())
+    ? `<time datetime="${date.toISOString()}">${escapeHtml(date.toLocaleString(document.documentElement.lang || "en"))}</time>` : "";
+}
+
+function fleetCloneCard(c) {
+  const stop = c.stop;
+  const terminalReasons = {
+    aborted: t("fleet.stopAborted", "Aborted"),
+    deadline: t("fleet.stopDeadline", "Deadline reached"),
+    error: t("fleet.stopError", "Error"),
+    model_error: t("fleet.stopModelError", "Model error"),
+    max_iters: t("fleet.stopMaxIters", "Iteration limit reached"),
+  };
+  const status = stop === "final" ? t("fleet.done", "Completed")
+    : typeof stop === "string" && stop && c.failed === true ? t("fleet.failed", "Failed")
+    : t("fleet.unknown", "Unknown");
+  const reason = typeof stop === "string" && Object.hasOwn(terminalReasons, stop) ? terminalReasons[stop] : "";
+  const usage = c.usage_complete === true && Number.isInteger(c.in_tok) && c.in_tok >= 0
+    && Number.isInteger(c.out_tok) && c.out_tok >= 0 ? `${c.in_tok} / ${c.out_tok}`
+    : t("fleet.unknown", "Unknown");
+  const digest = typeof c.task_digest === "string" && /^[a-f0-9]{12}$/i.test(c.task_digest)
+    ? c.task_digest : null;
+  return `<li class="fleet-task"><div class="fleet-task-head">` +
+    `<strong>${escapeHtml(t("fleet.clone", "Clone"))} ${fleetText(c.clone)}</strong>` +
+    `<span class="chip">${escapeHtml(status)}</span></div>` +
+    (reason ? `<div class="stat-note">${escapeHtml(reason)}</div>` : "") +
+    `<dl class="fleet-facts">` +
+    `<dt>${escapeHtml(t("fleet.role", "Role"))}</dt><dd>${fleetText(c.role)}</dd>` +
+    `<dt>${escapeHtml(t("fleet.band", "Complexity band"))}</dt><dd>${fleetText(c.band)}</dd>` +
+    `<dt>${escapeHtml(t("fleet.digest", "Task digest"))}</dt><dd>${fleetText(digest)}</dd>` +
+    `<dt>${escapeHtml(t("fleet.tokens", "Tokens (in / out)"))}</dt><dd>${escapeHtml(usage)}</dd></dl></li>`;
 }
 
 function renderFleet() {
   const box = document.getElementById("fleetList");
   const badge = document.getElementById("fleetBadge");
   if (!box) return;
+  if (badge) badge.textContent = fleetData ? String(fleetData.fleets.length) : "–";
   if (!fleetData) {
-    box.innerHTML = `<div class="stat-note">${escapeHtml(
-      t("fleet.unavailable", "fleet ledger unavailable"))}</div>`;
-    if (badge) badge.textContent = "–";
+    box.innerHTML = fleetNote(fleetData === null ? t("fleet.historyUnavailable", "Fleet ledger unavailable.")
+      : t("fleet.loading", "Loading…"));
     return;
   }
-  const fleets = fleetData.fleets || [];
-  if (badge) badge.textContent = String(fleetData.count ?? fleets.length);
+  const fleets = fleetData.fleets;
   if (!fleets.length) {
-    box.innerHTML = `<div class="stat-note">${escapeHtml(
-      t("fleet.empty", "no delegated tasks yet"))}</div>`;
+    box.innerHTML = fleetNote(t("fleet.empty", "No clone runs recorded."));
     return;
   }
-  box.innerHTML = fleets.map(f => {
-    const clones = (f.clones || []).map(c => {
-      const status = c.failed ? t("fleet.failed", "failed") :
-        t("fleet.done", "completed");
-      const excerpt = c.task_digest ? `${t("fleet.task", "task")} ${c.task_digest}` : "";
-      const tokens = c.usage_complete && Number.isInteger(c.in_tok) && Number.isInteger(c.out_tok)
-        ? `${c.in_tok}/${c.out_tok}` : "?";
-      const role = c.role ? `<span class="chip">${escapeHtml(c.role)}</span>` : "";
-      const band = c.band ? `<span class="chip">${escapeHtml(
-        t("fleet.band", "band") + " " + c.band)}</span>` : "";
-      return `<div class="ctl-row"><strong>${escapeHtml(c.clone || "clone")}</strong>` +
-        `<span>${escapeHtml(status)} · ${escapeHtml(String(c.stop || "?"))}</span>` +
-        role + band +
-        `<span class="stat-note">${escapeHtml(tokens)} tokens</span>` +
-        `<span class="stat-note" style="min-width:0;overflow-wrap:anywhere;">${escapeHtml(excerpt)}</span></div>`;
-    }).join("");
-    const when = f.ts ? new Date(Number(f.ts) * 1000).toLocaleString() : "";
-    return `<details class="fleet-row"><summary>${escapeHtml(f.id || "fleet")} · ` +
-      `${(f.clones || []).length} · ${escapeHtml(when)}</summary>${clones}</details>`;
-  }).join("") + `<div class="stat-note">${escapeHtml(
-    fleetData.coverage || "")}</div>`;
+  const expanded = new Set(Array.from(box.querySelectorAll("details[open]"), el => el.dataset.fleetId));
+  const firstPaint = !box.querySelector("details");
+  box.innerHTML = fleets.map((f, i) => {
+    if (!f || typeof f !== "object") return "";
+    const clones = Array.isArray(f.clones) ? f.clones.filter(c => c && typeof c === "object") : [];
+    const count = f.incomplete === true && Number.isInteger(f.expected_clones) && f.expected_clones > clones.length
+      ? t("fleet.partial", "{n} of {total} clone runs recorded")
+        .replace("{n}", clones.length).replace("{total}", f.expected_clones)
+      : t("fleet.recorded", "Recorded clone runs: {n}").replace("{n}", clones.length);
+    const id = typeof f.id === "string" ? f.id : "";
+    const open = expanded.has(id) || (firstPaint && i === 0);
+    return `<details class="fleet-group" data-fleet-id="${escapeHtml(id)}"${open ? " open" : ""}>` +
+      `<summary><strong>${escapeHtml(t("fleet.ref", "Fleet"))} ${fleetText(id)}</strong> · ` +
+      `${escapeHtml(count)} ${fleetTime(f.ts)}</summary>` +
+      `<ul class="fleet-task-grid">${clones.map(fleetCloneCard).join("")}</ul></details>`;
+  }).join("");
 }
 
-/* ------------------------------------- fleet approvals shortcut (P1b) -- */
-/* The fleet board lives in the Stream view; the approval queue lives in
- * Settings. When a fleet is waiting, the board says so and offers the one
- * hop that takes the owner there — the refusal itself names a plan id, and
- * this is where that id can be acted on. */
-let fleetPlansData = null;
-
-async function refreshFleetPlanBadge() {
-  try {
-    const doc = await fetch("/api/fleet/plans").then(r => r.json());
-    fleetPlansData = (doc && Array.isArray(doc.plans)) ? doc.plans : [];
-  } catch (e) { fleetPlansData = null; }
-  renderFleetPlanBadge();
-}
-
-function renderFleetPlanBadge() {
-  const note = document.getElementById("fleetPending");
-  if (!note) return;
-  const pending = (fleetPlansData || []).filter(p => p && p.status === "pending");
-  if (!pending.length) { note.hidden = true; note.innerHTML = ""; return; }
-  note.hidden = false;
-  note.innerHTML = `<span class="stat-note" style="margin-top:0;">` +
-    `${escapeHtml(t("fleet.pending", "{n} delegated fleet(s) are waiting for your approval").replace("{n}", String(pending.length)))}` +
-    `</span> ` +
-    `<button class="btn" type="button" id="fleetGoApprovals" ` +
-    `data-i18n="fleet.goApprovals">REVIEW</button>`;
+function renderFleetApprovals() {
+  const box = document.getElementById("fleetApprovals");
   const go = document.getElementById("fleetGoApprovals");
-  if (go) go.addEventListener("click", () => {
-    setView("settings", true);
-    const card = document.getElementById("fleetPlanCard");
-    if (card) {
-      card.scrollIntoView({ behavior: "smooth", block: "center" });
-      card.classList.add("is-focus");
-      setTimeout(() => card.classList.remove("is-focus"), 2400);
-    }
-  });
+  if (!box) return;
+  const plans = fleetPlansData?.plans.filter(p => p && typeof p === "object");
+  if (go) go.hidden = !plans?.some(p => p.status === "pending");
+  if (!plans?.length) {
+    const message = fleetPlansData === null ? t("fleet.approvalsUnavailable", "Approval records unavailable.")
+      : plans ? t("fleet.approvalsEmpty", "No fleet approvals recorded.") : t("fleet.loading", "Loading…");
+    box.innerHTML = fleetNote(message);
+    return;
+  }
+  const states = {
+    pending: t("fleet.awaitingApproval", "Awaiting approval"),
+    approved: t("fplan.stApproved", "approved"),
+    rejected: t("fplan.stRejected", "rejected"),
+    consumed: t("fplan.stConsumed", "used"),
+    cancelled: t("fplan.stCancelled", "cancelled"),
+  };
+  box.innerHTML = `<ul class="fleet-task-grid">${plans.map(p => {
+    const status = typeof p.status === "string" && Object.hasOwn(states, p.status)
+      ? states[p.status] : t("fleet.unknown", "Unknown");
+    const count = Number.isInteger(p.clones) && p.clones >= 0 ? p.clones : t("fleet.unknown", "Unknown");
+    return `<li class="fleet-task"><div class="fleet-task-head">` +
+      `<strong>${escapeHtml(t("fleet.planRef", "Plan"))} ${fleetText(p.id)}</strong>` +
+      `<span class="chip">${escapeHtml(status)}</span></div>` +
+      `<p class="stat-note">${escapeHtml(t("fleet.requested", "Requested clones: {n}").replace("{n}", count))}</p>` +
+      `${fleetTime(p.ts)}</li>`;
+  }).join("")}</ul>`;
 }
+
+const fleetGoApprovals = document.getElementById("fleetGoApprovals");
+if (fleetGoApprovals) fleetGoApprovals.addEventListener("click", () => {
+  setView("settings", true);
+  const card = document.getElementById("fleetPlanCard");
+  if (card) {
+    card.scrollIntoView({ behavior: "smooth", block: "center" });
+    card.classList.add("is-focus");
+    setTimeout(() => card.classList.remove("is-focus"), 2400);
+  }
+});
 
 /* ---------------------------------------------- memory browser (B-11) --- */
 let memBrowseData = null;
@@ -13944,7 +14014,6 @@ refreshJourney();    // car D: adoption ladder + moments (local facts)
 wireExNav();         // 0.5.56: group chips + search + exchange nav toggle
 wireSelfRange();   // C2 B-1: window inputs + quick ranges + JSON export
 setInterval(tickClock, 1000); tickClock();
-setInterval(tickModeltier, 1000);   // X6 cooling countdown (hidden = no-op)
 setInterval(refreshUsage, 60000);
 setInterval(refreshSelf, 60000);   // v0.5.55 self-metered block rides along
 setInterval(refreshEvolution, 60000);

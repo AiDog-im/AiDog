@@ -13066,6 +13066,15 @@ def test_mission() -> None:
             check("mission settings: unknown partition key refused",
                   not clean and bool(errs)
                   and "unknown mission key" in errs[0], str(errs))
+            # The default settings document must survive the validator that
+            # guards it. A dead top-level key (a partition copied outside the
+            # block that owns it) made the whole default document invalid,
+            # which broke the BACKUP/RESTORE settings section permanently
+            # (the restore endpoint answered 503). The ckx round-trip gate
+            # catches the symptom; this assertion catches the cause.
+            _dclean, _derrs = ws.validate_settings_patch(ws.DEFAULT_SETTINGS)
+            check("settings: the default document passes its own validator",
+                  not _derrs, str(_derrs))
             clean, errs = ws.validate_settings_patch({"mission": "all"})
             check("mission settings: non-object partition refused",
                   not clean and bool(errs)
@@ -20120,6 +20129,116 @@ def test_macos_report() -> None:
         srv.shutdown()
 
 
+def test_fleet_daily_cap() -> None:
+    """Independent interpreters contend on the same pre-existing day file."""
+    import errno
+    import subprocess
+    import time
+    from contextlib import ExitStack
+    from unittest.mock import patch
+    from mycore import fleet
+
+    day = "2026-01-01"
+    worker = """
+import json, sys, time
+from pathlib import Path
+from mycore import fleet
+root, day, writer, attempts = sys.argv[1:]
+fleet.activate(root)
+if attempts != '1':
+    (Path(root) / ('ready-' + writer)).touch()
+    deadline = time.monotonic() + 10
+    while not (Path(root) / 'go').exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError('start barrier')
+        time.sleep(0.005)
+accepted = []
+for i in range(int(attempts)):
+    row = {'day': day, 'clone': f'{writer}-{i}', 'task_excerpt': '\u4e2d\u6587\U0001f415'}
+    if fleet.record_clone(row):
+        accepted.append(row['clone'])
+print(json.dumps(accepted))
+"""
+    with tempfile.TemporaryDirectory() as td:
+        d = fleet.activate(td)
+        try:
+            path = d / f"{day}.jsonl"
+            seeded = fleet.MAX_ROWS_PER_DAY - 10
+            legacy = b'{"fleet":"old"}\r\n' * seeded
+            path.write_bytes(legacy)
+            with ExitStack() as cleanup:
+                workers = [cleanup.enter_context(subprocess.Popen(
+                    [sys.executable, "-c", worker, td, day, str(i), "12"],
+                    cwd=REPO, stdout=subprocess.PIPE, text=True)) for i in range(6)]
+                for proc in workers:
+                    cleanup.callback(lambda p=proc: p.kill() if p.poll() is None else None)
+                deadline = time.monotonic() + 10
+                while len(list(d.glob("ready-*"))) != len(workers):
+                    if any(p.poll() is not None for p in workers) or time.monotonic() >= deadline:
+                        raise RuntimeError("fleet writers did not reach the start barrier")
+                    time.sleep(0.005)
+                (d / "go").touch()
+                accepted = []
+                for proc in workers:
+                    stdout, _ = proc.communicate(timeout=10)
+                    if proc.returncode != 0:
+                        raise RuntimeError(f"fleet writer exited {proc.returncode}")
+                    accepted.extend(json.loads(stdout))
+            raw = path.read_bytes()
+            new_rows = [json.loads(line) for line in raw[len(legacy):].splitlines()]
+            physical_rows = raw.count(b"\n")
+            check("fleet cap: 6 independent writers, 72 attempts, 10 slots filled",
+                  raw.startswith(legacy) and physical_rows == fleet.MAX_ROWS_PER_DAY
+                  and len(set(accepted)) == len(accepted) == len(new_rows) == 10
+                  and sorted(accepted) == sorted(r["clone"] for r in new_rows)
+                  and all(r["task_excerpt"] == "\u4e2d\u6587\U0001f415" for r in new_rows),
+                  f"accepted={len(accepted)} physical_rows={physical_rows}")
+            check("fleet cap: another date has independent room",
+                  fleet.record_clone({"day": "2026-01-02"}))
+
+            row = {"day": "2026-01-03"}
+            target = d / "2026-01-03.jsonl"
+            with fleet._mutation_lock(d):
+                denied = subprocess.run(
+                    [sys.executable, "-c", worker, td, row["day"], "blocked", "1"],
+                    cwd=REPO, capture_output=True, text=True, timeout=5, check=True)
+                check("fleet cap: a lock held in another process drops the row",
+                      json.loads(denied.stdout) == [] and not target.exists())
+            check("fleet cap: writing resumes after the holder releases the lock",
+                  fleet.record_clone(row))
+            before = target.read_bytes()
+            with patch.object(fleet, "fcntl", None):
+                check("fleet cap: a missing locking backend fails closed",
+                      not fleet.record_clone(row) and target.read_bytes() == before)
+            with patch.object(fleet.fcntl, "flock", side_effect=OSError(errno.EIO, "test")):
+                check("fleet cap: a permanent lock error fails closed",
+                      not fleet.record_clone(row) and target.read_bytes() == before)
+            opener = fleet._open_nonblocking
+
+            def fail_day_open(path: str, flags: int) -> int:
+                if Path(path) == target:
+                    raise OSError(errno.EIO, "test")
+                return opener(path, flags)
+
+            with patch.object(fleet, "_open_nonblocking", fail_day_open):
+                check("fleet cap: an unreadable day file fails closed",
+                      not fleet.record_clone(row) and target.read_bytes() == before)
+
+            with patch.object(fleet, "MAX_ROWS_PER_DAY", 2):
+                damaged = b'{"partial":'
+                target.write_bytes(damaged)
+                check("fleet cap: a torn tail consumes a slot and remains separate",
+                      fleet.record_clone(row) and not fleet.record_clone(row)
+                      and target.read_bytes() == damaged + b'\n{"day":"2026-01-03"}\n')
+                with target.open("wb") as fh:
+                    fh.truncate(2 * (4 * fleet.MAX_ROW_CHARS + 2) + 1)
+                size = target.stat().st_size
+                check("fleet cap: an oversized legacy file fails closed",
+                      not fleet.record_clone(row) and target.stat().st_size == size)
+        finally:
+            fleet.deactivate()
+
+
 def test_fleet() -> None:
     """Need-B P0 (docs/design/swarm_clones_design.md 4.2): the visible fleet
     — per-clone ledger, credential-linted excerpts, exact attribution, the
@@ -20154,9 +20273,8 @@ def test_fleet() -> None:
               fleet.record_clone({"fleet": "f1", "clone": "c2",
                                   "task_excerpt": "x" * 4000}) is False
               and len(fleet.read_rows()) == 1)
-        fleet._counts.clear()                # the day-cap leg starts at zero
         old_cap = fleet.MAX_ROWS_PER_DAY
-        fleet.MAX_ROWS_PER_DAY = 2
+        fleet.MAX_ROWS_PER_DAY = 3           # includes the row already on disk
         try:
             a = fleet.record_clone({"fleet": "f3", "clone": "c1",
                                     "in_tok": 0, "out_tok": 0,
@@ -20169,7 +20287,6 @@ def test_fleet() -> None:
                   a and b and not c, f"{a} {b} {c}")
         finally:
             fleet.MAX_ROWS_PER_DAY = old_cap
-            fleet._counts.clear()
 
         # ---------------- B. board: grouping, totals, whitelist -------------
         board = fleet.summary()
@@ -21874,6 +21991,360 @@ def test_pipeline() -> None:
           str(sdoc["suppressed"][:2]))
 
 
+def test_memforget() -> None:
+    """Memory suppression, stage 1 — the durable tombstone ledger.
+
+    Design authority: docs/design/memory_suppression_design.md (D1-D8, D10).
+
+    Covered here: the default behavior is unchanged while nothing is
+    forgotten (and no file is created); suppression at ADMISSION (a
+    tombstoned source is refused and the refusal is reported), at READ (the
+    injected learned slot, the console memory view, the owner profile) and
+    at RESTORE; durability across a process restart; a rebuild cannot
+    reintroduce a source; restoring an OLD backup keeps the suppression;
+    repeated and concurrent forgets stay idempotent and well-formed;
+    profiles stay isolated; the ledger carries no excerpt, no path and no
+    credential; the honest limits ride along with every report."""
+    import re
+    import subprocess
+    import time
+    from mycore import memforget as mf
+    from mycore import evolution as ev
+    from mycore import memoryview as mv
+    from mycore import profiling as pf
+    from mycore.assembly import build_system_stack
+
+    keys = ("AIDOG_PROFILE", "AIDOG_PROFILES_DIR", "AIDOG_MC_STATE")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _env(state=None, profile=None, profiles=None) -> None:
+        for k in keys:
+            os.environ.pop(k, None)
+        if state is not None:
+            os.environ["AIDOG_MC_STATE"] = str(state)
+        if profiles is not None:
+            os.environ["AIDOG_PROFILES_DIR"] = str(profiles)
+        if profile is not None:
+            os.environ["AIDOG_PROFILE"] = profile
+
+    def _body(repo: Path, learned: str = "", memory: str = "",
+              user: str = "") -> tuple:
+        mem_dir = repo / "overlay" / "memory"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        (repo / "overlay" / "constitution").mkdir(parents=True, exist_ok=True)
+        (repo / "overlay" / "constitution" / "SOUL.md").write_text(
+            "SOUL\n", encoding="utf-8")
+        (mem_dir / "MEMORY_curated.md").write_text(memory, encoding="utf-8")
+        (mem_dir / "USER_curated.md").write_text(user, encoding="utf-8")
+        learned_path = mem_dir / "EVOLUTION_learned.md"
+        if learned:
+            learned_path.write_text(learned, encoding="utf-8")
+        return (repo / "overlay" / "constitution" / "SOUL.md",
+                (mem_dir / "MEMORY_curated.md",
+                 mem_dir / "USER_curated.md"), learned_path)
+
+    try:
+        # ------------------------------------------- 1. nothing forgotten --
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = Path(td) / "repo"
+            learned_text = ("# LEARNED MEMORY\n\n## 2026-01-02 (learn)\n\n"
+                            "- the deploy pipeline runs on fridays\n\n")
+            cons, slots, learned = _body(
+                repo, learned=learned_text,
+                memory="# Facts\n\nthe owner prefers local tools\n\n"
+                       "# Notes\n\nsecond entry about the console\n",
+                user="# Profile\n\nwrites in Chinese\n")
+            stack = build_system_stack(cons, slots, learned_path=learned)
+            check("memforget: with nothing forgotten the learned slot is "
+                  "injected byte-for-byte",
+                  any(m["content"] == learned_text for m in stack),
+                  str(stack)[:120])
+            check("memforget: with nothing forgotten the curated slots are "
+                  "injected byte-for-byte",
+                  any(m["content"] == "# Facts\n\nthe owner prefers local tools\n\n"
+                      "# Notes\n\nsecond entry about the console\n" for m in stack))
+            view = mv.collect(repo)
+            check("memforget: with nothing forgotten the memory view is "
+                  "unchanged",
+                  [e["title"] for s in view["slots"] for e in s["entries"]]
+                  == ["Facts", "Notes", "Profile"],
+                  str(view)[:160])
+            check("memforget: the read paths create no ledger file",
+                  not (Path(td) / "memforget").exists(),
+                  str(list(Path(td).glob("*"))))
+            check("memforget: with nothing forgotten the owner profile still "
+                  "sees the curated slots",
+                  "the owner prefers local tools" in pf.curated_memory_text(repo))
+
+        # -------------------------------- 2. the durable ledger + the gates --
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = Path(td) / "repo"
+            cons, slots, learned = _body(
+                repo, memory="# Facts\n\nthe owner prefers local tools\n\n"
+                             "# Notes\n\nsecond entry about the console\n",
+                user="# Profile\n\nwrites in Chinese\n")
+            first = ev.learn_memory("the deploy pipeline runs on fridays",
+                                    repo=repo)
+            second = ev.learn_memory("the deploy pipeline runs on mondays",
+                                     repo=repo)
+            check("memforget: the admission path still learns",
+                  first.ok and second.ok, str(first.errors))
+            res = mf.forget(mf.CHANNEL_LEARNED,
+                            "the deploy pipeline runs on fridays", repo=repo)
+            check("memforget: a forget records an opaque source id",
+                  bool(re.fullmatch(r"src_[0-9a-f]{32}", res["id"]))
+                  and res["ok"] and not res["already"], str(res)[:120])
+            check("memforget: the report carries the honest limits",
+                  "NOT deleted" in res["limits"]
+                  and "transcript" in res["limits"], res["limits"][:80])
+            stack = build_system_stack(cons, slots, learned_path=learned)
+            joined = "\n".join(m["content"] for m in stack)
+            check("memforget: the injected learned slot drops the forgotten "
+                  "source",
+                  "fridays" not in joined and "mondays" in joined, joined[:160])
+            again = ev.learn_memory("the deploy pipeline runs on fridays",
+                                    repo=repo)
+            check("memforget: a forgotten source is refused at admission and "
+                  "the refusal is reported",
+                  not again.ok and "source-suppressed" in again.errors,
+                  str(again.errors))
+            repeat = mf.forget(mf.CHANNEL_LEARNED,
+                               "the deploy pipeline runs on fridays", repo=repo)
+            rows = mf.load_rows(repo=repo)
+            check("memforget: a repeated forget is idempotent",
+                  repeat["already"] is True and len(rows) == 1
+                  and rows[0]["id"] == res["id"], str(rows)[:160])
+            check("memforget: the ledger holds no excerpt, no path and no "
+                  "credential",
+                  "fridays" not in mf.ledger_path(repo=repo).read_text()
+                  and str(learned) not in mf.ledger_path(repo=repo).read_text(),
+                  mf.ledger_path(repo=repo).read_text()[:160])
+            pathish = "/" + "mnt" + "/d/secret/notes.md"
+            credentialish = "CREDENTIALVALUE0123456789"
+            dirty = mf.forget(mf.CHANNEL_LEARNED,
+                              "the key is at " + pathish + " and the "
+                              "credential is " + credentialish, repo=repo)
+            raw = mf.ledger_path(repo=repo).read_text()
+            check("memforget: a suppressed secret never reaches the ledger",
+                  pathish not in raw and credentialish not in raw
+                  and "notes.md" not in raw, raw[:160])
+            check("memforget: the ledger row carries a channel, a scope and a "
+                  "timestamp",
+                  dirty["ok"] and rows and rows[0]["channel"] == "learned"
+                  and rows[0]["scope"] and rows[0]["ts"], str(rows)[:160])
+
+        # --------------------------------- 3. the curated view + the profile --
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = Path(td) / "repo"
+            cons, slots, learned = _body(
+                repo, memory="# Facts\n\nthe owner prefers local tools\n\n"
+                             "# Notes\n\nsecond entry about the console\n",
+                user="# Profile\n\nwrites in Chinese\n")
+            mf.forget_entry(slots[0], "Facts", repo=repo)
+            view = mv.collect(repo)
+            check("memforget: the console memory view drops a forgotten "
+                  "curated entry",
+                  [e["title"] for s in view["slots"] for e in s["entries"]]
+                  == ["Notes", "Profile"], str(view)[:160])
+            stack = build_system_stack(cons, slots, learned_path=learned)
+            joined = "\n".join(m["content"] for m in stack)
+            check("memforget: the prompt drops a forgotten curated entry",
+                  "local tools" not in joined and "second entry" in joined,
+                  joined[:160])
+            check("memforget: a rebuild of the owner profile cannot "
+                  "reintroduce a forgotten entry",
+                  "local tools" not in pf.curated_memory_text(repo)
+                  and "second entry" in pf.curated_memory_text(repo),
+                  pf.curated_memory_text(repo)[:120])
+
+        # ------------------------------------------- 4. the curated marker --
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = Path(td) / "repo"
+            marker_id = "src_" + ("a" * 32)
+            body = ("# Facts\n<!-- aidog-src: %s -->\nthe owner prefers local "
+                    "tools\n\n# Notes\n\nsecond entry about the console\n"
+                    % marker_id)
+            cons, slots, learned = _body(repo, memory=body)
+            # a tombstone on the MARKER id suppresses the entry
+            mf.import_rows([{"id": marker_id,
+                             "channel": mf.CHANNEL_CURATED_MEMORY,
+                             "scope": mf.SCOPE_CURATED, "digest": "0" * 32,
+                             "ts": "2026-01-01T00:00:00+00:00"}], repo=repo)
+            view = mv.collect(repo)
+            check("memforget: a marked entry honours its marker",
+                  [e["title"] for s in view["slots"] for e in s["entries"]]
+                  == ["Notes"], str(view)[:160])
+            # an EDIT of the entry changes its content digest but not its
+            # marker — the entry stays suppressed
+            edited = body.replace("local tools", "local tools and dark mode")
+            (repo / "overlay" / "memory" / "MEMORY_curated.md").write_text(
+                edited, encoding="utf-8")
+            view2 = mv.collect(repo)
+            check("memforget: a marked entry stays suppressed after an edit",
+                  [e["title"] for s in view2["slots"] for e in s["entries"]]
+                  == ["Notes"], str(view2)[:160])
+            # forgetting a marked entry by its heading tombstones the body
+            # WITHOUT the marker line — the same text the reader derives
+            mf.forget_entry(slots[0], "Facts", repo=repo)
+            check("memforget: forgetting a marked entry tombstones its body",
+                  len(mf.load_rows(repo=repo)) == 2
+                  and mf.is_suppressed(mf.CHANNEL_CURATED_MEMORY,
+                                       "the owner prefers local tools and dark mode",
+                                       repo=repo),
+                  str(mf.load_rows(repo=repo))[:160])
+            check("memforget: the marker line never reaches the reader",
+                  "aidog-src" not in json.dumps(view2, ensure_ascii=False),
+                  json.dumps(view2, ensure_ascii=False)[:160])
+
+        # -------------------------------------------- 5. profile isolation --
+        with tempfile.TemporaryDirectory() as td:
+            profiles = Path(td) / "profiles"
+            _env(profiles=profiles, profile="alpha")
+            alpha = profiles / "alpha"
+            (alpha / "body" / "memory").mkdir(parents=True, exist_ok=True)
+            shared = "the owner prefers local tools"
+            mf.forget(mf.CHANNEL_CURATED_MEMORY, shared)
+            _env(profiles=profiles, profile="beta")
+            check("memforget: a suppression stays inside its profile",
+                  not mf.is_suppressed(mf.CHANNEL_CURATED_MEMORY, shared),
+                  str(mf.load_rows()))
+            check("memforget: the ledger lives in the profile's own state",
+                  (alpha / "state" / "memforget" / "tombstones.jsonl").is_file()
+                  and not (profiles / "beta" / "state" / "memforget").exists(),
+                  str(sorted(p.name for p in profiles.iterdir())))
+            _env(profiles=profiles)
+            check("memforget: the default profile is untouched by another "
+                  "profile's suppression",
+                  not mf.is_suppressed(mf.CHANNEL_CURATED_MEMORY, shared),
+                  str(mf.load_rows()))
+
+        # ------------------------------- 6. a restore keeps the suppression --
+        with tempfile.TemporaryDirectory() as td:
+            from web import server as ws
+            profiles = Path(td) / "profiles"
+            _env(profiles=profiles, profile="alpha")
+            alpha_body = profiles / "alpha" / "body" / "memory"
+            alpha_body.mkdir(parents=True, exist_ok=True)
+            ev.learn_memory("the deploy pipeline runs on fridays")
+            mf.forget(mf.CHANNEL_LEARNED, "the deploy pipeline runs on fridays")
+            payload = ws.backup_payload(("memory",))
+            check("memforget: a backup carries the tombstone set (D6)",
+                  bool(payload.get("tombstones"))
+                  and payload["tombstones"][0]["channel"] == "learned",
+                  str(payload.get("tombstones"))[:160])
+            # the same machine, a fresh profile: the restore must not
+            # reintroduce the forgotten source
+            _env(profiles=profiles, profile="beta")
+            beta_body = profiles / "beta" / "body" / "memory"
+            beta_body.mkdir(parents=True, exist_ok=True)
+            result = ws.backup_apply_memory(payload["memory"],
+                                             payload.get("tombstones"))
+            restored = (beta_body / "EVOLUTION_learned.md")
+            check("memforget: restoring an old backup keeps the suppression",
+                  "fridays" not in restored.read_text()
+                  and bool(result.get("tombstones")),
+                  restored.read_text()[:160] if restored.exists() else "missing")
+            check("memforget: the restored machine keeps the tombstone",
+                  mf.is_suppressed(mf.CHANNEL_LEARNED,
+                                   "the deploy pipeline runs on fridays"),
+                  str(mf.load_rows())[:160])
+
+        # ------------------------------------------ 7. durability + concurrency --
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = Path(td) / "repo"
+            _body(repo)
+            mf.forget(mf.CHANNEL_LEARNED, "the deploy pipeline runs on fridays",
+                      repo=repo)
+            worker = """
+import os, sys
+sys.path.insert(0, %r)
+os.environ["AIDOG_MC_STATE"] = sys.argv[1]
+from mycore import memforget as mf
+print(int(mf.is_suppressed(mf.CHANNEL_LEARNED, sys.argv[2])))
+print(int(os.path.exists(os.path.join(sys.argv[1], "memforget"))))
+"""
+            proc = subprocess.run(
+                [sys.executable, "-c", worker % str(REPO), td,
+                 "the deploy pipeline runs on fridays"],
+                cwd=str(REPO), capture_output=True, text=True, timeout=60)
+            out = proc.stdout.strip().splitlines()
+            check("memforget: the suppression survives a process restart",
+                  proc.returncode == 0 and out and out[0] == "1",
+                  (proc.stderr or proc.stdout)[:160])
+            with tempfile.TemporaryDirectory() as fresh:
+                proc2 = subprocess.run(
+                    [sys.executable, "-c", worker % str(REPO), fresh,
+                     "the deploy pipeline runs on fridays"],
+                    cwd=str(REPO), capture_output=True, text=True, timeout=60)
+                out2 = proc2.stdout.strip().splitlines()
+                check("memforget: importing the module creates no ledger file",
+                      proc2.returncode == 0 and len(out2) > 1 and out2[1] == "0",
+                      (proc2.stderr or proc2.stdout)[:160])
+
+            racer = """
+import os, sys, time
+sys.path.insert(0, %r)
+os.environ["AIDOG_MC_STATE"] = sys.argv[1]
+from mycore import memforget as mf
+ready = os.path.join(sys.argv[1], "ready-" + sys.argv[2])
+open(ready, "w").close()
+deadline = time.monotonic() + 20
+while not os.path.exists(os.path.join(sys.argv[1], "go")):
+    if time.monotonic() >= deadline:
+        raise TimeoutError("start barrier")
+    time.sleep(0.005)
+try:
+    res = mf.forget(mf.CHANNEL_LEARNED, sys.argv[3])
+    print("OK", res["id"])
+except mf.MemforgetError as exc:
+    print("LOCKED", type(exc).__name__)
+"""
+            with tempfile.TemporaryDirectory() as rdir:
+                _env(state=rdir)
+                code = racer % str(REPO)
+                procs = [subprocess.Popen([sys.executable, "-c", code, rdir,
+                                           str(i), "shared source text"],
+                                          cwd=str(REPO), stdout=subprocess.PIPE,
+                                          stderr=subprocess.PIPE, text=True)
+                         for i in range(3)]
+                deadline = time.monotonic() + 20
+                while len(list(Path(rdir).glob("ready-*"))) != len(procs):
+                    if any(p.poll() is not None for p in procs):
+                        break
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.005)
+                (Path(rdir) / "go").touch()
+                outs = []
+                for proc in procs:
+                    stdout, _ = proc.communicate(timeout=30)
+                    outs.append(stdout.strip())
+                ids = {line.split()[1] for line in outs
+                       if line.startswith("OK")}
+                lock_rows = [r for r in mf.load_rows(repo=repo)]
+                check("memforget: concurrent forgets stay idempotent",
+                      len(lock_rows) == 1 and len(ids) == 1,
+                      str(outs)[:200] + str(lock_rows)[:120])
+                check("memforget: the ledger stays well-formed under "
+                      "concurrency",
+                      all(isinstance(r, dict) and r.get("id") for r in lock_rows)
+                      and all(line.strip().startswith("{")
+                              for line in mf.ledger_path(repo=repo)
+                              .read_text().splitlines() if line.strip()),
+                      str(lock_rows)[:160])
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -21963,6 +22434,7 @@ def main() -> int:
         test_macos_report,
         test_pipeline,
         test_fleet,
+        test_fleet_daily_cap,
         test_fleetgate,
         test_memoryview,
         test_fleetplan,
@@ -21970,6 +22442,7 @@ def main() -> int:
         test_activity_baseline,
         test_exchange_scope,
         test_pipeline_brain,
+        test_memforget,
     ]
     rows = []
     for fn in suites:

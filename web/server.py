@@ -416,6 +416,7 @@ from mycore import (bridge, checkpoint, cli, decision, evolution, hooks, leash, 
                     ledger, mission, mcp, modeltier, pipeline, profiling, propush,
                     prosearch, security, sniff, terminal)  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ profiling grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
+from mycore import memforget  # noqa: E402  (memory suppression ledger, D5/D6)
 from mycore import secrets_store  # noqa: E402  (E2: secrets.env at-rest state)
 from mycore.assembly import (build_system_stack,  # noqa: E402
                               resolve_context_dirs, resolve_user_rules,
@@ -708,19 +709,16 @@ DEFAULT_SETTINGS: dict = {
     # without an absence check. Shipped OFF: the kill switch is the default, and
     # `physical_address` must be filled before any message may be sent.
     "pipeline": dict(pipeline.DEFAULT_SETTINGS),
-    # Need-A (owner profiling): a copy of mycore.profiling.DEFAULT_SETTINGS —
-    # that constant stays the source of truth. The block is always present so
-    # the SENSE view renders the OWNER ANALYSIS section without an absence
-    # check. Analysis is local-only and spends no model tokens; P0 reads
-    # nothing and writes nothing on its own.
-    "profiling": dict(profiling.DEFAULT_SETTINGS),
-    # Need-A P1: the outer-web search partition (the feature's ONLY egress).
-    # A copy of mycore.prosearch.DEFAULT_SETTINGS — that constant stays the
-    # source of truth. It ships DISABLED: the owner flips the switch in the
-    # SENSE view, because a keyword query is the only thing that leaves the
-    # machine.
-    "search": dict(prosearch.DEFAULT_SETTINGS),
 }
+# The Need-A partitions (owner profiling, outer-web search) live INSIDE the
+# `mycore` block — `mycore.profiling` and `mycore.search` are the only
+# readers (mycore/profiling.py:settings_block, mycore/prosearch.py:settings_block)
+# and `MYCORE_KEYS` carries them. An earlier revision ALSO put copies of them
+# at the top level; those copies were dead (nothing read them) and, because
+# `ALLOWED_TOP` does not list them, they made `validate_settings_patch`
+# reject the whole default document — which broke the BACKUP/RESTORE settings
+# section permanently (the restore endpoint answers 503 for any settings
+# payload). The ckx round-trip gate is the one that catches it.
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media", "web3", "mission",
@@ -1135,6 +1133,13 @@ def backup_payload(include) -> dict:
             except UnicodeDecodeError:
                 raise BackupReadError(503, "memory slot is not utf-8") from None
         payload["memory"] = mem
+        # D6: the suppression set rides ALONG with the memory section, so a
+        # restore on another machine keeps the suppression instead of
+        # silently un-forgetting a source. It is omitted when nothing was
+        # forgotten — the payload stays byte-identical to the old shape.
+        rows = memforget.load_rows()
+        if rows:
+            payload["tombstones"] = rows
     return payload
 
 
@@ -1238,11 +1243,21 @@ def backup_apply_settings(doc: dict) -> dict:
     return {"applied": True, "changed": sorted(clean), "persisted": persisted}
 
 
-def backup_apply_memory(doc: dict) -> dict:
+def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
     """Write the three fixed memory slots (never an arbitrary path), each
     capped and written atomically; a refusal is reported per file and the
-    remaining files still land."""
+    remaining files still land.
+
+    Every restored file is filtered through the suppression set FIRST (D5):
+    the local tombstones plus the set that travelled with the backup (D6).
+    A restore therefore cannot reintroduce a forgotten source, and the
+    travelling set is merged into the local ledger so the suppression
+    outlives the restore. With no tombstones the filter is the identity
+    and the written bytes are exactly the payload's bytes."""
     paths = backup_memory_paths()
+    incoming = memforget.TombstoneSet.from_rows(
+        row for row in (tombstones or []) if isinstance(row, dict))
+    effective = memforget.load_set().merged(incoming)
     files: list[str] = []
     failed: list[dict] = []
     total = 0
@@ -1260,6 +1275,8 @@ def backup_apply_memory(doc: dict) -> dict:
             failed.append({"name": name,
                            "reason": f"over the {BACKUP_MEMORY_MAX_BYTES} byte cap"})
             continue
+        data = memforget.filter_slot(path, text,
+                                      tombstones=effective).encode("utf-8")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(path, data, chmod=0o644)
@@ -1269,9 +1286,22 @@ def backup_apply_memory(doc: dict) -> dict:
             continue
         files.append(name)
         total += len(data)
+    tombstone_result = None
+    if incoming:
+        try:
+            tombstone_result = memforget.import_rows(incoming.rows)
+        except memforget.MemforgetError as e:
+            tombstone_result = {"imported": 0, "skipped": 0,
+                                "error": str(e)[:80]}
+            failed.append({"name": "tombstones",
+                           "reason": "persist failed: MemforgetError"})
     sys.stderr.write(f"backup restore memory files={len(files)} "
-                     f"bytes={total} failed={len(failed)}\n")
-    return {"files": files, "bytes": total, "failed": failed}
+                     f"bytes={total} failed={len(failed)} "
+                     f"tombstones={(tombstone_result or {}).get('imported', 0)}\n")
+    out = {"files": files, "bytes": total, "failed": failed}
+    if tombstone_result is not None:
+        out["tombstones"] = tombstone_result
+    return out
 
 
 # --------------------------------------------------- mycore runtime probes ---
@@ -2950,7 +2980,7 @@ USAGE_TTL = 20.0
 #   currency=USD (default) -> auto FX from the free open.er-api.com endpoint
 #   (daily update, no key; 6h cache / 5min negative cache), overridable by
 #   manual `fx_rate` (CNY per 1 display unit), and honestly marked
-#   source="unavailable" (frontend falls back to source CNY) when both fail.
+#   source="unavailable" (frontend shows unknown cost) when both fail.
 _fx_lock = threading.Lock()
 _fx_cache: dict = {"ts": 0.0, "data": None}
 FX_TTL = 6 * 3600.0
@@ -2974,8 +3004,10 @@ def display_fx(settings: dict) -> dict:
         return out
     now = time.time()
     with _fx_lock:
-        if _fx_cache["data"] is not None and now - _fx_cache["ts"] < (
-                FX_TTL if _fx_cache["data"].get("rate_cny_per_unit") else FX_ERR_TTL):
+        if (_fx_cache["data"] is not None
+                and _fx_cache["data"].get("currency") == cur
+                and now - _fx_cache["ts"] < (
+                FX_TTL if _fx_cache["data"].get("rate_cny_per_unit") else FX_ERR_TTL)):
             cached = dict(_fx_cache["data"])
             cached["currency"], cached["symbol"] = cur, CURRENCY_SYM[cur]
             return cached
@@ -3123,7 +3155,7 @@ def collect_usage(settings: dict) -> dict:
     now = time.time()
     with _usage_lock:
         if _usage_cache["data"] is not None and now - _usage_cache["ts"] < USAGE_TTL:
-            return _usage_cache["data"]
+            return dict(_usage_cache["data"], display=display_fx(settings))
         cfg = settings.get("usage") if isinstance(settings.get("usage"), dict) else {}
         pricing = _load_pricing(cfg.get("pricing_config", "") or "")
         bpt = pricing["bytes_per_token"]
@@ -3150,7 +3182,8 @@ def collect_usage(settings: dict) -> dict:
             in_t = _tokens(today_raw["input_bytes"], bpt)
             out_t = _tokens(today_raw["output_bytes"], bpt)
             cost = round(in_t / 1e6 * pricing["input_per_1m"] + out_t / 1e6 * pricing["output_per_1m"], 4)
-            today = dict(today_raw, input_tokens=in_t, output_tokens=out_t, cost=cost)
+            today = dict(today_raw, input_tokens=in_t, output_tokens=out_t,
+                         cost=cost if pricing["available"] else None)
         data = {
             "available": pool is not None or today is not None,
             "generated_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
@@ -4370,6 +4403,8 @@ EXCHANGE_SCOPE_RATE_LIMIT = 6
 EXCHANGE_SCOPE_RATE_WINDOW = 60.0
 _exchange_scope_times: deque = deque()
 _exchange_scope_lock = threading.Lock()
+_byok_say_lock = threading.Lock()
+_byok_say_retry_at = 0.0  # monotonic, protected by the single-flight lock
 BYOK_VOICE = "alloy"           # single OpenAI-compatible voice slot (both langs)
 BYOK_MAX_AUDIO = 5_000_000     # upstream speech bytes read cap
 
@@ -4649,19 +4684,16 @@ def media_capability(settings: dict) -> dict:
 
 def _tts_byok_cfg(settings: dict) -> tuple[str, bool, str]:
     """(base, ok, key) for the BYOK speech leg. Base URL priority: env
-    AIDOG_TTS_URL > settings media.tts_base_url > mycore.base_url. Key = the
-    TTS_API_KEY slot falling back to MODEL_API_KEY (value never echoed, never
-    logged, never part of a reason string). A LOOPBACK base may run keyless —
+    AIDOG_TTS_URL > settings media.tts_base_url. Neither the chat endpoint nor
+    its credential is inherited. A LOOPBACK base may run keyless —
     the same policy imagegen already applies to local gateways; any remote
     endpoint without a slot is fail-closed (ok=False)."""
     med = settings.get("media") if isinstance(settings.get("media"), dict) else {}
-    mc = settings.get("mycore") if isinstance(settings.get("mycore"), dict) else {}
     base = (os.environ.get("AIDOG_TTS_URL", "").strip()
-            or str(med.get("tts_base_url") or "").strip()
-            or str(mc.get("base_url") or "").strip()).rstrip("/")
+            or str(med.get("tts_base_url") or "").strip()).rstrip("/")
     if not base:
         return "", False, ""
-    key = read_env_slot("TTS_API_KEY") or read_env_slot("MODEL_API_KEY") or ""
+    key = read_env_slot("TTS_API_KEY") or ""
     if key:
         return base, True, key
     return base, _is_loopback_http(base), ""
@@ -4686,26 +4718,33 @@ def _synth_say_byok(text: str, settings: dict) -> tuple[bytes, str]:
         headers["Authorization"] = "Bearer " + key
     req = urllib.request.Request(base + "/audio/speech", data=payload,
                                  method="POST", headers=headers)
+    global _byok_say_retry_at
+    if not _byok_say_lock.acquire(blocking=False):
+        raise RuntimeError("byok tts already in progress")
     try:
-        with urllib.request.urlopen(req, timeout=SAY_TIMEOUT) as resp:
-            ctype = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
-            data = resp.read(BYOK_MAX_AUDIO + 1)
-    except urllib.error.HTTPError as e:
-        detail = ""
+        if time.monotonic() < _byok_say_retry_at:
+            raise RuntimeError("byok tts cooling down after an upstream failure")
         try:
-            detail = e.read(512).decode("utf-8", "replace").strip()
-        except OSError:
-            pass
-        raise RuntimeError(f"byok tts upstream HTTP {e.code}: "
-                           f"{sanitize_event_text(detail)[:120]}") from None
-    except Exception as e:  # noqa: BLE001 — DNS/timeout/refused, honest type only
-        raise RuntimeError(f"byok tts unreachable: {type(e).__name__}") from None
-    if not data or not ctype.startswith("audio/"):
-        raise RuntimeError(f"byok tts returned {ctype or 'no content-type'} "
-                           "(expected audio)")
-    if len(data) > BYOK_MAX_AUDIO:
-        raise RuntimeError(f"byok tts response too large (max {BYOK_MAX_AUDIO} bytes)")
-    return data, ctype
+            with urllib.request.urlopen(req, timeout=SAY_TIMEOUT) as resp:
+                ctype = (resp.headers.get("Content-Type") or "").split(";", 1)[0].strip().lower()
+                data = resp.read(BYOK_MAX_AUDIO + 1)
+        except urllib.error.HTTPError as e:
+            delay = 60 if e.code == 429 else 30
+            retry_after = (e.headers.get("Retry-After") or "").strip() if e.headers else ""
+            if e.code in (429, 503) and re.fullmatch(r"[0-9]{1,9}", retry_after):
+                delay = max(delay, min(3600, int(retry_after)))
+            _byok_say_retry_at = time.monotonic() + delay
+            e.close()
+            raise RuntimeError(f"byok tts upstream HTTP {e.code}") from None
+        except Exception as e:  # noqa: BLE001 — DNS/timeout/refused, honest type only
+            _byok_say_retry_at = time.monotonic() + 30
+            raise RuntimeError(f"byok tts unreachable: {type(e).__name__}") from None
+        if not data or not ctype.startswith("audio/") or len(data) > BYOK_MAX_AUDIO:
+            _byok_say_retry_at = time.monotonic() + 30
+            raise RuntimeError("byok tts returned an invalid audio response")
+        return data, ctype
+    finally:
+        _byok_say_lock.release()
 
 
 # ----------------------------------------------------------------- version ---
@@ -6922,6 +6961,43 @@ def _decision_row(mc: dict | None = None) -> dict:
             "active": active, "reason": reason}
 
 
+def collect_endpoint_cooldown() -> dict:
+    """Read only the configured units' backoff in this console process.
+
+    The exact runtime URL and slot name are used for lookup only. Return
+    positions for both and a display label only for known model-key slots;
+    the legacy operator-level upstream grammar permits arbitrary slot names.
+    This reads no credentials and makes no requests to model providers.
+    """
+    out: dict = {"scope": "console-process", "available": False,
+                 "endpoints": []}
+    try:
+        cfg = cli.resolve_model_config()
+    except Exception as e:  # noqa: BLE001 — never echo a config error
+        sys.stderr.write(f"endpoint cooldown unavailable err={type(e).__name__}\n")
+        return out
+    health = modeltier.SHARED_HEALTH
+    endpoints = []
+    for index, (base, key_env, _model) in enumerate(cfg.chain(), 1):
+        slots = (s for s in (key_env or "").split(",") if s)
+        keys = []
+        for position, slot in enumerate(tuple(slots) or ("",), 1):
+            ident = health.identity(base, slot)
+            seen = health.observed(ident)
+            remaining = health.remaining(ident)
+            row = {"index": position, "state": (
+                "cooling" if remaining > 0 else
+                "not-cooling" if seen else "unobserved")}
+            if slot in MODEL_KEY_SLOTS:
+                row["label"] = slot
+            if remaining > 0:
+                row["remaining_s"] = remaining
+            keys.append(row)
+        endpoints.append({"index": index, "slots": keys})
+    out.update(available=True, endpoints=endpoints)
+    return out
+
+
 def collect_endpoints() -> dict:
     """GET /api/mycore/endpoints (v0.5.55) — the normalized chain for the
     Model panel. `source` names which track configured it:
@@ -7587,6 +7663,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(payload, 400)
             return self._json(payload)
         if path == "/api/mycore/endpoints":
+            # Separate projection so a cooldown read never transmits the
+            # endpoint editor's raw URLs or legacy operator-level slot names.
+            q = urllib.parse.parse_qs(self.path.partition("?")[2])
+            if q.get("view") == ["cooldown"]:
+                return self._json(collect_endpoint_cooldown())
             return self._json(collect_endpoints())
         if path == "/api/events":
             return self._json(collect_events())
@@ -8018,7 +8099,8 @@ class Handler(BaseHTTPRequestHandler):
         if apply.get("settings") is True:
             out["settings"] = backup_apply_settings(payload.get("settings") or {})
         if apply.get("memory") is True:
-            out["memory"] = backup_apply_memory(payload.get("memory") or {})
+            out["memory"] = backup_apply_memory(payload.get("memory") or {},
+                                                 payload.get("tombstones"))
         ok = True
         if "secrets" in out:
             ok = ok and not out["secrets"]["failed"]
@@ -9505,6 +9587,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "validation failed",
                                "details": ["kind must be 'skill' or 'memory'"]}, 400)
         if not res.ok:
+            if "source-suppressed" in res.errors:
+                # The suppression ledger refused this source (D5). This is
+                # NOT a lint failure — the text is fine, it is simply
+                # suppressed. Say so honestly instead of blaming the lint.
+                sys.stderr.write("evolution learn refused kind=memory "
+                                 "rule=source-suppressed\n")
+                return self._json({"error": "source suppressed",
+                                   "details": res.errors,
+                                   "prescreen": res.prescreen}, 409)
             sys.stderr.write(f"evolution learn rejected kind={kind} "
                              f"rules={','.join(res.errors)}\n")
             return self._json({"error": "lint rejected",

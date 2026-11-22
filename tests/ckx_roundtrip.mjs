@@ -134,7 +134,9 @@ let childStderr = "";
                    `WEB_TOKEN=${TOKEN}\nLINEAR_API_KEY=${SECRET_A}\n`);
   fs.writeFileSync(path.join(profile, "body", "memory", "MEMORY_curated.md"),
                    MEMORY_FIXTURE);
-  fs.copyFileSync(path.join(REPO, "web", "settings.json"),
+  // Use shipped settings so this gate works in a fresh export and never
+  // reads or copies the operator's live configuration.
+  fs.copyFileSync(path.join(REPO, "web", "settings.example.json"),
                   path.join(profile, "settings.json"));
   // E2 seams: the passphrase file lives INSIDE the throwaway profile dir
   // (removed in `finally` — never ~/.config, never elsewhere in the tree).

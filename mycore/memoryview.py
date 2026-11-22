@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from mycore import memforget
+
 MAX_ENTRIES = 200
 MAX_CHARS = 20000
 MAX_EXCERPT = 600
@@ -86,6 +88,9 @@ def collect(repo: Path | None = None, query: str = "",
             slots.append({"slot": label, "available": False,
                            "note": f"unreadable ({error})", "entries": []})
             continue
+        # Memory suppression (D5): a tombstoned entry is not shown here.
+        # With nothing suppressed the text is unchanged, byte for byte.
+        text = memforget.filter_slot(path, text)
         entries = _entries(text)
         total += len(entries)
         if q:

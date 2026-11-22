@@ -2514,3 +2514,28 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
   font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
   color: var(--muted);
 }
+
+/* Read-only fleet approvals and terminal clone history in Stream. */
+.fleet-board { min-width: 0; }
+.fleet-section + .fleet-section { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.fleet-section h3 { margin: 0; font-size: 15px; }
+.fleet-board .stat-note { margin: 5px 0; }
+.fleet-task-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 12px; }
+.fleet-task-head .btn { margin-inline-start: auto; }
+#fleetGoApprovals[hidden] { display: none; }
+.fleet-task-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 230px), 1fr));
+  gap: 8px; margin: 8px 0; padding: 0; list-style: none;
+}
+.fleet-task, .fleet-group { min-width: 0; overflow-wrap: anywhere; }
+.fleet-task { border: 1px solid var(--line); border-radius: 8px; padding: 9px 10px; }
+.fleet-task .chip { white-space: normal; }
+.fleet-group { border-top: 1px solid var(--line); }
+.fleet-group > summary { padding: 8px 0; cursor: pointer; }
+.fleet-board time { font-size: 12px; color: var(--muted); }
+.fleet-facts {
+  display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 4px 8px;
+  margin: 8px 0 0; font-size: 13px;
+}
+.fleet-facts dt { color: var(--muted); }
+.fleet-facts dd { margin: 0; }
