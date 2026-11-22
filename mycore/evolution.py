@@ -42,6 +42,12 @@ Scheduling (dual-driven):
 State: <state>/evolution_state.json — env AIDOG_MC_STATE when set, else
 <repo>/data/mycore_service (next to the chat-service runtime state; gitignored).
 
+Concurrency: the learned-memory write and the evolution log are read-append-
+write cycles, so they run under a cross-process POSIX flock mutation lock
+(the pattern the tombstone ledger and the fleet ledger already use). The lock
+file lives in the per-profile STATE root, never in the tracked body tree —
+see the note above _mutation_lock.
+
 Determinism: paths are passed (repo=...), time is passed as an epoch (now=...)
 and rendered in fixed UTC+08:00 (owner timezone; China has no DST), so every
 stage is reproducible under test. English-only source (repo i18n policy).
@@ -50,16 +56,25 @@ Exit codes (CLI): 0 ok · 1 violations found (lint-tree) · 2 bad arguments.
 from __future__ import annotations
 
 import argparse
+import errno
+import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import time
 from collections import Counter
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
+
+try:
+    import fcntl                      # native Windows has no fcntl — the
+except ImportError:                   # mutation lock then fails CLOSED
+    fcntl = None
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile body/state)
@@ -213,6 +228,107 @@ def rel(path: Path, repo: Path = REPO) -> str:
         return path.name
 
 
+# ------------------------------------------------------- mutation lock -----
+# The learned-memory slot and the evolution log are READ-APPEND-WRITE cycles:
+# read the file, add one entry, write the whole file back. Two concurrent
+# /learn calls (the console is a process, the chat service is another) could
+# therefore each read the same bytes, and the second write would erase the
+# first entry — a real data loss, not a theoretical one.
+#
+# The fix is the POSIX flock mutation lock this project already uses for the
+# tombstone ledger (mycore/memforget.py) and the fleet ledger (mycore/
+# fleet.py): a regular-file check, a BOUNDED wait and a fail-closed result
+# when the lock cannot be taken (including on a host without fcntl).
+#
+# WHERE THE LOCK FILE LIVES: <state>/evolution/<digest>.lock — the per-profile
+# STATE root (AIDOG_MC_STATE > profiles/<name>/state > data/mycore_service),
+# and NEVER the body root. The learned slot's own directory (overlay/memory)
+# is a TRACKED directory and the publish manifest allows overlay/**, so a lock
+# file there would leave an untracked file in the shipped tree and could
+# reach the public export. The state root is runtime-only (gitignored:
+# data/ and profiles/). The lock file name carries a digest of the target
+# path, so two artifacts never block each other while every writer of the
+# SAME file opens the SAME lock inode.
+LOCK_DIR_NAME = "evolution"
+LOCK_WAIT = 0.25            # seconds before dropping a contended write
+LOCK_RETRY = 0.005
+
+
+class EvolutionLockError(OSError):
+    """The mutation lock could not be taken. The message is a reason WORD
+    only — never a path, a credential or the learned text.
+
+    It derives from OSError on purpose: the existing `except OSError`
+    handlers (the service's reflect leg, the console's reflect leg) then
+    degrade to "the artifact was not written" instead of crashing the
+    caller."""
+
+
+def lock_dir(repo: Path = REPO) -> Path:
+    """The runtime directory that holds the evolution mutation locks."""
+    return pp.state_dir(Path(repo)) / LOCK_DIR_NAME
+
+
+def lock_path_for(target: Path | str, repo: Path = REPO) -> Path:
+    """The lock file that guards ONE artifact file.
+
+    The name carries a digest of the resolved target path: the same file
+    always maps to the same lock inode (every writer locks the same file),
+    two different files never block each other."""
+    try:
+        key = str(Path(target).resolve())
+    except (OSError, ValueError):
+        key = str(Path(target).absolute())
+    digest = hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()[:12]
+    return lock_dir(repo) / f"{digest}.lock"
+
+
+def _open_nonblocking(path: str, flags: int) -> int:
+    # Opening a non-regular path must not bypass the bounded lock wait.
+    return os.open(path, flags | os.O_NONBLOCK | os.O_NOFOLLOW, 0o666)
+
+
+@contextmanager
+def _mutation_lock(target: Path | str, repo: Path = REPO):
+    """Serialize the writers of ONE artifact across processes.
+
+    The pattern is the one the tombstone ledger and the fleet ledger use: a
+    regular-file check, a BOUNDED wait (LOCK_WAIT) and a fail-closed result
+    when the lock cannot be taken. The lock file stays in place so every
+    process locks the same inode; closing the handle (including on process
+    exit) releases the lock."""
+    if fcntl is None:
+        raise EvolutionLockError("this host has no POSIX flock")
+    path = lock_path_for(target, repo)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        handle = open(path, "a+b", opener=_open_nonblocking)
+    except OSError as exc:
+        raise EvolutionLockError(
+            f"the evolution lock is not usable: {type(exc).__name__}")
+    try:
+        if not stat.S_ISREG(os.fstat(handle.fileno()).st_mode):
+            raise EvolutionLockError("the evolution lock is not a regular file")
+        deadline = time.monotonic() + LOCK_WAIT
+        while True:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except OSError as exc:
+                remaining = deadline - time.monotonic()
+                if (remaining <= 0 or exc.errno not in
+                        (errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK)):
+                    raise EvolutionLockError(
+                        "another writer holds the evolution lock")
+                time.sleep(min(LOCK_RETRY, remaining))
+        yield
+    finally:
+        try:
+            handle.close()
+        except OSError:
+            pass
+
+
 # ------------------------------------------------------------ settings -----
 def validate_evolution_settings(doc) -> tuple[dict, list[str]]:
     """Strict validation for the settings `evolution` partition (all-or-
@@ -343,7 +459,12 @@ def learn_skill(name: str, description: str, body: str, *,
     except OSError:
         return LearnResult(ok=False, path=None, errors=["io"])
     md = target / "SKILL.md"
-    append_log("learn.skill", rel(md, repo), now=now, repo=repo)
+    try:
+        append_log("learn.skill", rel(md, repo), now=now, repo=repo)
+    except EvolutionLockError as exc:
+        # The skill IS on disk; only the institutional log line is missing.
+        return LearnResult(ok=True, path=md, prescreen=notes + [
+            f"the evolution log line was not appended: {exc}"])
     return LearnResult(ok=True, path=md, errors=[], prescreen=notes)
 
 
@@ -357,7 +478,14 @@ def learn_memory(text: str, *, now: float | None = None,
 
     A source that was SUPPRESSED is refused before anything is written and
     the refusal is reported (D5) — a forgotten source must not come back
-    under a new admission."""
+    under a new admission.
+
+    The dedupe check and the append are ONE critical section under the
+    cross-process mutation lock: two concurrent /learn calls can no longer
+    erase each other's entry (each would read the same bytes and the second
+    write would win). A lock that cannot be taken is reported HONESTLY
+    (errors=["io"], nothing written) — the learn never fails silently and
+    never half-writes."""
     text = (text or "").strip()
     errs = lint_memory(text)
     if errs:
@@ -370,30 +498,45 @@ def learn_memory(text: str, *, now: float | None = None,
     bnow = _bnow(now if now is not None else time.time())
     target = learned_memory_path(repo)
     try:
-        existing = target.read_text(encoding="utf-8")
-    except OSError:
-        existing = ""
-    if text in existing:
-        return LearnResult(ok=True, path=target,
-                           prescreen=["already learned (identical entry present)"])
-    block = "\n- " + "\n  ".join(text.splitlines()) + "\n\n"
+        with _mutation_lock(target, repo):
+            try:
+                existing = target.read_text(encoding="utf-8")
+            except OSError:
+                existing = ""
+            if text in existing:
+                return LearnResult(ok=True, path=target,
+                                   prescreen=["already learned (identical "
+                                              "entry present)"])
+            block = "\n- " + "\n  ".join(text.splitlines()) + "\n\n"
+            try:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                entry_head = f"## {bnow.date().isoformat()} (learn)\n"
+                if existing:
+                    data = existing if existing.endswith("\n") else existing + "\n"
+                    target.write_text(data + entry_head + block, encoding="utf-8")
+                else:
+                    header = ("# LEARNED MEMORY — entries accepted by the evolution "
+                              "lint gate (append-only; assembled after the curated "
+                              "slots)\n")
+                    target.write_text(header + "\n" + entry_head + block,
+                                      encoding="utf-8")
+            except OSError:
+                return LearnResult(ok=False, path=None, errors=["io"])
+    except EvolutionLockError as exc:
+        return LearnResult(ok=False, path=None, errors=["io"],
+                           prescreen=[f"the learned-memory lock is "
+                                      f"unavailable: {exc}"])
     try:
-        target.parent.mkdir(parents=True, exist_ok=True)
-        entry_head = f"## {bnow.date().isoformat()} (learn)\n"
-        if existing:
-            data = existing if existing.endswith("\n") else existing + "\n"
-            target.write_text(data + entry_head + block, encoding="utf-8")
-        else:
-            header = ("# LEARNED MEMORY — entries accepted by the evolution "
-                      "lint gate (append-only; assembled after the curated "
-                      "slots)\n")
-            target.write_text(header + "\n" + entry_head + block,
-                              encoding="utf-8")
-    except OSError:
-        return LearnResult(ok=False, path=None, errors=["io"])
-    append_log("learn.memory",
-               f"{rel(target, repo)} (+{len(text)} chars)",
-               now=now, repo=repo)
+        append_log("learn.memory",
+                   f"{rel(target, repo)} (+{len(text)} chars)",
+                   now=now, repo=repo)
+    except EvolutionLockError as exc:
+        # The entry IS on disk (the artifact exists); only the institutional
+        # log line is missing. Never fail the learn for another artifact's
+        # lock — say so instead.
+        return LearnResult(ok=True, path=target,
+                           prescreen=[f"the evolution log line was not "
+                                      f"appended: {exc}"])
     return LearnResult(ok=True, path=target)
 
 
@@ -401,19 +544,25 @@ def learn_memory(text: str, *, now: float | None = None,
 def append_log(kind: str, summary: str, *, now: float | None = None,
                repo: Path = REPO) -> Path:
     """Append one entry line to overlay/evolution/EVOLUTION.md (create on
-    first use). Summary must be single-line (whitespace is folded)."""
+    first use). Summary must be single-line (whitespace is folded).
+
+    The read-append-write runs under the same cross-process mutation lock,
+    so concurrent learners cannot lose a log line. A lock that cannot be
+    taken raises EvolutionLockError — the caller decides whether the
+    artifact it already wrote still counts."""
     ts = datetime.fromtimestamp(now if now is not None else time.time(),
                                 BEIJING).isoformat(timespec="seconds")
     line = f"## {ts} | {kind} | {' '.join(str(summary).split())}\n"
     path = log_path(repo)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        data = path.read_text(encoding="utf-8")
-    except OSError:
-        data = LOG_HEADER
-    if data and not data.endswith("\n"):
-        data += "\n"
-    path.write_text(data + line, encoding="utf-8")
+    with _mutation_lock(path, repo):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            data = path.read_text(encoding="utf-8")
+        except OSError:
+            data = LOG_HEADER
+        if data and not data.endswith("\n"):
+            data += "\n"
+        path.write_text(data + line, encoding="utf-8")
     return path
 
 

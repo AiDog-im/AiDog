@@ -16,7 +16,7 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2859%2F2859-brightgreen?style=flat-square" alt="core tests 2859/2859">
+  <img src="https://img.shields.io/badge/core_tests-2867%2F2867-brightgreen?style=flat-square" alt="core tests 2867/2867">
   <img src="https://img.shields.io/badge/console_smoke-610%2F610-brightgreen?style=flat-square" alt="console smoke 610/610">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
@@ -58,7 +58,7 @@ run locally, and its console listens on `127.0.0.1` only.) It is built around th
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **53 modules ≈ 32.3k LOC, 2,859 tests**, and zero upstream
+  stop reasons, **53 modules ≈ 32.4k LOC, 2,867 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -107,7 +107,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 53 modules, 2,859 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 53 modules, 2,867 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 37/37 |
@@ -242,7 +242,7 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2859/2859** |
+| `mycore` core suite | **2867/2867** |
 | Console smoke (live HTTP) | **610/610** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |
@@ -262,7 +262,7 @@ the marketing site ships its own **382-key** bilingual pack.
 ## Documentation
 
 - [`docs/installation.md`](docs/installation.md) — install, slots, wizard
-- [`docs/features/`](docs/features/) — **39 capability documents**, one per
+- [`docs/features/`](docs/features/) — **47 capability documents**, one per
   feature (channels, memory, cron, subagents, MCP, voice, desktop,
   profiles, tool toggles, …), each with its honest boundaries
 - [`docs/manual_verification.md`](docs/manual_verification.md) — manual
@@ -272,7 +272,7 @@ the marketing site ships its own **382-key** bilingual pack.
 - **[aidog.im](https://aidog.im)** — product site (bilingual, PWA,
   AI-readable `llms.txt`)
 
-**All 39 at a glance** (grouped, one line per group):
+**All 47 at a glance** (grouped, one line per group):
 
 - **Agent loop & tools** — [`acp`](docs/features/acp.md) (ACP v1 stdio server) · [`openai_api_server`](docs/features/openai_api_server.md) (OpenAI-compatible `/v1` gateway) · [`terminal_backends`](docs/features/terminal_backends.md) (7-backend `run_bash` matrix) · [`execute_code`](docs/features/execute_code.md) · [`subagents`](docs/features/subagents.md) · [`mcp`](docs/features/mcp.md) · [`tool_toggles`](docs/features/tool_toggles.md) · [`browser_automation`](docs/features/browser_automation.md) · [`model_failover`](docs/features/model_failover.md) · [`model_gateway`](docs/features/model_gateway.md) (structured endpoints, rotation, rate caps, self-metering) · [`missions`](docs/features/missions.md) (never-sleeps mission loop) · [`community_posting`](docs/features/community_posting.md) (in-app Discussions posting + slot verification)
 - **Knowledge & memory** — [`memory_and_routing`](docs/features/memory_and_routing.md) · [`checkpoints`](docs/features/checkpoints.md) · [`context_files`](docs/features/context_files.md) (project instruction files) · [`evolution_loop`](docs/features/evolution_loop.md) · [`connectors`](docs/features/connectors.md) (read-only Linear/Notion search)

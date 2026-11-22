@@ -25,6 +25,13 @@ Usage:
   python3 aidog_memory.py status   # budget report + provenance (no content echo)
 Exit codes: 0 ok · 1 source/target error · 2 budget exceeded.
 English comments per repo i18n policy.
+
+Memory suppression: every product-side copy this module writes (the two
+curated slots and the ARCHIVE copy of the external source) is filtered
+through the tombstone ledger (mycore/memforget.py) BEFORE it is written,
+so a source the owner suppressed cannot come back through a sync. The
+external source home keeps its original bytes — it is the owner's own
+copy, and only the product-side copy is filtered.
 """
 from __future__ import annotations
 
@@ -113,6 +120,132 @@ DST, DST_SOURCE = resolve_memory_home()
 BUDGETS = {"MEMORY.md": 2200, "USER.md": 1375}
 
 
+# ------------------------------------------------------- memory suppression --
+# The tombstone ledger (mycore/memforget.py) is the product's record of the
+# sources the owner suppressed. The portability paths write MEMORY bytes into
+# the product home, so they must honour the ledger: a suppressed source must
+# not come back through a sync or an import.
+#
+# D11 (a suppression never crosses stores) is kept: every file is filtered
+# with the channel of the STORE it belongs to, and the store of a file is its
+# name. The canonical store files are EVOLUTION_learned.md (learned),
+# MEMORY_curated.md (curated memory) and USER_curated.md (curated user); the
+# portability aliases name the SAME stores under their short names
+# (MEMORY.md / MEMORY_full.md are the MEMORY store, USER.md / USER_full.md are
+# the USER store). Everything else is the "other curated file" channel.
+
+
+def memforget_module():
+    """The tombstone-ledger module (mycore.memforget), or None.
+
+    Lazy on purpose: the deploy scripts stay import-safe and cheap, and a
+    copied deploy/ tree may have no kernel at all. None means "no
+    suppression available here" — never a crash, never a silent skip."""
+    root = str(REPO)
+    if root not in sys.path:
+        sys.path.insert(0, root)
+    try:
+        from mycore import memforget  # noqa: PLC0415 — sibling kernel package
+        return memforget
+    except Exception:  # noqa: BLE001 — the kernel may be absent or broken
+        pass
+    try:
+        import importlib.util  # noqa: PLC0415
+        path = REPO / "mycore" / "memforget.py"
+        spec = importlib.util.spec_from_file_location("aidog_memforget", path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module  # the dataclass decorator needs it
+        spec.loader.exec_module(module)
+        return module
+    except Exception:  # noqa: BLE001 — no ledger, no filtering, no crash
+        return None
+
+
+def store_channel(path, module=None):
+    """The admission channel of the store a memory file belongs to."""
+    mf = module if module is not None else memforget_module()
+    if mf is None:
+        return None
+    table = {
+        "EVOLUTION_learned.md": mf.CHANNEL_LEARNED,
+        "MEMORY_curated.md": mf.CHANNEL_CURATED_MEMORY,
+        "USER_curated.md": mf.CHANNEL_CURATED_USER,
+        "MEMORY.md": mf.CHANNEL_CURATED_MEMORY,
+        "MEMORY_full.md": mf.CHANNEL_CURATED_MEMORY,
+        "USER.md": mf.CHANNEL_CURATED_USER,
+        "USER_full.md": mf.CHANNEL_CURATED_USER,
+    }
+    return table.get(Path(path).name, mf.CHANNEL_CURATED_OTHER)
+
+
+def filter_store(path, text, tombstones):
+    """(filtered text, entries suppressed) for one memory store file.
+
+    With nothing suppressed the text comes back byte for byte — the normal
+    state before anything is forgotten. A section is dropped when the ledger
+    knows its source id, its content digest or its explicit marker."""
+    mf = memforget_module()
+    if mf is None or not tombstones or not text:
+        return text, 0
+    channel = store_channel(path, mf)
+    filtered = mf.filter_text(text, channel, tombstones=tombstones)
+    if filtered == text:
+        return text, 0
+    levels = (2, 2) if channel == mf.CHANNEL_LEARNED else (1, 6)
+    _, before = mf.split_sections(text, *levels)
+    _, after = mf.split_sections(filtered, *levels)
+    return filtered, max(0, len(before) - len(after))
+
+
+def copy_store(src, dst, tombstones):
+    """Copy one memory store file into the product, filtered by the ledger.
+
+    Nothing suppressed -> a plain byte-for-byte copy (metadata included).
+    Something suppressed -> the FILTERED text is written; the source file is
+    never edited (D7: derived stores are filtered, never edited).
+
+    -> entries suppressed. An unreadable source raises, exactly like the
+    plain copy it replaces."""
+    source, target = Path(src), Path(dst)
+    raw = source.read_bytes()
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        shutil.copy2(source, target)  # not utf-8: copy verbatim, never guess
+        return 0
+    filtered, dropped = filter_store(source, text, tombstones)
+    if not dropped:
+        shutil.copy2(source, target)
+        return 0
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(filtered, encoding="utf-8")
+    try:
+        shutil.copystat(source, target)
+    except OSError:
+        pass
+    return dropped
+
+
+def load_suppression():
+    """(tombstone set, note) for the active profile.
+
+    An empty set is the normal state — nothing was forgotten. When the
+    ledger cannot be loaded the note says so plainly: a suppression must
+    never fail a sync or an import, and it must never fail silently
+    either."""
+    mf = memforget_module()
+    if mf is None:
+        return None, ("suppression unavailable: the tombstone ledger could "
+                      "not be loaded here — nothing was filtered")
+    try:
+        return mf.load_set(), ""
+    except Exception:  # noqa: BLE001 — a broken ledger never fails a sync
+        return None, ("suppression unavailable: the tombstone ledger could "
+                      "not be read here — nothing was filtered")
+
+
 def sync() -> int:
     if not str(SRC) or not (SRC / "MEMORY.md").is_file():
         print("memory source not configured — create deploy/memory_sources.local "
@@ -126,14 +259,25 @@ def sync() -> int:
         print(f"cannot create memory home {DST}: {type(e).__name__}")
         return 1
     (DST / "ARCHIVE" / "daily").mkdir(parents=True, exist_ok=True)
-    shutil.copy2(SRC / "MEMORY.md", DST / "ARCHIVE" / "MEMORY_full.md")
+    # Memory suppression: every PRODUCT-side copy is filtered through the
+    # tombstone ledger before it is written, so a suppressed source cannot
+    # come back through a sync. The external source home keeps its original
+    # bytes — it is the owner's own copy, and it is never edited here.
+    tombstones, note = load_suppression()
+    dropped = 0
+    dropped += copy_store(SRC / "MEMORY.md", DST / "ARCHIVE" / "MEMORY_full.md",
+                          tombstones)
     if (SRC / "daily").is_dir():
-        for f in (SRC / "daily").glob("*.md"):
-            shutil.copy2(f, DST / "ARCHIVE" / "daily" / f.name)
+        for f in sorted((SRC / "daily").glob("*.md")):
+            dropped += copy_store(f, DST / "ARCHIVE" / "daily" / f.name,
+                                  tombstones)
     if (PERSONA / "profile.md").is_file():
+        # persona is not a memory store: the ledger has no channel for it
         shutil.copy2(PERSONA / "profile.md", DST / "ARCHIVE" / "USER_full.md")
-    shutil.copy2(REPO / "overlay/memory/MEMORY_curated.md", DST / "MEMORY.md")
-    shutil.copy2(REPO / "overlay/memory/USER_curated.md", DST / "USER.md")
+    dropped += copy_store(REPO / "overlay/memory/MEMORY_curated.md",
+                          DST / "MEMORY.md", tombstones)
+    dropped += copy_store(REPO / "overlay/memory/USER_curated.md",
+                          DST / "USER.md", tombstones)
     (DST / "SNAPSHOT_INFO.md").write_text(
         "# Snapshot provenance\n"
         f"- Source: pi-side project memory (authoritative, one-way snapshot)\n"
@@ -141,6 +285,10 @@ def sync() -> int:
         f"- Refresh: python3 {REPO}/deploy/aidog_memory.py sync\n"
         f"- Synced (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
     )
+    print(f"suppression: {dropped} entr(ies) suppressed by the tombstone "
+          "ledger (nothing deleted)")
+    if note:
+        print(f"note: {note}")
     print("sync ok")
     return status()
 

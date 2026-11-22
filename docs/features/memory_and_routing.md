@@ -139,6 +139,36 @@ against the survey/spec before widening the surface.
       per `tmp/e2e_frontend_coverage.py` `L1` — see
       [frontend_coverage.md](frontend_coverage.md))
 
+## 4. Memory suppression — the tombstone ledger (stage 1, v0.5.103)
+
+Memory now has a **suppression** path, shipped as stage 1 in v0.5.103:
+`mycore/memforget.py` keeps a per-profile ledger of opaque source ids
+(`<state>/memforget/tombstones.jsonl`, one JSON object per line: `id`,
+`channel`, `scope`, `digest`, `ts` — no content, no path, no credential).
+
+- A source id is `src_<32 hex>` = sha256(profile scope ‖ admission channel ‖
+  content digest): **opaque and deterministic**, so re-admitting the same
+  content maps to the same id and a forgotten source stays forgotten.
+- **Three filtering points**: admission (a tombstoned source is refused and
+  the refusal is reported), read (prompt injection, the console memory view
+  and the owner profile) and restore (a restored slot is filtered before it
+  is written).
+- The set **travels with backups**: a payload carries `tombstones` next to
+  the memory section, so a restore on another machine cannot silently
+  un-forget a source.
+- **Per store**: the admission channel is part of the id, so forgetting the
+  learned copy does not silence the curated copy — the owner forgets each
+  store separately.
+- **Nothing is deleted**: the original transcript, copies that already left
+  the machine, the public history and older backups stay untouched. Session
+  transcripts are out of this slice.
+- **No user-facing control yet** — the ledger and the filters ship first; the
+  console has no forget button by design.
+
+Full contract, CLI and evidence:
+[memory_suppression.md](memory_suppression.md) · design authority:
+[../design/memory_suppression_design.md](../design/memory_suppression_design.md).
+
 ## Cross-machine portability (P4, 2026-10-18)
 
 Product rule: the memory sync source must be **self-contained** (a fresh machine

@@ -573,7 +573,11 @@ MYCORE_WD_LOG = REPO / "data" / "mycore_watchdog.log"
 MYCORE_WD_STATE = REPO / "deploy" / "watchdog.mycore.local.state.json"
 MYCORE_WD_PROC = r"python3 -m mycore\.watchdog"
 MYCORE_WD_FRESH_SEC = 300          # state file must be younger than 5 min
-SERVICE_LINE_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+([A-Za-z]+)\b")
+# The event name may contain UNDERSCORES (POLL_RECOVER, POLL_ERR, ...). A
+# trailing \b after [A-Za-z]+ never matches an underscore (it is a word
+# character), which left the panel's last event empty for the most common
+# events. The name is matched as a whole token instead.
+SERVICE_LINE_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+([A-Za-z][A-Za-z0-9_]*)")
 SERVICE_EVENT_LEVEL = {"ABORT": "urgent", "ERROR": "urgent", "CRITICAL": "urgent",
                        "WARN": "warn", "WARNING": "warn",
                        "FLEET": "info"}
@@ -1243,6 +1247,93 @@ def backup_apply_settings(doc: dict) -> dict:
     return {"applied": True, "changed": sorted(clean), "persisted": persisted}
 
 
+def _memory_entry_levels(channel: str) -> tuple[int, int]:
+    """The heading levels that delimit one stored entry of a memory slot.
+
+    Mirrors the rule mycore.memforget applies when it drops a suppressed
+    entry: the learned slot is written as "## <date> (learn)" entries (level
+    2 only), a curated file is human-authored and may nest headings (levels
+    1-6). The suppression COUNTS below must name the SAME entries the filter
+    drops, so the rule is stated once, here, next to the counting."""
+    return (2, 2) if channel == memforget.CHANNEL_LEARNED else (1, 6)
+
+
+def _suppressed_entry_counts(path: Path, text: str, kept: str,
+                             local: memforget.TombstoneSet,
+                             incoming: memforget.TombstoneSet,
+                             effective: memforget.TombstoneSet) -> tuple[int, int, int, bool]:
+    """How many stored entries each suppression set removes from one slot.
+
+    Returns (by the LOCAL ledger, by the TRAVELLING set, merged, exact).
+    The merged count is the number of DISTINCT entries filtered, so it can
+    be lower than the sum of the two sets when both match the same entry.
+    Counts only — never an id, an excerpt, a path or a credential.
+
+    `exact` says whether the merged count reconciles with the filter's own
+    output (`kept` is what the filter wrote). It is False only when the
+    stored file nests headings in a way this build does not count the same
+    way the filter does; the caller then says so instead of reporting a
+    number it cannot back up."""
+    if not text:
+        return (0, 0, 0, True)
+    channel = memforget.channel_for_path(path)
+    min_level, max_level = _memory_entry_levels(channel)
+    _, chunks = memforget.split_sections(text, min_level, max_level)
+    _, kept_chunks = memforget.split_sections(kept, min_level, max_level)
+    by_local = 0
+    by_travelling = 0
+    by_merged = 0
+    for chunk in chunks:
+        body = chunk["body"]
+        if effective.contains_section(channel, body):
+            by_merged += 1
+        if local.contains_section(channel, body):
+            by_local += 1
+        if incoming.contains_section(channel, body):
+            by_travelling += 1
+    dropped = len(chunks) - len(kept_chunks)
+    return (by_local, by_travelling, by_merged, dropped == by_merged)
+
+
+def _count_phrase(count: int) -> str:
+    """A plain count of entries ("1 entry" / "0 entries")."""
+    return f"{count} entry" if count == 1 else f"{count} entries"
+
+
+def _suppression_note(applied: bool, local_hits: int, travelling_hits: int,
+                      merged_hits: int) -> str:
+    """One plain-English line about the suppression a restore applied.
+
+    The line is a STATEMENT, never a promise: with no set in force it says
+    so outright, so a restore that silently dropped nothing is never read
+    as a clean restore."""
+    if not applied:
+        return ("no suppression set applied. The backup carried no suppression "
+                "set and this profile's suppression ledger is empty, so "
+                "nothing could be filtered.")
+    if merged_hits == 0:
+        return ("suppression applied, but no restored entry matched it, so "
+                "nothing was filtered.")
+    return (f"suppression applied. {_count_phrase(merged_hits)} filtered in "
+            f"total: {_count_phrase(local_hits)} by this profile's ledger, "
+            f"{_count_phrase(travelling_hits)} by the set that travelled with "
+            f"the backup.")
+
+
+def _cross_machine_warning() -> str:
+    """The honest cross-machine limit, in one line the operator can act on.
+
+    A restore into a profile with an EMPTY ledger, from a payload that
+    carries NO suppression set, cannot know about a suppression made
+    elsewhere — the set that travels with a backup did not exist yet when
+    the backup was taken. The product states that limit instead of
+    pretending the restore was clean."""
+    return ("the restored memory was not filtered. This backup carried no "
+            "suppression set and this profile's suppression ledger is empty, "
+            "so a source forgotten elsewhere could not be kept out. Export a "
+            "new backup after a forget, so the suppression travels with it.")
+
+
 def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
     """Write the three fixed memory slots (never an arbitrary path), each
     capped and written atomically; a refusal is reported per file and the
@@ -1253,14 +1344,30 @@ def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
     A restore therefore cannot reintroduce a forgotten source, and the
     travelling set is merged into the local ledger so the suppression
     outlives the restore. With no tombstones the filter is the identity
-    and the written bytes are exactly the payload's bytes."""
+    and the written bytes are exactly the payload's bytes.
+
+    The response says what the suppression ACTUALLY did (D17): how many
+    entries the local ledger filtered, how many the travelling set
+    filtered, how many entries were filtered in total, whether any set was
+    in force at all, and the honest cross-machine limit when neither a
+    travelling set nor a local ledger was there to filter with (D18).
+    Counts and plain words only — never an id, an excerpt, a path or a
+    credential. The keys are ADDITIVE, so an older reader of this response
+    keeps working unchanged."""
     paths = backup_memory_paths()
+    unreadable_set = tombstones is not None and not isinstance(tombstones, list)
     incoming = memforget.TombstoneSet.from_rows(
-        row for row in (tombstones or []) if isinstance(row, dict))
-    effective = memforget.load_set().merged(incoming)
+        row for row in (tombstones if isinstance(tombstones, list) else [])
+        if isinstance(row, dict))
+    local = memforget.load_set()
+    effective = local.merged(incoming)
     files: list[str] = []
     failed: list[dict] = []
     total = 0
+    filtered_local = 0
+    filtered_travelling = 0
+    filtered_merged = 0
+    counts_exact = True
     for name, text in doc.items():
         path = paths.get(name) if isinstance(name, str) else None
         if path is None:
@@ -1275,8 +1382,10 @@ def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
             failed.append({"name": name,
                            "reason": f"over the {BACKUP_MEMORY_MAX_BYTES} byte cap"})
             continue
-        data = memforget.filter_slot(path, text,
-                                      tombstones=effective).encode("utf-8")
+        kept_text = memforget.filter_slot(path, text, tombstones=effective)
+        counts = _suppressed_entry_counts(path, text, kept_text, local,
+                                          incoming, effective)
+        data = kept_text.encode("utf-8")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             _atomic_write(path, data, chmod=0o644)
@@ -1286,6 +1395,10 @@ def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
             continue
         files.append(name)
         total += len(data)
+        filtered_local += counts[0]
+        filtered_travelling += counts[1]
+        filtered_merged += counts[2]
+        counts_exact = counts_exact and counts[3]
     tombstone_result = None
     if incoming:
         try:
@@ -1297,10 +1410,39 @@ def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
                            "reason": "persist failed: MemforgetError"})
     sys.stderr.write(f"backup restore memory files={len(files)} "
                      f"bytes={total} failed={len(failed)} "
-                     f"tombstones={(tombstone_result or {}).get('imported', 0)}\n")
+                     f"tombstones={(tombstone_result or {}).get('imported', 0)} "
+                     f"filtered_local={filtered_local} "
+                     f"filtered_travelling={filtered_travelling} "
+                     f"filtered_merged={filtered_merged} "
+                     f"counts_exact={counts_exact}\n")
     out = {"files": files, "bytes": total, "failed": failed}
     if tombstone_result is not None:
         out["tombstones"] = tombstone_result
+    warnings: list[str] = []
+    if unreadable_set:
+        warnings.append("the backup carried a suppression set this product "
+                        "could not read, so none of it was applied.")
+    if not counts_exact:
+        warnings.append("the filtered count could not be reconciled with the "
+                        "filter's own output (the stored file nests headings "
+                        "in a way this build counts differently) — treat the "
+                        "filtered count as a floor, not a total.")
+    if files and not effective:
+        # Nothing was in force to filter with: the payload carried no set
+        # and this profile's ledger is empty (D18).
+        warnings.append(_cross_machine_warning())
+    out["suppression"] = {
+        "applied": bool(effective),
+        "filtered_local": filtered_local,
+        "filtered_travelling": filtered_travelling,
+        "filtered_merged": filtered_merged,
+        "counts_exact": counts_exact,
+        "local_set_size": len(local.ids),
+        "travelling_set_size": len(incoming.ids),
+        "note": _suppression_note(bool(effective), filtered_local,
+                                  filtered_travelling, filtered_merged),
+    }
+    out["warnings"] = warnings
     return out
 
 

@@ -38,6 +38,16 @@ Import hardening: sidecar sha256 (when present) + per-file sha256 against
 manifest.json + tar-slip defense (no absolute paths, no '..', no links);
 nothing is extracted until every check passes.
 
+Memory suppression: the PRODUCT-side copy of the imported memory section
+is filtered through the tombstone ledger (mycore/memforget.py) before it is
+written, and the tombstone set travels with an exported bundle (manifest
+key "tombstones") and is merged into the local ledger on import — so an
+import can neither reintroduce a source the owner suppressed nor lose the
+suppression afterwards. The EXTERNAL source home keeps the original bytes:
+it is the owner's own copy, and the import says so in its output. Nothing
+is ever deleted by a suppression. A suppression failure never fails an
+import.
+
 Exit codes: 0 ok · 1 source/verification/config error · 3 credential gate refusal.
 English output per repo i18n policy; secrets are never printed (labels only).
 """
@@ -329,18 +339,89 @@ def _open_bundle(tar_path: Path) -> tuple[dict, dict[str, bytes]]:
     return manifest, payload
 
 
-def _extract(payload: dict[str, bytes], prefix: str, root: Path) -> int:
-    """Write all payload files under prefix into root (safe relative joins)."""
+def _extract(payload: dict[str, bytes], prefix: str, root: Path,
+             filterer=None) -> tuple[int, int]:
+    """Write all payload files under prefix into root (safe relative joins).
+
+    `filterer` is an optional (rel, data) -> (data, suppressed) hook. The
+    PRODUCT-side copy of a memory store is filtered through the tombstone
+    ledger before it is written, so an import cannot reintroduce a source
+    the owner suppressed. The external source home is written WITHOUT the
+    filter: it keeps the original bytes — the owner's own copy — and the
+    import says so in its output.
+
+    -> (files written, entries suppressed)"""
     n = 0
+    dropped = 0
     for path in sorted(payload):
         if not path.startswith(prefix):
             continue
         rel = PurePosixPath(path[len(prefix):])
         target = root.joinpath(*rel.parts)
         target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(payload[path])
+        data = payload[path]
+        if filterer is not None:
+            data, hit = filterer(path, data)
+            dropped += hit
+        target.write_bytes(data)
         n += 1
-    return n
+    return n, dropped
+
+
+# ---------------------------------------------------------------------------
+# memory suppression (the tombstone ledger travels with the bundle, D6)
+# ---------------------------------------------------------------------------
+
+def _tombstone_rows() -> tuple[list[dict], str]:
+    """The active profile's tombstone rows — the set travels with the bundle
+    (D6, exactly like the console backup payload).
+
+    Only ids, channels, scopes, digests and timestamps: no content, no path,
+    no credential. An empty list when nothing was forgotten."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    try:
+        import aidog_memory as jm  # noqa: PLC0415 — sibling module, same deploy/ dir
+        mf = jm.memforget_module()
+        if mf is None:
+            return [], ("the tombstone set could not be attached to the bundle "
+                        "(the suppression ledger is not loadable here)")
+        return mf.load_rows(), ""
+    except Exception:  # noqa: BLE001 — a missing ledger never fails an export
+        return [], ("the tombstone set could not be attached to the bundle "
+                    "(the suppression ledger is not loadable here)")
+
+
+def _suppression_context(manifest: dict):
+    """(effective set, note, merge report) for one import.
+
+    The effective set is the LOCAL ledger plus the set that travelled with
+    the bundle (D6) — a restore on another machine keeps the suppression.
+    A failure here NEVER fails the import: the note says what happened."""
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import aidog_memory as jm  # noqa: PLC0415 — sibling module, same deploy/ dir
+    mf = jm.memforget_module()
+    if mf is None:
+        return None, ("suppression unavailable: the tombstone ledger could "
+                      "not be loaded here — nothing was filtered"), {}
+    local, note = jm.load_suppression()
+    if local is None:
+        return None, note, {}
+    rows = manifest.get("tombstones")
+    incoming = mf.TombstoneSet.from_rows(
+        row for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict))
+    effective = local.merged(incoming)
+    report: dict = {}
+    if incoming:
+        try:
+            report = mf.import_rows(incoming.rows)
+        except Exception as exc:  # noqa: BLE001 — a merge failure never fails an import
+            report = {"imported": 0, "skipped": 0, "error": type(exc).__name__}
+    return effective, note, report
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +484,14 @@ def cmd_export(args: argparse.Namespace) -> int:
                   for rel, data in ((r, blobs[r]) for r in sorted(blobs))],
         "totals": {"files": len(blobs), "bytes": sum(len(d) for d in blobs.values())},
     }
+    # D6: the tombstone set travels WITH the bundle, so an import on another
+    # machine keeps the suppression instead of silently un-forgetting a
+    # source. It is omitted when nothing was forgotten — the manifest stays
+    # the shape it always had. The rows carry ids, channels, scopes, digests
+    # and timestamps only: no content, no path, no credential.
+    rows, tomb_note = _tombstone_rows()
+    if rows:
+        manifest["tombstones"] = rows
     out_dir = Path(args.out).expanduser() if args.out else DEFAULT_OUT
     try:
         out_dir.mkdir(parents=True, exist_ok=True)
@@ -430,6 +519,10 @@ def cmd_export(args: argparse.Namespace) -> int:
     print(f"  files: {manifest['totals']['files']} (memory: {n_mem}, persona: {n_per}) "
           f"· bytes: {manifest['totals']['bytes']} · source: {kind}")
     print(f"  sidecar: {name}.sha256")
+    if rows:
+        print(f"  tombstones: {len(rows)} suppression(s) travel with the bundle")
+    if tomb_note:
+        print(f"  note: {tomb_note}")
     return 0
 
 
@@ -463,10 +556,43 @@ def cmd_import(args: argparse.Namespace) -> int:
                    else Path(os.path.expanduser("~/.aidog/memory")))
     persona_home = _resolve_persona_home(args.persona_home)
 
-    n_mem = _extract(payload, "memory/", memories)
-    n_per = _extract(payload, "persona/", persona_home)
-    n_src = _extract(payload, "memory/", source_home)
+    # Memory suppression (D5 + D6): the PRODUCT-side copy of the memory
+    # section is filtered through the tombstone ledger (the local one plus
+    # the set that travelled with the bundle) BEFORE it is written, so an
+    # import cannot reintroduce a source the owner suppressed. The external
+    # source home is written with the ORIGINAL bytes — it is the owner's own
+    # copy — and the output says so plainly.
+    effective, note, merged = _suppression_context(manifest)
+
+    here = str(Path(__file__).resolve().parent)
+    if here not in sys.path:
+        sys.path.insert(0, here)
+    import aidog_memory as jm  # noqa: PLC0415 — sibling module, same deploy/ dir
+
+    def _product_filter(rel: str, data: bytes) -> tuple[bytes, int]:
+        if effective is None or not effective:
+            return data, 0
+        try:
+            text = data.decode("utf-8")
+        except UnicodeDecodeError:
+            return data, 0        # not utf-8: copied verbatim, never guessed
+        filtered, dropped = jm.filter_store(rel, text, effective)
+        return filtered.encode("utf-8"), dropped
+
+    n_mem, dropped = _extract(payload, "memory/", memories, filterer=_product_filter)
+    n_per, _ = _extract(payload, "persona/", persona_home)
+    n_src, _ = _extract(payload, "memory/", source_home)
     print(f"restored: {n_mem} memory file(s) -> {memories} (home={home_label})")
+    print(f"suppression: {dropped} entr(ies) suppressed by the tombstone ledger "
+          "(nothing deleted)")
+    if note:
+        print(f"note: {note}")
+    if merged.get("imported"):
+        print(f"tombstones merged: {merged['imported']} (the bundle's set now "
+              "lives in the local ledger)")
+    if merged.get("error"):
+        print(f"note: the traveling tombstone set could not be merged "
+              f"({merged['error']}) — the local ledger still filters the import")
     if n_per:
         print(f"restored: {n_per} persona file(s) -> {persona_home}")
         legacy = _legacy_persona_home()
@@ -474,6 +600,8 @@ def cmd_import(args: argparse.Namespace) -> int:
             print(f"note: persona home is legacy — migrate with: "
                   f"mv {legacy} ~/.aidog/persona")
     print(f"source home: {n_src} file(s) -> {source_home} (self-contained)")
+    print("note: the source home keeps the ORIGINAL bytes — only the "
+          "product-side copy is filtered by the tombstone ledger")
 
     _configure_local(source_home, persona_home)
     budget = _budget_report(memories)

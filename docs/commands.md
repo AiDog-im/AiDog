@@ -148,6 +148,6 @@ Full install guide: [`docs/installation.md`](installation.md).
 
 ---
 
-**37 capability documents** — one honest doc per feature (what it does and
+**47 capability documents** — one honest doc per feature (what it does and
 where its boundaries are):
 https://github.com/AiDog-im/AiDog/tree/main/docs/features

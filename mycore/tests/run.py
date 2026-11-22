@@ -3339,6 +3339,210 @@ def test_evolution() -> None:
               kinds.count("learn.memory") >= 1 and kinds[-1] == "learn.memory")
 
 
+def test_evolution_lock() -> None:
+    """The learned-memory write path is serialized ACROSS PROCESSES.
+
+    Regression for a real data loss: learn_memory() read the slot, appended
+    one entry and wrote the whole file back, so two concurrent /learn calls
+    (the console and the chat service are separate processes) each read the
+    same bytes and the second write erased the first entry.
+
+    Proves: (1) six concurrent learners from separate processes lose no
+    entry and no log line, (2) a single learn is byte-identical to the
+    previous format (same header, same bytes, same log line), (3) the lock
+    failure path is honest (bounded wait, an honest LearnResult error,
+    nothing written, nothing logged).
+    """
+    import subprocess
+    import time as _time
+    from datetime import datetime, timedelta, timezone
+    from mycore import evolution as ev
+
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        repo = root / "repo"
+        repo.mkdir(parents=True)
+        state = root / "state"
+        state.mkdir(parents=True)
+        saved_state = os.environ.get("AIDOG_MC_STATE")
+        os.environ["AIDOG_MC_STATE"] = str(state)
+        try:
+            NOW = datetime(2026, 10, 20, 22, 0,
+                           tzinfo=timezone(timedelta(hours=8))).timestamp()
+            lesson = "When a deploy fails, check the watchdog state first."
+            learned = repo / "overlay" / "memory" / "EVOLUTION_learned.md"
+            log = repo / "overlay" / "evolution" / "EVOLUTION.md"
+
+            # --- (1) a single learn is byte-identical to the old format ---
+            res = ev.learn_memory(lesson, now=NOW, repo=repo)
+            expected = ("# LEARNED MEMORY — entries accepted by the evolution "
+                        "lint gate (append-only; assembled after the curated "
+                        "slots)\n"
+                        "\n"
+                        "## 2026-10-20 (learn)\n"
+                        "\n- " + lesson + "\n\n")
+            body = learned.read_text(encoding="utf-8")
+            check("evolution: a single learn is byte-identical to the "
+                  "previous format",
+                  res.ok and body == expected, repr(body)[:240])
+            expected_log = ("# EVOLUTION — institutional self-evolution log\n"
+                            "<!-- append-only; format: ## <iso8601+08:00> | "
+                            "<kind> | <summary> -->\n\n"
+                            "## 2026-10-20T22:00:00+08:00 | learn.memory | "
+                            "overlay/memory/EVOLUTION_learned.md "
+                            "(+52 chars)\n")
+            log_body = log.read_text(encoding="utf-8")
+            check("evolution: the learn log line is unchanged",
+                  log_body == expected_log, repr(log_body)[:240])
+
+            # --- (2) the lock lives in the runtime state root, not in the
+            # tracked body tree (no stray file in a tracked directory) ---
+            locks = sorted(state.rglob("*.lock"))
+            check("evolution: the mutation lock lives in the state root",
+                  bool(locks) and not list(repo.rglob("*.lock"))
+                  and all(str(state) in str(p) for p in locks),
+                  str([str(p) for p in locks])[:200])
+
+            # --- (3) concurrent learners from separate processes ---
+            racer = """
+import os, sys, time
+sys.path.insert(0, %r)
+os.environ["AIDOG_MC_STATE"] = sys.argv[1]
+from mycore import evolution as ev
+repo = sys.argv[2]
+text = sys.argv[3]
+barrier = sys.argv[5]
+open(os.path.join(barrier, "ready-" + sys.argv[4]), "w").close()
+deadline = time.monotonic() + 20
+while not os.path.exists(os.path.join(barrier, "go")):
+    if time.monotonic() >= deadline:
+        raise TimeoutError("start barrier")
+    time.sleep(0.005)
+res = ev.learn_memory(text, now=1761000000.0, repo=repo)
+print("OK" if res.ok else "NO " + ",".join(res.errors))
+"""
+            code = racer % str(REPO)
+
+            def run_race(count: int, target_repo: Path, barrier: Path,
+                         text_of) -> list[str]:
+                """Start `count` separate processes, release them together
+                at the barrier, return what each printed."""
+                barrier.mkdir(parents=True, exist_ok=True)
+                procs = [subprocess.Popen(
+                    [sys.executable, "-c", code, str(state), str(target_repo),
+                     text_of(i), str(i), str(barrier)],
+                    cwd=str(REPO), stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE, text=True) for i in range(count)]
+                deadline = _time.monotonic() + 30
+                while len(list(barrier.glob("ready-*"))) != len(procs):
+                    if any(p.poll() is not None for p in procs):
+                        break
+                    if _time.monotonic() >= deadline:
+                        break
+                    _time.sleep(0.005)
+                (barrier / "go").touch()
+                outs = []
+                for proc in procs:
+                    stdout, stderr = proc.communicate(timeout=60)
+                    outs.append(stdout.strip()
+                                + ((" ERR " + stderr.strip()[-200:])
+                                   if proc.returncode else ""))
+                return outs
+
+            workers = 6
+            race_repo = root / "race"
+            race_repo.mkdir(parents=True, exist_ok=True)
+            outs = run_race(workers, race_repo, root / "barrier1",
+                            lambda i: "concurrent fact number %d" % i)
+            race_learned = (race_repo / "overlay" / "memory"
+                            / "EVOLUTION_learned.md")
+            race_body = (race_learned.read_text(encoding="utf-8")
+                         if race_learned.exists() else "")
+            missing = [i for i in range(workers)
+                       if "concurrent fact number %d" % i not in race_body]
+            headings = sum(1 for line in race_body.splitlines()
+                           if line.startswith("## "))
+            check("evolution: concurrent learners from separate processes "
+                  "lose no entry",
+                  all(o.startswith("OK") for o in outs) and not missing
+                  and headings == workers,
+                  str(outs)[:200] + str(missing)[:80] + " h=%d" % headings)
+            race_log = race_repo / "overlay" / "evolution" / "EVOLUTION.md"
+            race_log_body = (race_log.read_text(encoding="utf-8")
+                             if race_log.exists() else "")
+            check("evolution: concurrent learners lose no log line",
+                  race_log_body.count("| learn.memory |") == workers,
+                  str(race_log_body.count("| learn.memory |")))
+
+            # --- (4) the dedupe check runs INSIDE the lock ---
+            same_repo = root / "same"
+            same_repo.mkdir(parents=True, exist_ok=True)
+            outs = run_race(4, same_repo, root / "barrier2",
+                            lambda i: "the very same fact")
+            same_learned = (same_repo / "overlay" / "memory"
+                            / "EVOLUTION_learned.md")
+            same_body = (same_learned.read_text(encoding="utf-8")
+                         if same_learned.exists() else "")
+            same_log = same_repo / "overlay" / "evolution" / "EVOLUTION.md"
+            same_log_body = (same_log.read_text(encoding="utf-8")
+                             if same_log.exists() else "")
+            check("evolution: the dedupe check survives the concurrency",
+                  all(o.startswith("OK") for o in outs)
+                  and same_body.count("the very same fact") == 1
+                  and same_log_body.count("| learn.memory |") == 1,
+                  str(outs)[:160] + repr(same_body)[:120])
+
+            # --- (5) the lock failure path is honest ---
+            saved_fcntl = ev.fcntl
+            ev.fcntl = None
+            try:
+                res = ev.learn_memory("A fact that must never be written.",
+                                      now=NOW, repo=repo)
+            finally:
+                ev.fcntl = saved_fcntl
+            body = learned.read_text(encoding="utf-8")
+            check("evolution: a host without flock refuses the learn "
+                  "honestly",
+                  (not res.ok and res.errors == ["io"] and bool(res.prescreen)
+                   and "A fact that must never be written." not in body
+                   and log.read_text(encoding="utf-8") == expected_log),
+                  str(res)[:200])
+
+            try:
+                import fcntl as _fcntl
+            except ImportError:
+                _fcntl = None
+            if _fcntl is not None:
+                lock_file = ev.lock_path_for(learned, repo)
+                lock_file.parent.mkdir(parents=True, exist_ok=True)
+                handle = open(lock_file, "a+b")
+                _fcntl.flock(handle.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
+                t0 = _time.monotonic()
+                try:
+                    res = ev.learn_memory(
+                        "A second fact that must never be written.",
+                        now=NOW, repo=repo)
+                finally:
+                    elapsed = _time.monotonic() - t0
+                    _fcntl.flock(handle.fileno(), _fcntl.LOCK_UN)
+                    handle.close()
+                body = learned.read_text(encoding="utf-8")
+                check("evolution: a contended lock waits, then refuses "
+                      "honestly",
+                      (not res.ok and res.errors == ["io"]
+                       and bool(res.prescreen)
+                       and 0.15 <= elapsed < 5.0
+                       and "A second fact that must never be written."
+                       not in body
+                       and log.read_text(encoding="utf-8") == expected_log),
+                      str(res)[:160] + " elapsed=%.3f" % elapsed)
+        finally:
+            if saved_state is None:
+                os.environ.pop("AIDOG_MC_STATE", None)
+            else:
+                os.environ["AIDOG_MC_STATE"] = saved_state
+
+
 def test_scheduler() -> None:
     """Phase B2 natural-language cron: spec grammar, due matrix, registry
     persistence, the `cron` tool, and the /cron service leg — all offline
@@ -22385,6 +22589,7 @@ def main() -> int:
         test_watchdog,
         test_service,
         test_evolution,
+        test_evolution_lock,
         test_scheduler,
         test_stream,
         test_loop_on_delta,

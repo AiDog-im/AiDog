@@ -17,7 +17,7 @@ file's *Implementation status (car 4c)* section.
 | # | Engine | Class | Status | Notes / source |
 |---|---|---|---|---|
 | 1 | **edge-tts** | free online service | ✅ **implemented — default engine** (`engine=edge`, default) | Python CLI wrapping the Edge online TTS service (pypi capture in the shortlist §B); SSML customization limited to a single `<voice>` + `<prosody>` tag; needs network (proxy honored from env) |
-| 2 | **BYOK OpenAI-compatible speech** (`/v1/audio/speech`) | operator's endpoint (free or paid — theirs) | ✅ **implemented** (`engine=byok`, opt-in per request or via settings) | our own leg: `POST {base}/audio/speech` `{model, voice, input}`; key = `TTS_API_KEY` → `MODEL_API_KEY`; loopback may run keyless, remote fail-closed |
+| 2 | **BYOK OpenAI-compatible speech** (`/v1/audio/speech`) | operator's endpoint (free or paid — theirs) | ✅ **implemented** (`engine=byok`, opt-in per request or via settings) | our own leg: `POST {base}/audio/speech` `{model, voice, input}`; key = `TTS_API_KEY` **only** (since v0.5.103 the chat endpoint and `MODEL_API_KEY` are never inherited); loopback may run keyless, remote fail-closed |
 | 3 | **Browser `speechSynthesis`** | local, zero-dependency | ✅ **implemented — client fallback** | the console `speak()` chain: `/api/say` fails → browser voice plays, state text says *which* voice spoke (never pretends the server spoke) |
 | 4 | ElevenLabs | commercial API | ❌ not introduced — **paid: budget approval required** | shortlist §B: credits are the unit of consumption, TTS costs one credit per character of input; quality claims *Not verified* |
 | 5 | Azure Speech TTS | commercial API | ❌ not introduced — **paid: budget approval required** | shortlist §B: official Learn docs captured, pricing *Not verified* in the capture; SSML-rich |
@@ -59,10 +59,18 @@ Upstream audio cap for byok: 5 MB; timeout 25 s.
 
 ## 3. BYOK speech configuration
 
+> **Corrected in v0.5.103.** The BYOK leg no longer inherits the chat
+> endpoint or the chat key. The chain below is the shipped one; the previous
+> "→ settings `mycore.base_url`" and "`TTS_API_KEY` → `MODEL_API_KEY`"
+> fallbacks are **gone**. The full lifecycle (single-flight, cooldown on
+> upstream errors, no retry, no relayed upstream body, browser notices on
+> on-device voices only) is documented in
+> [tts_request_lifecycle.md](tts_request_lifecycle.md).
+
 | Item | Source (first non-empty wins) |
 |---|---|
-| base URL | env `AIDOG_TTS_URL` → settings `media.tts_base_url` → settings `mycore.base_url` |
-| key | `TTS_API_KEY` → `MODEL_API_KEY` (values never echoed/logged/part of any reason) |
+| base URL | env `AIDOG_TTS_URL` → settings `media.tts_base_url` — **the chat endpoint is never inherited** |
+| key | slot `TTS_API_KEY` only — **the model key is never inherited** |
 | model | settings `media.tts_model` (≤64 chars, empty → engine default `tts-1`) |
 | voice | fixed `alloy` (both languages — single voice slot) |
 
@@ -96,7 +104,9 @@ no URL, no key (zero-credential promise, see [capabilities.md](capabilities.md))
   degradation code, `engine=bogus` → 400, `engine=byok` → real audio **or**
   a 503 carrying an `error` string (never a silent edge swap), plus the
   `media.tts_engine` settings-validation legs and the zero-credential
-  `media.tts` capability assertion.
+  `media.tts` capability assertion. **Since v0.5.103 the live synthesis leg
+  is opt-in**: it runs only with `AIDOG_SMOKE_LIVE_VOICE=edge|byok` and is
+  skipped otherwise — see [tts_request_lifecycle.md](tts_request_lifecycle.md).
 - **E2E** (`tmp/e2e_car4c.py`): `media.tts_base_url` pointed at a local mock
   `/audio/speech` answering ID3 audio → `POST /api/say engine=byok` →
   `200 audio/mpeg`, mock hit confirmed; settings snapshotted and restored
