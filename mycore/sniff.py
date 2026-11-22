@@ -52,6 +52,7 @@ from pathlib import Path
 from typing import Callable
 
 from lib import profile_paths as pp  # noqa: E402  (profile settings/state seam)
+from . import envslots  # noqa: E402  (E2: the one store reader)
 
 from . import mcp  # noqa: E402  (the bridge registry the mcp lane reads)
 from . import mission  # noqa: E402  (one quiet-hours grammar, cron parity)
@@ -178,7 +179,7 @@ def _slot(name: str) -> str:
     if val:
         return val
     try:
-        text = pp.secrets_path(REPO).read_text(encoding="utf-8")
+        text = envslots.secrets_text(pp.secrets_path(REPO))
     except OSError:
         return ""
     match = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", text)

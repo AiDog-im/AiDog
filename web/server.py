@@ -396,6 +396,7 @@ from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path sea
 from lib import skill_route  # noqa: E402  (car H §3.2: gallery roots follow the router's ladder)
 from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, ledger, mission, mcp, modeltier, security, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
+from mycore import secrets_store  # noqa: E402  (E2: secrets.env at-rest state)
 from mycore.assembly import (build_system_stack,  # noqa: E402
                               resolve_context_dirs, resolve_user_rules,
                               resolve_capability_path,
@@ -910,8 +911,20 @@ def fetch_text(url: str, timeout: float = 2.5) -> str | None:
 
 
 def read_env_slot(name: str) -> str | None:
-    """Own-line read of one slot from secrets.env — the value is never logged."""
-    return _slot_value(SECRETS, name)
+    """Own-line read of one slot from secrets.env — the value is never logged.
+
+    E2: the store text comes through the ONE shared reader — plaintext as-is
+    (byte-identical historical reads), decrypted in memory when the store is
+    encrypted, "" when locked (fail-closed absence; `secrets_store.state()`
+    is how a surface tells locked from unset — never a plaintext fallback)."""
+    return _slot_from_text(secrets_store.secrets_text(SECRETS), name)
+
+
+def _slot_from_text(text: str, key: str) -> str | None:
+    """Own-line slot match over already-read text (glue-pit safe). The value
+    stays inside the caller's presence check — it never reaches any output."""
+    m = re.search(rf"(?m)^{re.escape(key)}=(\S[^\r\n]*)$", text)
+    return m.group(1).strip() if m else None
 
 
 def _slot_value(path: Path, key: str) -> str | None:
@@ -921,8 +934,7 @@ def _slot_value(path: Path, key: str) -> str | None:
         text = path.read_text()
     except OSError:
         return None
-    m = re.search(rf"(?m)^{re.escape(key)}=(\S[^\r\n]*)$", text)
-    return m.group(1).strip() if m else None
+    return _slot_from_text(text, key)
 
 
 def _read_text(path: Path) -> str:
@@ -930,6 +942,13 @@ def _read_text(path: Path) -> str:
         return path.read_text()
     except OSError:
         return ""
+
+
+class SecretsStoreError(RuntimeError):
+    """E2 write refusal with a chat-safe reason word only (never a value,
+    never the passphrase): `store locked` (encrypted and no usable
+    passphrase — rule3, the caller must NOT fall back to plaintext) or
+    `encrypt unavailable` (unlock worked but the CKX child cannot run)."""
 
 
 def write_env_slot(name: str, value: str) -> bool:
@@ -941,12 +960,22 @@ def write_env_slot(name: str, value: str) -> bool:
     `os.replace` swaps it in, then mode 0600 is enforced. `value` stays
     inside this frame — it never reaches a log line, response or exception;
     failures surface as OSError to the caller, which maps them to a
-    type-name-only error."""
+    type-name-only error.
+
+    E2 (opt-in): a PLAIN store keeps this exact byte path (default-off rule
+    4). An ENCRYPTED store is decrypted into memory first, edited there and
+    re-encrypted before the atomic replace — plaintext never lands on disk
+    (rule 2); locked raises SecretsStoreError("store locked") instead of
+    ever writing plaintext (rule 3).
+    """
     path = SECRETS
-    try:
+    encrypted = secrets_store.detect(path) == "encrypted"
+    if encrypted:
+        if secrets_store.is_locked(path):
+            raise SecretsStoreError("store locked")
+        raw = secrets_store.secrets_text(path).encode("utf-8")
+    else:
         raw = path.read_bytes() if path.exists() else b""
-    except OSError:
-        raise
     new_val = value.encode("utf-8")
     # Line detection allows the EMPTY value (`NAME=`): an existing placeholder
     # line is replaced in place, never duplicated by an append.
@@ -960,8 +989,21 @@ def write_env_slot(name: str, value: str) -> bool:
     else:
         sep = b"" if (not raw or raw.endswith(b"\n")) else b"\n"
         updated = raw + sep + name.encode("ascii") + b"=" + new_val + b"\n"
+    plain_text = None
+    if encrypted:
+        plain_text = updated.decode("utf-8")   # the edited plaintext (memory)
+        blob = secrets_store.encrypt_bytes(updated)
+        if blob is None:
+            # unlocked at read time but no usable passphrase/child now:
+            # refuse rather than write plaintext (rule 3).
+            raise SecretsStoreError("encrypt unavailable")
+        updated = blob
     path.parent.mkdir(parents=True, exist_ok=True)
     _atomic_write(path, updated, chmod=0o600)
+    if plain_text is not None:
+        # refresh the in-process snapshot: later reads must see THIS write
+        # (single-writer discipline), never the pre-write plaintext.
+        secrets_store.set_text(path, plain_text)
     return True
 
 
@@ -1079,6 +1121,9 @@ def backup_apply_secrets(doc: dict) -> dict:
             continue
         try:
             write_env_slot(name, value)
+        except SecretsStoreError as e:  # E2: locked store — reason word only
+            failed.append({"name": name, "reason": str(e)})
+            continue
         except OSError as e:  # noqa: BLE001 — type name only, never a value
             failed.append({"name": name,
                            "reason": f"persist failed: {type(e).__name__}"})
@@ -6894,7 +6939,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_secrets_get(self) -> None:
         """GET /api/secrets — the console credential-slot catalog (loopback,
-        optional auth). Slot VALUES are never present in this payload."""
+        optional auth). Slot VALUES are never present in this payload.
+        `store` is the E2 at-rest state (absent|plain|locked|unlocked) so a
+        locked store reads as LOCKED instead of silently looking empty —
+        the locked/unset distinction lives here, in doctor and in the
+        security self-check (rule 3)."""
         authed = self._secrets_authed()
         rows = [self._secret_row(name, group, authed)
                 for group, names in SECRET_GROUPS.items()
@@ -6904,7 +6953,11 @@ class Handler(BaseHTTPRequestHandler):
         rows.append({"name": "WEB_TOKEN", "group": "core",
                      "set": token is not None, "length": None,
                      "writable": False})
-        return self._json({"slots": rows, "writable": bool(token)})
+        st = secrets_store.state(SECRETS)
+        return self._json({"slots": rows, "writable": bool(token),
+                           "store": {"state": st,
+                                     "encrypted": st in ("locked", "unlocked"),
+                                     "locked": st == "locked"}})
 
     def _handle_secrets_write(self) -> None:
         """POST /api/secrets — set/clear one allowlisted slot.
@@ -6965,6 +7018,10 @@ class Handler(BaseHTTPRequestHandler):
                                            + _slot_format_reason(name)]}, 400)
         try:
             changed = write_env_slot(name, value)
+        except SecretsStoreError as e:
+            # E2: encrypted store, no usable passphrase — 409 with the
+            # reason word ("store locked"); never a plaintext fallback.
+            return self._json({"error": str(e)}, 409)
         except OSError as e:  # noqa: BLE001 — type name only, never the value
             return self._json({"error": f"persist failed: {type(e).__name__}"}, 500)
         sys.stderr.write(f"secrets slot updated name={name} "
@@ -8183,6 +8240,14 @@ class Handler(BaseHTTPRequestHandler):
         token value never appears in any response, log line, or exception."""
         token = read_env_slot("WEB_TOKEN")
         if not token:
+            # E2: a locked store reads as "no token" — say the ROOT cause
+            # instead of "not configured" (the slot may be filled; we just
+            # cannot read it). Fail-closed either way (503, no write).
+            if secrets_store.state(SECRETS) == "locked":
+                self._json({"error": "store locked — secrets.env is "
+                                     "encrypted and the passphrase is "
+                                     "unavailable"}, 503)
+                return False
             self._json({"error": "WEB_TOKEN not configured in secrets.env"}, 503)
             return False
         auth = self.headers.get("Authorization", "")

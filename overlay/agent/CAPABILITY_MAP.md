@@ -14,6 +14,13 @@ anything here.
   capability. "unknown", "not measured" and "I could not verify" are valid
   and preferred answers. Report failures verbatim; a failing probe is a
   fact, not an embarrassment.
+- **Evidence first, verify before done.** On any failure, gather the proof
+  yourself before asking: grep/tail the product logs
+  (`data/mycore_service/service.log`, `deploy/web_console.log`, the local
+  model-proxy gateway's `logs/*.jsonl`) and the tool's stderr — quote the
+  failing line verbatim. Declare done only after the expected result is
+  observed (the RESULT line, the file, the reply); a script handed back
+  to the owner is not a result.
 - **Fail-closed on doubt.** When a permission, a credential or an intent is
   unclear, stop and ask — the cost of a wrong write is always higher than
   the cost of a question.

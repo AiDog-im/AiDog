@@ -33,13 +33,24 @@ if [ -n "${AIDOG_PROFILE:-}" ]; then
   export AIDOG_MC_STATE="${AIDOG_MC_STATE:-$REPO/profiles/$AIDOG_PROFILE/state}"
 fi
 
-if [ -z "${AIDOG_TG_ALLOWED_USERS:-}" ]; then
-  AIDOG_TG_ALLOWED_USERS=$(sed -n 's/^AIDOG_TG_ALLOWED_USERS=\([^[:space:]]*\).*/\1/p' \
-    "$SECRETS" 2>/dev/null | head -1)
-fi
-if [ -z "${MYCORE_TG_TOKEN:-}" ]; then
-  MYCORE_TG_TOKEN=$(sed -n 's/^MYCORE_TG_TOKEN=\([^[:space:]]*\).*/\1/p' \
-    "$SECRETS" 2>/dev/null | head -1)
+if [ -f "$SECRETS" ] && [ "$(head -c 4 "$SECRETS")" = "SAFE" ]; then
+  # E2: ciphertext is not sed-able — pull exactly the two readiness slots
+  # through the store helper (stdout captured into these vars; values never
+  # in argv, never printed). Fail-closed: an unreadable store exits like an
+  # absent slot would (--check 3 / launch refuse).
+  _aidog_slots="$(python3 "$REPO/deploy/aidog_secrets.py" shell-env \
+    AIDOG_TG_ALLOWED_USERS MYCORE_TG_TOKEN)" || exit 3
+  eval "$_aidog_slots"
+  unset _aidog_slots
+else
+  if [ -z "${AIDOG_TG_ALLOWED_USERS:-}" ]; then
+    AIDOG_TG_ALLOWED_USERS=$(sed -n 's/^AIDOG_TG_ALLOWED_USERS=\([^[:space:]]*\).*/\1/p' \
+      "$SECRETS" 2>/dev/null | head -1)
+  fi
+  if [ -z "${MYCORE_TG_TOKEN:-}" ]; then
+    MYCORE_TG_TOKEN=$(sed -n 's/^MYCORE_TG_TOKEN=\([^[:space:]]*\).*/\1/p' \
+      "$SECRETS" 2>/dev/null | head -1)
+  fi
 fi
 export AIDOG_TG_ALLOWED_USERS MYCORE_TG_TOKEN
 

@@ -95,6 +95,7 @@ from pathlib import Path
 from typing import Callable
 
 from lib import profile_paths as pp  # noqa: E402  (car F §13.1: profile seams)
+from . import envslots  # noqa: E402  (E2: the one store reader)
 
 CHANNELS = ("discord", "slack", "email", "webhook",
             "dingtalk", "feishu", "wechat", "whatsapp", "signal")
@@ -200,7 +201,7 @@ def _slot(repo: Path, name: str) -> str:
     if val:
         return val
     try:
-        text = pp.secrets_path(Path(repo)).read_text(encoding="utf-8")
+        text = envslots.secrets_text(pp.secrets_path(Path(repo)))
     except OSError:
         return ""
     match = re.search(rf"(?m)^{re.escape(name)}=(\S[^\r\n]*)$", text)

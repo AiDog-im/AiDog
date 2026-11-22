@@ -28,6 +28,11 @@ Checks, in report order:
   age        secrets.env mtime age (a review nudge — local files never expire)
   perms      secrets.env mode, qualified by what the filesystem enforces
 
+E2 (opt-in static encryption): an encrypted store is decrypted in memory
+for the token/sentinel rows; a LOCKED store reports `unknown` + "secrets
+locked" on those two rows (never `not configured` / `no template values`)
+— fail-closed honesty, rule 3 of docs/design/security_car_design.md §4.
+
 Seams (tests only): `set_runner_for_tests` (subprocess), `PROC_NET_DIR`
 (fallback listening probe), and the explicit path/time parameters of
 `run_checks`.
@@ -44,6 +49,7 @@ from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (profile path seam)
+from . import secrets_store  # noqa: E402  (E2: at-rest store state)
 
 CHECK_IDS = ("listening", "firewall", "token", "sentinel", "age", "perms")
 STATE_RANK = {"ok": 0, "unknown": 1, "warn": 2, "fail": 3}  # worst wins
@@ -349,17 +355,42 @@ def token_strength(value: str) -> dict:
 
 def _parse_env_file(path: Path) -> dict[str, str]:
     """Own-line KEY=value pairs with NON-EMPTY values (comments and `KEY=`
-    lines never match — the same rule the runtime slot readers use)."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        raise
+    lines never match — the same rule the runtime slot readers use).
+    E2: an encrypted store is decrypted in MEMORY first (never a plaintext
+    temp file); a locked store reaches here only after `_store_locked`
+    refused it upstream."""
+    if secrets_store.detect(path) == "encrypted":
+        text = secrets_store.secrets_text(path)
+    else:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            raise
     return {m.group(1): m.group(2).strip()
             for m in _ENV_RE.finditer(text)}
 
 
+def _store_locked(path: Path) -> bool:
+    """E2: True only when the store IS encrypted and unreadable in this
+    process — the honest state the token/sentinel rows must report instead
+    of `not configured` / `no template values` (rule 3: locked is its own
+    verdict, never dressed up as a pass)."""
+    try:
+        return (secrets_store.detect(path) == "encrypted"
+                and secrets_store.is_locked(path))
+    except OSError:
+        return False
+
+
 # ------------------------------------------------------- probe: sentinel -----
 def _check_sentinel(secrets_path: Path, example_path: Path) -> dict:
+    if _store_locked(secrets_path):
+        # E2: ciphertext shows no template values ONLY because we cannot
+        # see it — unknown, with the reason, never a clean `ok`.
+        return {"id": "sentinel", "state": "unknown",
+                "i18n": "sck.d.sentinel.locked",
+                "detail": "secrets locked — encrypted at rest, "
+                          "passphrase unavailable", "args": {}}
     try:
         values = _parse_env_file(secrets_path)
     except OSError:
@@ -524,7 +555,7 @@ def run_checks(secrets_path: Path | str | None = None,
     checks = [
         _row("listening", _check_listening, console_port),
         _row("firewall", _check_firewall),
-        _row("token", token_strength, _slot_value(s_path, "WEB_TOKEN")),
+        _row("token", _check_token, s_path),
         _row("sentinel", _check_sentinel, s_path, e_path),
         _row("age", _check_age, s_path, ts),
         _row("perms", _check_perms, s_path),
@@ -540,13 +571,28 @@ def run_checks(secrets_path: Path | str | None = None,
             "checks": checks}
 
 
+def _check_token(secrets_path: Path) -> dict:
+    """The token-strength row (E2-aware): a locked store reports `locked`
+    — never `not configured` — because the slot may well be set, we just
+    cannot read it in this process."""
+    if _store_locked(secrets_path):
+        return {"id": "token", "state": "unknown",
+                "i18n": "sck.d.token.locked",
+                "detail": "secrets locked — encrypted at rest, "
+                          "passphrase unavailable", "args": {}}
+    return token_strength(_slot_value(secrets_path, "WEB_TOKEN"))
+
+
 def _slot_value(path: Path, key: str) -> str:
     """Own-line non-empty slot read (glue-pit safe). The value travels only
     into the strength heuristic and never out of this frame."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return ""
+    if secrets_store.detect(path) == "encrypted":
+        text = secrets_store.secrets_text(path)   # decrypted in memory (E2)
+    else:
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return ""
     m = re.search(rf"(?m)^{re.escape(key)}=(\S[^\r\n]*)$", text)
     return m.group(1).strip() if m else ""
 

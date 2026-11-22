@@ -17213,6 +17213,301 @@ def test_agent_plan() -> None:
         shutil.rmtree(tmp, ignore_errors=True)
 
 
+def test_secrets_store() -> None:
+    """E2 static encryption of secrets.env (opt-in, default off; the
+    non-negotiables in docs/design/security_car_design.md §4): detect and
+    plaintext byte-parity (default-off rule), the source-A passphrase file
+    rules (0600 honored / group-readable refused / env seam), fail-closed
+    LOCKED reads, the child-env-only passphrase plumbing through the
+    injectable runner, the post-write cache refresh, the console + wizard
+    writers (encrypt-in-place, sibling-preserving, `store locked`
+    refusal), the GET/POST locked payloads, and a real-CLI roundtrip when
+    Node >= 20 is present.
+
+    Hermetic by construction: every path is a temp fixture, source A points
+    at a temp file through PW_FILE_ENV, the runner is faked — the REAL
+    secrets.env and the REAL ~/.config passphrase file are never read."""
+    import hashlib
+    import importlib.util as _ilu
+    import io as _io
+    from mycore import ckxbackup as cb
+    from mycore import secrets_store as ss
+
+    saved_runner = cb._RUNNER
+    saved_pw_env = os.environ.get(ss.PW_FILE_ENV)
+    os.environ.pop(ss.PW_FILE_ENV, None)
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            store = tdp / "secrets.env"
+            pwf = tdp / "secrets.passphrase"     # source A (env override)
+            os.environ[ss.PW_FILE_ENV] = str(pwf)
+            PW = "e2-suite-passphrase-7c2f9d"
+            PLAIN = (b"WEB_TOKEN=e2-suite-token-0123456789\n"
+                     b"MODEL_API_KEY=sk-e2-suite-abc\n")
+
+            # --- A. detect + plaintext parity (default-off rule 4) ----------
+            check("e2: detect sees an absent store",
+                  ss.detect(store) == "absent", ss.detect(store))
+            store.write_bytes(PLAIN)
+            check("e2: detect sees a plaintext store",
+                  ss.detect(store) == "plain", ss.detect(store))
+            check("e2: plaintext reads are byte-identical (no behavior change)",
+                  ss.secrets_text(store) == PLAIN.decode())
+            check("e2: a plaintext store needs no passphrase",
+                  ss.state(store) == "plain" and not ss.is_locked(store),
+                  ss.state(store))
+
+            # --- B. fake runner: plumbing only (rule 1 + container shape) ---
+            log = {"argv": [], "pw_in_argv": False}
+
+            def fake_ckx(argv, *, env=None, data=None, timeout=None):
+                joined = " ".join(argv)
+                log["argv"].append(joined)
+                pw = (env or {}).get(ss.CHILD_PW_ENV, "")
+                if pw and pw in joined:
+                    log["pw_in_argv"] = True   # rule 1 violation, asserted below
+
+                def done(rc, out):
+                    return type("P", (), {"returncode": rc, "stdout": out,
+                                          "stderr": b""})()
+
+                if not pw:
+                    return done(3, b"")
+                if "encrypt" in argv:
+                    mac = hashlib.sha256(pw.encode()).digest()
+                    return done(0, ss.MAGIC + b"\x03" + mac + (data or b""))
+                # decrypt: read the --in file (this leg never uses stdin)
+                src = Path(argv[argv.index("--in") + 1])
+                blob = src.read_bytes()
+                if not blob.startswith(ss.MAGIC + b"\x03"):
+                    return done(1, b"")
+                if blob[5:37] != hashlib.sha256(pw.encode()).digest():
+                    return done(1, b"")        # wrong passphrase
+                return done(0, blob[37:])
+
+            cb.set_runner_for_tests(fake_ckx)
+            pwf.write_text(PW + "\n")
+            os.chmod(pwf, 0o600)
+            ss.forget()
+            blob = ss.encrypt_bytes(PLAIN)
+            check("e2: source-A 0600 file yields a SAFE container",
+                  blob is not None and blob.startswith(ss.MAGIC),
+                  str(bool(blob and blob.startswith(ss.MAGIC))))
+            store.write_bytes(blob)
+            ss.forget()
+            check("e2: an unlocked store decrypts to the original bytes",
+                  ss.secrets_text(store) == PLAIN.decode())
+            check("e2: state reports unlocked once source A answers",
+                  ss.state(store) == "unlocked", ss.state(store))
+            check("e2: the passphrase value never enters argv (rule 1)",
+                  bool(log["argv"]) and not log["pw_in_argv"],
+                  f"{len(log['argv'])} child call(s)")
+
+            # --- C. a DIFFERENT source-A passphrase fails closed ------------
+            pwf.write_text(PW_WRONG + "\n")
+            os.chmod(pwf, 0o600)
+            ss.forget()
+            check("e2: wrong source-A passphrase -> locked, readers empty",
+                  ss.state(store) == "locked"
+                  and ss.secrets_text(store) == "", ss.state(store))
+
+            # --- D. source-A file hygiene rules -----------------------------
+            pwf.write_text(PW + "\n")
+            os.chmod(pwf, 0o644)
+            ss.forget()
+            check("e2: group-readable source-A file is refused (fail-closed)",
+                  ss.state(store) == "locked"
+                  and ss.secrets_text(store) == "",
+                  oct(os.stat(pwf).st_mode & 0o777))
+            os.chmod(pwf, 0o600)
+            ss.forget()
+            check("e2: restoring 0600 re-unlocks without a restart",
+                  ss.state(store) == "unlocked", ss.state(store))
+            pwf.write_text("\n")
+            os.chmod(pwf, 0o600)
+            ss.forget()
+            check("e2: an empty source-A file is refused (fail-closed)",
+                  ss.state(store) == "locked", ss.state(store))
+
+            # --- E. missing source-A file: locked + no subprocess storm -----
+            pwf.unlink()
+            ss.forget()
+            check("e2: missing source-A file -> locked, readers empty",
+                  ss.state(store) == "locked"
+                  and ss.secrets_text(store) == "", ss.state(store))
+            calls = len(log["argv"])
+            ss.secrets_text(store)
+            ss.is_locked(store)
+            check("e2: a locked store spawns no further children (cached)",
+                  len(log["argv"]) == calls,
+                  str(len(log["argv"]) - calls))
+            check("e2: locked writers get no usable passphrase (rule 3)",
+                  ss.encrypt_bytes(PLAIN) is None)
+
+            # --- F. post-write cache refresh + encrypted write-back ---------
+            pwf.write_text(PW + "\n")
+            os.chmod(pwf, 0o600)
+            ss.forget()
+            new_text = "WEB_TOKEN=e2-suite-token-rotated-999\n"
+            ss.set_text(store, new_text)
+            check("e2: post-write cache refresh serves the NEW text",
+                  ss.secrets_text(store) == new_text
+                  and ss.state(store) == "unlocked")
+            ss.forget()
+            store.write_bytes(ss.encrypt_bytes(new_text.encode()))
+            ss.forget()
+            check("e2: encrypted write-back roundtrips through the file",
+                  ss.secrets_text(store) == new_text)
+
+            # --- G. console + wizard writers (rule 2 proved with the REAL
+            # CLI when it is present; without node the unlocked writer legs
+            # degrade to one honest probe and the LOCKED legs still run —
+            # lock semantics never depend on the cipher) ---------------------
+            cb.set_runner_for_tests(None)          # genuine child from here
+            real_ok = (cb.node_status()["ok"]
+                       and Path(cb.CKX_CLI).is_file())
+            ss.forget()
+            if real_ok:
+                store.write_bytes(ss.encrypt_bytes(PLAIN))
+            else:
+                cb.set_runner_for_tests(fake_ckx)   # SAFE-shaped container
+                store.write_bytes(ss.encrypt_bytes(PLAIN))
+                cb.set_runner_for_tests(None)
+            ss.forget()
+            import web.server as ws
+            saved_srv = ws.SECRETS
+            spec = _ilu.spec_from_file_location(
+                "aidog_setup_e2", REPO / "deploy" / "aidog_setup.py")
+            setup = _ilu.module_from_spec(spec)
+            spec.loader.exec_module(setup)
+            setup.SECRETS = store
+            ws.SECRETS = store
+            try:
+                if real_ok:
+                    changed = ws.write_env_slot("MODEL_API_KEY",
+                                                "sk-rotated-9999")
+                    check("e2 console: encrypted slot write lands + reads back",
+                          changed is True and
+                          ws.read_env_slot("MODEL_API_KEY") ==
+                          "sk-rotated-9999")
+                    check("e2 console: sibling slots survive the re-encrypt",
+                          ws.read_env_slot("WEB_TOKEN") ==
+                          "e2-suite-token-0123456789")
+                    raw = store.read_bytes()
+                    check("e2 console: store stays ciphertext, value off disk",
+                          raw.startswith(ss.MAGIC)
+                          and b"sk-rotated-9999" not in raw)
+                    check("e2 console: rewriting the same value is a no-op",
+                          ws.write_env_slot("MODEL_API_KEY",
+                                            "sk-rotated-9999") is False)
+                    ok, detail = setup.write_slot("AIDOG_GH_PAT",
+                                                  "ghp-e2-suite-000")
+                    back = setup.env_line_value(setup.read_secrets(),
+                                                "AIDOG_GH_PAT")
+                    check("e2 wizard: encrypted write lands + reads back",
+                          ok is True and back == "ghp-e2-suite-000"
+                          and b"ghp-e2-suite-000" not in store.read_bytes(),
+                          detail)
+                else:
+                    check("e2 writers: node/cli absent -> honest degraded "
+                          "probe", ss.detect(store) == "encrypted",
+                          ss.detect(store))
+
+                # --- I. LOCKED: both writers refuse, bytes untouched -------
+                pwf.unlink()
+                ss.forget()
+                before = store.read_bytes()
+                try:
+                    ws.write_env_slot("WEB_TOKEN", "nope-token-000000")
+                    err = ""
+                except ws.SecretsStoreError as exc:
+                    err = str(exc)
+                check("e2 console: locked write refuses 'store locked' and "
+                      "changes nothing",
+                      err == "store locked" and store.read_bytes() == before,
+                      err or "no refusal")
+                ok2, detail2 = setup.write_slot("AIDOG_GH_PAT",
+                                                "ghp-nope-000000")
+                check("e2 wizard: locked store refuses, reason has no value",
+                      ok2 is False and "locked" in detail2
+                      and "ghp-nope" not in detail2
+                      and store.read_bytes() == before, detail2)
+
+                # GET/POST surfaces (module-surgery pattern from wave3):
+                def call(name, doc=None, bearer=None):
+                    raw_b = (json.dumps(doc).encode() if doc is not None
+                             else b"")
+                    h = ws.Handler.__new__(ws.Handler)
+                    h.headers = {"Content-Length": str(len(raw_b))}
+                    if bearer is not None:
+                        h.headers["Authorization"] = "Bearer " + bearer
+                    h.rfile = _io.BytesIO(raw_b)
+                    box: dict = {}
+                    h._json = lambda obj, code=200: box.setdefault(
+                        "res", (code, obj))
+                    getattr(h, name)()
+                    return box.get("res")
+
+                code, doc = call("_handle_secrets_get")
+                st_doc = (doc or {}).get("store", {})
+                check("e2 console: GET /api/secrets reports the locked store",
+                      code == 200 and st_doc.get("locked") is True
+                      and st_doc.get("state") == "locked"
+                      and st_doc.get("encrypted") is True, str(st_doc))
+                code2, doc2 = call("_handle_secrets_write",
+                                   {"name": "MODEL_API_KEY",
+                                    "value": "sk-from-console-1"})
+                check("e2 console: POST on a locked store is 503 with the "
+                      "root cause",
+                      code2 == 503
+                      and "store locked" in str((doc2 or {}).get("error", ""))
+                      and store.read_bytes() == before,
+                      f"{code2} {(doc2 or {}).get('error', '')}")
+            finally:
+                ws.SECRETS = saved_srv
+
+        # --- J. the REAL CLI roundtrip when Node >= 20 is actually here ----
+        node = cb.node_status()
+        with tempfile.TemporaryDirectory() as td2:
+            tdp2 = Path(td2)
+            store2 = tdp2 / "secrets.env"
+            pwf2 = tdp2 / "secrets.passphrase"
+            os.environ[ss.PW_FILE_ENV] = str(pwf2)
+            ss.forget()
+            if node["ok"] and Path(cb.CKX_CLI).is_file():
+                pwf2.write_text(PW + "\n")
+                os.chmod(pwf2, 0o600)
+                ss.forget()
+                blob2 = ss.encrypt_bytes(PLAIN)
+                if blob2 is not None:
+                    store2.write_bytes(blob2)
+                ss.forget()
+                check("e2 real: vendored CLI encrypt -> decrypt roundtrip",
+                      blob2 is not None and blob2.startswith(ss.MAGIC)
+                      and ss.secrets_text(store2) == PLAIN.decode())
+                check("e2 real: ciphertext never contains a slot value",
+                      b"e2-suite-token" not in store2.read_bytes()
+                      and PW.encode() not in store2.read_bytes())
+                pwf2.write_text(PW_WRONG + "\n")
+                os.chmod(pwf2, 0o600)
+                ss.forget()
+                check("e2 real: a different source-A passphrase fails closed",
+                      ss.state(store2) == "locked"
+                      and ss.secrets_text(store2) == "", ss.state(store2))
+            else:
+                check("e2 real: node/cli absent -> honest degraded probe",
+                      node["ok"] is False
+                      or not Path(cb.CKX_CLI).is_file(), str(node))
+    finally:
+        cb.set_runner_for_tests(saved_runner)
+        if saved_pw_env is None:
+            os.environ.pop(ss.PW_FILE_ENV, None)
+        else:
+            os.environ[ss.PW_FILE_ENV] = saved_pw_env
+        ss.forget()
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -17290,6 +17585,7 @@ def main() -> int:
         test_delta2,
         test_ledger,
         test_agent_plan,
+        test_secrets_store,
     ]
     rows = []
     for fn in suites:
