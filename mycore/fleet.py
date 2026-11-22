@@ -292,9 +292,21 @@ def fleet_totals(fleets: list[dict], parent_usage: dict | None = None) -> dict:
     clones_value = clone_tokens if complete and clones else None
     combined = (parent_tokens + clones_value
                 if parent_tokens is not None and clones_value is not None else None)
+    # the band's own verdict (why the split was worth it) and the roles the
+    # clones ran with — the owner reads the receipt, not the board.
+    band = ""
+    roles: list[str] = []
+    for fleet_rec in fleets:
+        if not band and isinstance(fleet_rec.get("band"), str):
+            band = fleet_rec["band"]
+        for row in fleet_rec.get("clones") or []:
+            role = row.get("role")
+            if isinstance(role, str) and role and role not in roles:
+                roles.append(role)
     return {"fleets": len(fleets), "clones": clones, "ok": ok,
             "failed": failed, "parent_tokens": parent_tokens,
-            "clone_tokens": clones_value, "tokens": combined}
+            "clone_tokens": clones_value, "tokens": combined,
+            "band": band, "roles": ", ".join(roles[:4])}
 
 
 def _token_text(total: int | None) -> str:
@@ -303,6 +315,22 @@ def _token_text(total: int | None) -> str:
     if total >= 1000:
         return f"{total / 1000:.1f}k"
     return str(total)
+
+
+def _sub_clause(key: str, t, kw: dict, fallback: str) -> str:
+    """One localized sub-clause (the band / the roles). Falls back to the
+    English shape when no translator is supplied."""
+    if t is not None:
+        try:
+            value = t(key, **kw)
+            if value:
+                return value
+        except Exception:  # noqa: BLE001 — a locale gap never breaks a receipt
+            pass
+    out = fallback
+    for name, val in kw.items():
+        out = out.replace("{" + name + "}", str(val))
+    return out
 
 
 def receipt_text(fleets: list[dict], t=None,
@@ -315,10 +343,24 @@ def receipt_text(fleets: list[dict], t=None,
     agg = fleet_totals(fleets, parent_usage or fleets[0].get("parent_usage"))
     one = agg["fleets"] == 1
     ident = str(fleets[0].get("id") or "") if one else ""
+    # the band and the roles are SUBCLAUSES: they only appear when there is
+    # something to say, so the receipt never reads "band ·".
+    band_clause = ""
+    if agg.get("band"):
+        band_clause = _sub_clause("fleet.receipt.band", t,
+                                  {"band": agg["band"]}, " · judged {band} "
+                                  "(complexity band)")
+    roles_clause = ""
+    if agg.get("roles"):
+        roles_clause = _sub_clause("fleet.receipt.roles", t,
+                                   {"roles": agg["roles"]},
+                                   " · roles: {roles}")
     kw = {"fleets": agg["fleets"], "clones": agg["clones"], "ok": agg["ok"],
           "failed": agg["failed"], "tokens": _token_text(agg["tokens"]),
           "parent_tokens": _token_text(agg["parent_tokens"]),
-          "clone_tokens": _token_text(agg["clone_tokens"]), "id": ident}
+          "clone_tokens": _token_text(agg["clone_tokens"]),
+          "band": band_clause, "roles": roles_clause,
+          "id": ident}
     key = "fleet.receipt.one" if one else "fleet.receipt.many"
     body = ""
     if t is not None:
@@ -348,7 +390,8 @@ def _default_receipt(key: str, kw: dict) -> str:
         head = (f"{kw['fleets']} fleets · {kw['clones']} clone(s) · "
                 f"{kw['ok']} ok / {kw['failed']} failed")
     return (f"🧬 {head} · parent {kw['parent_tokens']} tokens · "
-            f"clones {kw['clone_tokens']} tokens · combined {kw['tokens']} tokens")
+            f"clones {kw['clone_tokens']} tokens · combined {kw['tokens']} tokens"
+            f"{kw.get('band', '')}{kw.get('roles', '')}")
 
 
 def attach_receipt(text: str, origin: str, t=None, on_fleets=None,

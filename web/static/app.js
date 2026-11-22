@@ -10141,6 +10141,7 @@ async function refreshFleet() {
     fleetData = (d && Array.isArray(d.fleets)) ? d : null;
   } catch (e) { fleetData = null; }
   renderFleet();
+  refreshFleetPlanBadge();   // a waiting fleet must be actionable here
 }
 
 function renderFleet() {
@@ -10181,6 +10182,44 @@ function renderFleet() {
       `${(f.clones || []).length} · ${escapeHtml(when)}</summary>${clones}</details>`;
   }).join("") + `<div class="stat-note">${escapeHtml(
     fleetData.coverage || "")}</div>`;
+}
+
+/* ------------------------------------- fleet approvals shortcut (P1b) -- */
+/* The fleet board lives in the Stream view; the approval queue lives in
+ * Settings. When a fleet is waiting, the board says so and offers the one
+ * hop that takes the owner there — the refusal itself names a plan id, and
+ * this is where that id can be acted on. */
+let fleetPlansData = null;
+
+async function refreshFleetPlanBadge() {
+  try {
+    const doc = await fetch("/api/fleet/plans").then(r => r.json());
+    fleetPlansData = (doc && Array.isArray(doc.plans)) ? doc.plans : [];
+  } catch (e) { fleetPlansData = null; }
+  renderFleetPlanBadge();
+}
+
+function renderFleetPlanBadge() {
+  const note = document.getElementById("fleetPending");
+  if (!note) return;
+  const pending = (fleetPlansData || []).filter(p => p && p.status === "pending");
+  if (!pending.length) { note.hidden = true; note.innerHTML = ""; return; }
+  note.hidden = false;
+  note.innerHTML = `<span class="stat-note" style="margin-top:0;">` +
+    `${escapeHtml(t("fleet.pending", "{n} delegated fleet(s) are waiting for your approval").replace("{n}", String(pending.length)))}` +
+    `</span> ` +
+    `<button class="btn" type="button" id="fleetGoApprovals" ` +
+    `data-i18n="fleet.goApprovals">REVIEW</button>`;
+  const go = document.getElementById("fleetGoApprovals");
+  if (go) go.addEventListener("click", () => {
+    setView("settings", true);
+    const card = document.getElementById("fleetPlanCard");
+    if (card) {
+      card.scrollIntoView({ behavior: "smooth", block: "center" });
+      card.classList.add("is-focus");
+      setTimeout(() => card.classList.remove("is-focus"), 2400);
+    }
+  });
 }
 
 /* ---------------------------------------------- memory browser (B-11) --- */

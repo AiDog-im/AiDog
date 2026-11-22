@@ -260,6 +260,9 @@ body {
 .view-actions { display: flex; gap: 8px; align-items: center; }
 
 /* ----------------------------------------------------------------- card --- */
+/* the fleet approval card pulses briefly when the board sends the owner there */
+.card.is-focus { border-color: var(--blue-dim); box-shadow: 0 0 0 2px rgba(40, 146, 255, .18); }
+
 .card { background: var(--panel); border: 1px solid var(--line-solid);
   box-shadow: var(--shadow); padding: 16px 18px 18px; position: relative;
   border-radius: 12px; min-width: 0;
