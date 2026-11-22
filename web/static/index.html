@@ -1789,6 +1789,23 @@
           </div>
         </div>
 
+        <!-- car E (security self-check, owner ask #6): six READ-ONLY probe
+             rows + RUN CHECK + an honest verdict line. Design:
+             docs/design/security_car_design.md. Red lines: the probes never
+             change anything (firewall list-only), the report is Bearer-gated,
+             and no value ever renders here — names, counts and states only. -->
+        <div class="card" data-setgroup="general creds" id="securityCard">
+          <h2 data-i18n="sck.sec">Security</h2>
+          <div class="stat-note" data-i18n="sck.hint">startup self-check — listening surface, firewall exposure, token strength and credential hygiene; read-only, nothing is changed</div>
+          <div id="secList"></div>
+          <div class="ctl-actions" style="margin-top:10px">
+            <button class="btn" id="secRun" type="button"
+                    data-i18n="sck.run">RUN CHECK</button>
+            <span class="save-state" id="secMsg" role="status"></span>
+          </div>
+          <div class="stat-note" id="secVerdict" hidden></div>
+        </div>
+
         <div class="card" data-setgroup="creds">
           <h2 data-i18n="sec.creds">Credentials</h2>
           <div class="stat-note" id="credTokenHint" hidden></div>

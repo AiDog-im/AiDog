@@ -366,7 +366,7 @@ if str(REPO) in sys.path:
 sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
-from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, ledger, mission, mcp, modeltier, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar)
+from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, ledger, mission, mcp, modeltier, security, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore.assembly import (build_system_stack,  # noqa: E402
                               resolve_context_dirs, resolve_user_rules,
@@ -6258,6 +6258,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_recovery())
         if path == "/api/journey":
             return self._json(collect_journey())
+        if path == "/api/security":
+            # car E (#6): the security self-check — Bearer-gated like the
+            # settings write (the report names local exposure facts), fresh
+            # probes on every call (the RUN CHECK semantics). Never raises.
+            if not self._require_token():
+                return
+            try:
+                report = security.run_checks(console_port=PORT)
+            except Exception as e:  # noqa: BLE001 — belt: run_checks itself
+                # is fail-soft, but a report must never take the route down
+                return self._json({"error": "security check unavailable",
+                                   "reason": type(e).__name__}, 503)
+            return self._json(report)
         if path == "/api/backup/export":
             return self._handle_backup_export()
         if path == "/api/backup/agent":
@@ -9071,8 +9084,26 @@ def main() -> None:
     # service writes (per-day files, O_APPEND-safe across both processes).
     model_meter.activate()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
+    # car E (#6): the startup security self-check — six read-only probes,
+    # ONE sanitized line (states + ids only, never a value), and a daemon
+    # thread so a slow backend can never delay boot (fail-soft by contract).
+    threading.Thread(target=_startup_security_check,
+                     kwargs={"console_port": PORT},
+                     daemon=True).start()
     print(f"I'm AiDog console -> http://{HOST}:{PORT}/  (loopback only, {VERSION})")
     srv.serve_forever()
+
+
+def _startup_security_check(console_port: int) -> None:
+    """Run the security self-check once at boot and write its one sanitized
+    line to stderr (car E). Never raises — an unavailable check still logs an
+    honest line so the boot record never pretends it ran."""
+    try:
+        report = security.run_checks(console_port=console_port)
+        line = security.startup_line(report)
+    except Exception as e:  # noqa: BLE001 — belt over the fail-soft contract
+        line = f"security self-check: unavailable ({type(e).__name__})"
+    sys.stderr.write(line + "\n")
 
 
 if __name__ == "__main__":
