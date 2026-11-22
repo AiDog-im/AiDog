@@ -20,7 +20,7 @@ missing. A capability we don't have is never advertised as a tool that will
 fail.
 
 Three hard contracts this module enforces **in code, not in configuration**
-(owner decrees, 2026-10-24 / 2026-10-25):
+(product decisions, 2026-10-24 / 2026-10-25):
 
 1. **ORDERS ONLY THROUGH A HUMAN APPROVAL GATE.** Public reads are keyless;
    account reads are slot-gated. Order placement exists **only** as
@@ -59,7 +59,7 @@ Three hard contracts this module enforces **in code, not in configuration**
 | `rpc` | chain | public | **none (built in)** | `base` (`base \| ethereum \| solana`) |
 | `binance` | cex | key | `BINANCE_API_KEY` / `BINANCE_API_SECRET` | `BTCUSDT` |
 
-Binance joined in W2 as the third CEX (owner decree 2026-10-25). It is our
+Binance joined in W2 as the third CEX (product decision, 2026-10-25). It is our
 own **thin adapter over the official, documented REST surface** — see §2 for
 why there is no official Binance MCP and why no community MCP will ever be
 used instead.

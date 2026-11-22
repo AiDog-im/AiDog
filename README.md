@@ -16,8 +16,8 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2116%2F2116-brightgreen?style=flat-square" alt="core tests 2116/2116">
-  <img src="https://img.shields.io/badge/console_smoke-454%2F454-brightgreen?style=flat-square" alt="console smoke 454/454">
+  <img src="https://img.shields.io/badge/core_tests-2124%2F2124-brightgreen?style=flat-square" alt="core tests 2124/2124">
+  <img src="https://img.shields.io/badge/console_smoke-471%2F471-brightgreen?style=flat-square" alt="console smoke 471/471">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -32,13 +32,13 @@
   <a href="#roadmap">Roadmap</a> ·
   <a href="#versioning--updates">Versioning</a> ·
   <a href="#security-posture-honest">Security</a> ·
-  <a href="#license--pricing-owner-decree">License</a> ·
+  <a href="#license--pricing">License</a> ·
   <a href="README_cn.md">简体中文</a>
 </p>
 
 > 🌍 **Public repository** (published 2026-10-27) — issues, discussions and
-> pull requests are open; internal design and research history stays in the
-> owner's private archive and is never published here.
+> pull requests are open. This repository is the product itself: source,
+> documentation, deployment and tests.
 > 🟢 **Permanently free — forever, no exceptions.** No paid tier, no usage
 > fees, no feature locked behind a payment. Ever.
 
@@ -56,7 +56,7 @@ machine. It is built around three ideas that most assistants skip:
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **38 modules ≈ 22.4k LOC, 2,116 tests**, and zero upstream
+  stop reasons, **38 modules ≈ 22.4k LOC, 2,124 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -73,7 +73,7 @@ console → `execute(plan_id)`; caps default to `0`, market orders never
 auto-approve, and withdrawals / on-chain transfers do not exist in the
 code at all.
 
-Everything is **free by decree**: no subscription, no paid feature gate,
+Everything is **free forever**: no subscription, no paid feature gate,
 and **no telemetry in the product runtime** — the only counting anywhere is
 the marketing site's public visit counter, documented as such. You bring a
 model key (or use the zero-key trial path) and the whole product activates.
@@ -82,7 +82,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 38 modules, 2,116 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 38 modules, 2,124 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 30/30 |
@@ -99,7 +99,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 | 🖥️ | **Desktop HUD shell** | Electron frameless shell: transparency slider, always-on-top, tray — Linux packaging verified (Win/macOS not built yet, honestly) |
 | 👥 | **Multi-profile isolation** | `AIDOG_PROFILE` selects fully isolated profiles (settings / secrets / state / body) — 63/63 isolation gate + 18-leg real-machine E2E |
 | 🩺 | **Self-healing ops** | `aidog doctor` health checks + a one-click **Run doctor** button in the console, restart watchdog, one-command upgrades with a dirty-tree guard, plus in-console **restart / update check / update apply** controls |
-| 🆓 | **Permanently free** | Owner decree: zero paid touchpoints in product, docs, or packages — introducing one is treated as a defect |
+| 🆓 | **Permanently free** | A permanent product commitment: zero paid touchpoints in product, docs, or packages — introducing one is treated as a defect |
 
 ## Architecture
 
@@ -169,8 +169,8 @@ Full guide: [`docs/installation.md`](docs/installation.md).
 
 ## Verify
 
-Automated E2E covers the stack on this machine; a **manual spot-check** is
-the owner's acceptance layer. Short version:
+Automated E2E covers the stack on this machine; a **manual spot-check**
+completes the acceptance pass. Quick version:
 
 ```bash
 python3 deploy/aidog_doctor.py       # health gate: 12 checks · 0 FAIL · 20 SKIP
@@ -191,8 +191,8 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **2116/2116** |
-| Console smoke (live HTTP) | **454/454** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
+| `mycore` core suite | **2124/2124** |
+| Console smoke (live HTTP) | **471/471** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
 | Skill router | **30/30** |
 | Memory persistence | **58/58** |
 | Setup wizard | **99/99** |
@@ -231,8 +231,8 @@ the marketing site ships its own **302-key** bilingual pack.
 - **Web3** — [`exchanges`](docs/features/exchanges.md) (nine venues, orders behind a human approval gate)
 - **Skills ecosystem** — [`skills_ecosystem`](docs/features/skills_ecosystem.md) (official directory, public skills repo, dual-gate review, remote catalog API)
 
-Design history and third-party research notes stay in the owner's private
-archive and are never exported here.
+This repository ships exactly what the product needs to run and verify:
+source, documentation, deployment and tests.
 
 ## Roadmap
 
@@ -242,8 +242,7 @@ archive and are never exported here.
   and an honest boundary note.
 - **Next** — the remaining Web3 stage (identity & payments: ERC-8004 on-chain
   agent identity, x402 read-only paid calls, official MCP opt-in mounts),
-  researched and staged — execution starts only on the owner's explicit go
-  order.
+  researched and staged for a coming release.
 
 ## Versioning & Updates
 
@@ -273,9 +272,9 @@ archive and are never exported here.
 - UI strings: locale packs under `overlay/locales/` — default **`en`**,
   switchable **`zh`**, new languages added as packs with zero code changes.
 
-## License & Pricing (owner decree)
+## License & Pricing
 
 **Free forever — for any use.** I'm AiDog ships with **zero paid
 touchpoints**: no paid tier, no in-app purchases, no usage fees, no feature
-locked behind payment. Adding any charge to this product violates the owner
-decree and is treated as a defect.
+locked behind payment. Adding any charge to this product is treated as a
+defect.

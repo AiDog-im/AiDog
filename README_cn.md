@@ -14,8 +14,8 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="最新版本"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-2116%2F2116-brightgreen?style=flat-square" alt="核心测试 2116/2116">
-  <img src="https://img.shields.io/badge/console_smoke-454%2F454-brightgreen?style=flat-square" alt="控制台冒烟 454/454">
+  <img src="https://img.shields.io/badge/core_tests-2124%2F2124-brightgreen?style=flat-square" alt="核心测试 2124/2124">
+  <img src="https://img.shields.io/badge/console_smoke-471%2F471-brightgreen?style=flat-square" alt="控制台冒烟 471/471">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="永久免费">
 </p>
 
@@ -30,12 +30,12 @@
   <a href="#路线图">路线图</a> ·
   <a href="#版本与升级">版本</a> ·
   <a href="#安全姿态如实">安全</a> ·
-  <a href="#许可与定价所有者法令">许可</a> ·
+  <a href="#许可与定价">许可</a> ·
   <a href="README.md">English</a>
 </p>
 
 > 🌍 **公开仓库**（2026-10-27 转公）——issues / discussions / PR 已开放；
-> 内部设计与研究历史保存在所有者的私有存档中，不在此公开。
+> 本仓即产品：源码、文档、部署与测试。
 > 🟢 **永久免费，绝无例外**：无付费档、无按量计费、绝无任何功能设付费墙。
 
 ## 关于
@@ -49,7 +49,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
   归档分层）+ 数字记忆体协议：唯一真值、跨内核可恢复、每次 reflect 回写。
   没有你读不了、审不动的向量库。
 - **自研核心**：运行时内核 `mycore` 从零自研——诚实的函数调用循环（停止
-  原因明示）、**38 模块 ≈22.4k 代码行、2116 项测试**，换芯后零上游依赖。
+  原因明示）、**38 模块 ≈22.4k 代码行、2124 项测试**，换芯后零上游依赖。
   换的是内核，永远不换「我」。
 
 它通过 **Telegram**、**回环 Web 控制台**、**桌面 HUD 壳**和**语音**与你
@@ -71,7 +71,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 
 |  | 能力 | 提供什么 |
 |---|---|---|
-| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——38 模块、2116 测试、零上游 |
+| 🧬 | **自研核心** | `mycore`：诚实停止原因的 FC 循环、fail-closed（默认拒绝）服务、看门狗、doctor 体检——38 模块、2124 测试、零上游 |
 | 🎭 | **宪法人格** | `SOUL.md` 在系统栈最顶端；红线与语气每轮生效，而非抽样自人设提示词 |
 | 🧠 | **策展记忆** | 有界 Markdown 预算 + 归档分层 + 数字记忆体协议；`memory` 套件 58/58 |
 | 🧩 | **技能 + 确定性路由** | `SKILL.md` frontmatter（业界标准字段），路由预筛先选 TOP3 **再**加载正文——30/30 |
@@ -88,7 +88,7 @@ I'm AiDog 是一个**跑在你自己机器上的个人具身 AI 伙伴**。它�
 | 🖥️ | **桌面 HUD 壳** | Electron 无边框壳：透明度滑杆、置顶、托盘——Linux 打包已实证（Win/macOS 暂未构建，如实） |
 | 👥 | **多 profile 全隔离** | `AIDOG_PROFILE` 选择完全隔离的档案（设置/密钥/状态/身体层）——隔离闸 63/63 + 真机 E2E 18 腿 |
 | 🩺 | **自愈运维** | `aidog doctor` 体检 + 控制台一键 **Run doctor** 按钮、重启看门狗、带脏树守卫的一键升级，另有控制台内**重启 / 检查更新 / 应用更新**控件 |
-| 🆓 | **永久免费** | 所有者法令：产品/文档/打包零付费触点——出现任何收费即视为缺陷 |
+| 🆓 | **永久免费** | 永久承诺：产品/文档/打包零付费触点——出现任何收费即视为缺陷 |
 
 ## 架构
 
@@ -155,7 +155,7 @@ aidog setup                   # 交互向导：逐槽引导填写
 
 ## 人工验收
 
-自动化 E2E 覆盖本机栈；**人工抽查**是所有者的验收层。速查：
+自动化 E2E 覆盖本机栈；**人工抽查**是验收的最后一环。速查：
 
 ```bash
 python3 deploy/aidog_doctor.py       # 体检：12 checks · 0 FAIL · 20 SKIP
@@ -175,8 +175,8 @@ python3 deploy/aidog_update.py check # 版本通道：up to date
 
 | 套件 | 结果 |
 |---|---|
-| `mycore` 核心套件 | **2116/2116** |
-| 控制台冒烟（真实 HTTP） | **454/454**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
+| `mycore` 核心套件 | **2124/2124** |
+| 控制台冒烟（真实 HTTP） | **471/471**（需已配置安装——缺 `secrets.env` 时诚实跳过，不计入） |
 | 技能路由 | **30/30** |
 | 记忆持久化 | **58/58** |
 | 安装向导 | **99/99** |
@@ -212,16 +212,15 @@ E2E**——全部全绿。
 - **Web3** — [`exchanges`](docs/features/exchanges.md)（9 家场所，下单过人工审批闸）
 - **技能生态** — [`skills_ecosystem`](docs/features/skills_ecosystem.md)（官方目录页、公开技能仓、双闸审核、远端目录 API）
 
-设计史与第三方调研笔记保存在所有者的私有存档中，不随本仓导出。
+本仓交付产品运行与验证所需的一切：源码、文档、部署与测试。
 
 ## 路线图
 
 - **当前**——Web3 二期已上线：**W1 + W2 随 v0.5.38 交付**（9 家场所
-  目录、`prepare` → 所有者审批 → `execute`）；同时在所有者验收下做一致性
+  目录、`prepare` → 所有者审批 → `execute`）；同时持续做一致性
   加固与打磨——每个能力都带测试与诚实边界。
 - **下一步**——Web3 剩余阶段（身份与支付：ERC-8004 链上 agent 身份、
-  x402 只读付费调用、官方 MCP opt-in 挂载），已调研预置——仍只在所有者
-  明确启动令后执行。
+  x402 只读付费调用、官方 MCP opt-in 挂载），已调研预置——排期后发布。
 
 ## 版本与升级
 
@@ -246,8 +245,8 @@ E2E**——全部全绿。
 - UI 字符串：`overlay/locales/` 语言包——默认 **`en`**，可切 **`zh`**，
   加语言 = 加包、零代码改动。
 
-## 许可与定价（所有者法令）
+## 许可与定价
 
 **永久免费，任何用途免费。** I'm AiDog 产品内**零付费触点**：无付费档、
-无内购、无使用费、绝无功能设付费墙。向本产品加入任何收费都违反所有者
-法令，一律视为缺陷。
+无内购、无使用费、绝无功能设付费墙。向本产品加入任何收费都违反本产品的
+永久承诺，一律视为缺陷。

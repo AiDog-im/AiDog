@@ -120,7 +120,7 @@ states only what this repository does.
   docs/research/* is the citation vault where quoted third-party names live).
   READY from this tool is **necessary, never sufficient** for public
   placement — that additionally requires the desensitization pass, a
-  reviewed manifest and owner adjudication (`AGENTS.md`).
+  reviewed manifest and maintainer sign-off (`AGENTS.md`).
 - **Verify:**
   - `python3 deploy/check_publish.py --json`
   - `python3 -c "import json;print(len(json.load(open('deploy/publish_manifest.json'))['deny']))"`

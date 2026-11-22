@@ -15277,6 +15277,70 @@ def test_watchdog_escalation() -> None:
               len(shadow) >= 2 and any("still down" in n for n in shadow),
               str(shadow))
 
+        # ---- car K (recovery center B2): the console's command channel ----
+        # The state file is the watchdog's OUTPUT, so owner commands arrive
+        # in <state>.cmd.json, consumed at the START of every cycle.
+        wd2 = Watchdog(cfg, tdp / "state2.json", log=lambda l: None,
+                       probe=lambda t: False,
+                       restart=lambda t: (False, "rc=1 boom"),
+                       now=lambda: clock[0])
+        wd2.notify = lambda text: None
+        st2 = wd2.states["gw"]
+        st2.state = "down"
+        st2.esc_level = 2                  # circuit OPEN — restarts halted
+        st2.esc_since = clock[0] - 9999
+        st2.last_restart = clock[0]        # throttle would block an attempt
+        st2.restart_attempts = 3
+        wd2.cmd_path.write_text(json.dumps(
+            {"action": "retry", "target": "gw", "ts": clock[0]}),
+            encoding="utf-8")
+        wd2._apply_commands()
+        check("wd-cmd: retry reopens the circuit + clears the throttle",
+              st2.esc_level == 1 and st2.last_restart == 0.0
+              and st2.esc_since == 0.0,
+              f"level={st2.esc_level} lr={st2.last_restart}")
+        check("wd-cmd: the command file is consumed once",
+              not wd2.cmd_path.exists())
+        check("wd-cmd: a consumed channel is a silent no-op",
+              wd2._apply_commands() is None and not wd2.cmd_path.exists())
+        for label, payload in (
+                ("unknown target", json.dumps({"action": "retry",
+                                                "target": "nope"})),
+                ("garbage file", "garbage{"),
+                ("unknown action", json.dumps({"action": "bogus",
+                                               "target": "gw"}))):
+            wd2.cmd_path.write_text(payload, encoding="utf-8")
+            try:
+                wd2._apply_commands()
+                dropped = True
+            except Exception:  # noqa: BLE001 — the loop must never die
+                dropped = False
+            check(f"wd-cmd: {label} dropped without raising",
+                  dropped and not wd2.cmd_path.exists())
+        wd3 = Watchdog(cfg, tdp / "state3.json", log=lambda l: None,
+                       probe=lambda t: True,
+                       restart=lambda t: (True, "ok"),
+                       now=lambda: clock[0])
+        wd3.notify = lambda text: None
+        wd3.check_once()                     # healthy -> up
+        wd3.cmd_path.write_text(json.dumps(
+            {"action": "retry", "target": "gw"}), encoding="utf-8")
+        wd3._apply_commands()
+        check("wd-cmd: retry on a healthy target is a no-op",
+              wd3.states["gw"].esc_level == 0
+              and wd3.states["gw"].state == "up")
+        wd4 = Watchdog(cfg, tdp / "state4.json", log=lambda l: None,
+                       probe=lambda t: False,
+                       restart=lambda t: (False, "rc=1"),
+                       now=lambda: clock[0])
+        wd4.notify = lambda text: None
+        wd4.cmd_path.write_text(json.dumps(
+            {"action": "retry", "target": "gw"}), encoding="utf-8")
+        wd4.loop(max_cycles=1)
+        check("wd-cmd: the loop consumes the command at cycle start",
+              not wd4.cmd_path.exists()
+              and wd4.states["gw"].state == "down")
+
 
 def test_ckxbackup() -> None:
     """Car 8 (CKX-P2): the agent backup — capability probe, the local call
