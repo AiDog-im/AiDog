@@ -176,6 +176,7 @@ SNIFF_CHECK_SEC = 60.0                 # SENSE leg cadence (sweep + delivery)
 MISSION_TICK_SEC = 5.0                 # mission leg cadence (design 3.2: ~5s)
 MISSION_CATCHUP_SEC = 600.0            # leg absence worth one honest CATCHUP line
 TYPING_INTERVAL_SEC = 4.0               # TG typing heartbeat (5s Telegram TTL)
+TYPING_FAIL_MAX = 5                     # consecutive failed beats before the beat gives up (owner 2026-11-13)
 CHANNEL_POLL_SEC = 30                   # channel inbound leg cadence (seconds)
 VOICE_MAX_SECONDS = 60                  # TG voice/audio cap before STT (car 4c)
 VOICE_MAX_BYTES = 5_000_000             # download cap before STT (5MB, car 4c)
@@ -447,6 +448,7 @@ STREAM_FIRST_DELAY = 2.5      # s — slow first tokens still preview
 STREAM_EDIT_CHARS = 120       # min NEW chars before an edit
 STREAM_EDIT_INTERVAL = 0.5    # s between edits (~2/s, far under 30/s)
 STREAM_MAX_EDITS = 60         # per-message cap; the final edit is exempt
+STREAM_RETRY_SEC = 0.8         # one retry delay for a failed edit/send (owner 2026-11-13)
 
 
 class _Typewriter:
@@ -456,7 +458,8 @@ class _Typewriter:
       - push() accumulates deltas; the first send fires at the char
         threshold or the delay, whichever lands first (prefix + " …");
       - later edits need BOTH a char delta and the interval gap;
-      - mid-stream edit failure -> dead: live edits stop, the shown text
+      - mid-stream edit failure -> ONE retry after STREAM_RETRY_SEC; only
+        a second failure collapses to dead: live edits stop, the shown text
         STAYS (never rolled back) — finalize() is the recovery point;
       - first-send failure -> stays unstarted: finalize() returns False and
         the caller sends the full reply as ONE message (the fallback);
@@ -464,8 +467,12 @@ class _Typewriter:
         text (the caller appends the release note first): ONE final edit;
         if that edit fails (dead preview or transient error) the complete
         text goes out as ONE new message — a reply is never silently left
-        truncated (owner 2026-11-05). True = the preview owns delivery
-        (started), False = the caller must take the ordinary single send.
+        truncated (owner 2026-11-05) — and that send itself gets ONE
+        retry after STREAM_RETRY_SEC before STREAM_FINAL_SEND_FAIL is
+        honestly logged (owner 2026-11-13: the 11-11 incident was edit-fail
+        + send-fail with no retry = the user got silence). True = the
+        preview owns delivery (started), False = the caller must take the
+        ordinary single send.
 
     send/edit/now are injected for offline tests; all text passes through
     the tg client, which owns the 4096 cap."""
@@ -524,7 +531,11 @@ class _Typewriter:
         if (len(self.buf) - self._shown_n >= STREAM_EDIT_CHARS
                 and now - self._last_edit >= STREAM_EDIT_INTERVAL):
             try:
-                self._edit(self.msg_id, self.buf + " …")
+                try:
+                    self._edit(self.msg_id, self.buf + " …")
+                except Exception:  # noqa: BLE001 — one retry for a transient
+                    time.sleep(STREAM_RETRY_SEC)
+                    self._edit(self.msg_id, self.buf + " …")
             except Exception as e:  # noqa: BLE001 — keep the shown text
                 self.dead = True
                 # TgError text is sanitized in tg.py (method name + api
@@ -544,9 +555,12 @@ class _Typewriter:
         (even after a mid-stream death — the failure may have been
         transient); if that edit fails, the full text goes out as ONE new
         message instead of leaving the preview's partial words as the
-        final word (owner 2026-11-05). True = delivery handled here
-        (started preview owns it), False = never started: the caller
-        sends the ordinary single message.
+        final word (owner 2026-11-05). The final send itself retries once
+        after STREAM_RETRY_SEC before STREAM_FINAL_SEND_FAIL is logged
+        (owner 2026-11-13: a single URLError used to swallow the whole
+        reply). True = delivery handled here (started preview owns it),
+        False = never started: the caller sends the ordinary single
+        message.
         """
         if not self.started:
             return False                 # caller: the ordinary single send
@@ -562,9 +576,14 @@ class _Typewriter:
                            f"detail={str(e)[:120]}")
             # Edit path broken: deliver the complete text as ONE new
             # message (the shown partial stays visible above it — never
-            # rolled back, but never the last word either).
+            # rolled back, but never the last word either). One retry: a
+            # transient failure must not swallow the reply (owner 2026-11-13).
             try:
-                self._send(text)
+                try:
+                    self._send(text)
+                except Exception:  # noqa: BLE001 — one retry for a transient
+                    time.sleep(STREAM_RETRY_SEC)
+                    self._send(text)
                 self._note("STREAM_FINAL_SEND", f"chars={len(text)}")
             except Exception as e:  # noqa: BLE001 — best effort, honestly logged
                 self.dead = True
@@ -764,6 +783,11 @@ class ChatService:
                             break
                         self._sleep(min(30.0, 1.5 ** min(errors, 10)))
                         continue
+                    if errors:
+                        # recovery is observable too (owner 2026-11-13):
+                        # POLL_ERR n=N followed by a good poll now closes
+                        # the loop instead of leaving N dangling forever.
+                        self.log.write("POLL_RECOVER", f"n={errors}")
                     errors = 0
                 else:
                     updates: list[dict] = []   # channel-only: legs only
@@ -857,6 +881,18 @@ class ChatService:
         if not isinstance(cid, int):
             self.log.write("NOTE", "kind=missing_chat_id ignored")
             return
+        # Inbound observability (owner 2026-11-13): one IN line per fetched
+        # update BEFORE the allowlist gate — without it a silent turn is
+        # indistinguishable from "never fetched". Kind only, never content.
+        if isinstance(msg.get("text"), str) and msg.get("text").strip():
+            in_kind = "text"
+        elif any(isinstance(msg.get(k), dict)
+                 for k in ("voice", "audio", "video_note", "photo",
+                           "document", "sticker")):
+            in_kind = "media"
+        else:
+            in_kind = "other"
+        self.log.write("IN", f"chat={redact_chat(cid)}", f"kind={in_kind}")
         if uid not in self.allowlist:
             self._warn_denied(cid)
             return                                   # no reply, ever
@@ -2476,11 +2512,17 @@ class ChatService:
         """Start a best-effort `typing` indicator for one pipeline turn and
         return the stop callable (always `finally`-stopped by _pipeline).
 
-        Contract: silent by design — dry-run sends nothing, and any failure
-        (no token, offline, rate limit) stops the loop immediately without a
-        log line: a lost heartbeat must never cost a reply. The first beat
-        fires on the daemon thread right away (the model call overlaps it),
-        then repeats every TYPING_INTERVAL_SEC until the stop callable runs.
+        Contract: dry-run sends nothing; a transient failure (no token,
+        offline, rate limit) no longer kills the beat on the first miss —
+        failures are counted and retried every TYPING_INTERVAL_SEC, and
+        only TYPING_FAIL_MAX consecutive failures stop the loop, with one
+        `TYPING_FAIL chat=… n=…` line so a dead beat is diagnosable
+        (owner 2026-11-13: the old silent-by-design stop hid a whole-turn
+        typing outage behind one dropped request). A lost heartbeat must
+        never cost a reply: the beat only ever logs and returns. The first
+        beat fires on the daemon thread right away (the model call
+        overlaps it), then repeats every TYPING_INTERVAL_SEC until the
+        stop callable runs.
         """
         if self.dry_run or not isinstance(chat_id, int):
             # Channel turns carry str session keys: typing is a Telegram-only
@@ -2489,11 +2531,17 @@ class ChatService:
         stop = threading.Event()
 
         def beat() -> None:
+            fails = 0
             while True:
                 try:
                     self.tg.send_chat_action(chat_id, "typing")
-                except Exception:  # noqa: BLE001 — silent stop, by design
-                    return
+                    fails = 0
+                except Exception:  # noqa: BLE001 — transient, retry until the cap
+                    fails += 1
+                    if fails >= TYPING_FAIL_MAX:
+                        self.log.write("TYPING_FAIL", f"chat={redact_chat(chat_id)}",
+                                       f"n={fails}")
+                        return
                 if stop.wait(TYPING_INTERVAL_SEC):
                     return
 

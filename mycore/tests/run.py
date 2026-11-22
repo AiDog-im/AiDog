@@ -2112,12 +2112,14 @@ def test_typewriter() -> None:
     tw3._edit = edit_boom
     t[0] += 5.0
     tw3.push("h" * STREAM_EDIT_CHARS)
-    check("typewriter: edit failure marks dead (one attempt only)",
-          tw3.dead and len(edited) == before + 1, str(len(edited)))
+    # owner 2026-11-13: a transient edit failure gets ONE retry
+    # (STREAM_RETRY_SEC) before the stream collapses to dead.
+    check("typewriter: edit failure retries once, then marks dead",
+          tw3.dead and len(edited) == before + 2, str(len(edited)))
     t[0] += 5.0
     tw3.push("i" * STREAM_EDIT_CHARS)
     check("typewriter: dead stream ignores further deltas",
-          len(edited) == before + 1, str(len(edited)))
+          len(edited) == before + 2, str(len(edited)))
     # owner 2026-11-05: a dead preview must NOT silently truncate the
     # reply — finalize retries the edit, and on failure delivers the full
     # text as ONE new message (the shown partial stays above it).
@@ -2280,8 +2282,11 @@ def test_service() -> None:
             check("service: deny WARN reappears after window",
                   svc.log.read_text().count("DENY") == 2)
             log = svc.log.read_text()
-            check("service: chat id redacted to last4 in log",
-                  "123456789" not in log and "id:6789" in log)
+            # IN line (owner 2026-11-13): one redacted inbound marker per
+            # fetched update, BEFORE the allowlist gate — no message text.
+            check("service: chat id redacted to last4 in log; inbound leaves an IN line",
+                  "123456789" not in log and "id:6789" in log
+                  and "IN chat=id:6789 kind=text" in log)
 
             # auth: known id -> pipeline reply + session persisted
             svc.handle_update(mk_update(5, 111, 123456789, "hello there"))
@@ -2671,8 +2676,49 @@ def test_service() -> None:
             fake_q = FakeTgTransport([])
             svc_q = ChatService(tdp / "st_poll2", frozenset({111}),
                                 transport=fake_q, chat=ok_chat, now=nowf)
-            check("service: --once with nothing pending exits clean",
-                  svc_q.run(once=True) == 0 and fake_q.sends == [])
+            # transient poll error -> recovery (owner 2026-11-13): POLL_ERR
+            # n=1 followed by a good poll must close the streak with
+            # POLL_RECOVER n=1 — the loop keeps running either way.
+            from mycore.tg import TgError as _TgError
+            import time as _time_mod
+            rec_state = tdp / "st_recover"
+            rec_state.mkdir(parents=True, exist_ok=True)
+            # release leg short-circuit: same UTC day marker -> no egress
+            (rec_state / "release_notice.json").write_text(
+                json.dumps({"day": _time_mod.strftime(
+                    "%Y-%m-%d", _time_mod.gmtime(clock[0]))}),
+                encoding="utf-8")
+            rec_repo = tdp / "repo_rec"
+            (rec_repo / "web").mkdir(parents=True)
+            (rec_repo / "web" / "settings.json").write_text("{}",
+                                                            encoding="utf-8")
+
+            class RecoverTg(FakeTgTransport):
+                def __init__(self):
+                    super().__init__()
+                    self.calls = 0
+                    self.svc = None
+                def __call__(self, url, payload, timeout):
+                    if url.rsplit("/", 1)[-1] == "getUpdates":
+                        self.calls += 1
+                        if self.calls == 1:
+                            raise _TgError("transport failure: URLError")
+                        if self.calls >= 2 and self.svc is not None:
+                            self.svc._stop = True   # recovered -> exit clean
+                    return super().__call__(url, payload, timeout)
+
+            rec = RecoverTg()
+            svc_rec = ChatService(rec_state, frozenset({111}), transport=rec,
+                                  chat=ok_chat, now=nowf, sleep=lambda s: None,
+                                  repo=rec_repo)
+            rec.svc = svc_rec
+            svc_rec.run()
+            rec_log = svc_rec.log.read_text()
+            check("service: --once exits clean; transient POLL_ERR recovers with POLL_RECOVER",
+                  svc_q.run(once=True) == 0 and fake_q.sends == []
+                  and "POLL_ERR n=1" in rec_log
+                  and "POLL_RECOVER n=1" in rec_log
+                  and "LOOP_END" in rec_log, rec_log[-300:])
 
             # --- discoverability car: the TG command menu sync (once/start) --
             # Controlled repos on purpose: the menu reads the LIVE settings
@@ -3969,7 +4015,10 @@ def test_typing() -> None:
             check("typing: dry-run sends no reply either",
                   fake2.sends == [], str(fake2.sends))
 
-            # transport failure -> silent stop, no exception, no log line
+            # transport failure -> a TRANSIENT failure must not kill the
+            # beat (owner 2026-11-13: one dropped request used to silence
+            # typing for the whole turn); sustained failure stops it with
+            # ONE TYPING_FAIL line and no raw method name in the log.
             class Broken:
                 def __call__(self, url, payload, timeout):
                     method = url.rsplit("/", 1)[-1]
@@ -3980,15 +4029,53 @@ def test_typing() -> None:
                     return json.dumps({"ok": True, "result": {}})
             svc3 = ChatService(Path(td) / "broken", frozenset({111}),
                                transport=Broken(), chat=ok_chat)
+            crash_free = True
             try:
                 svc3.handle_update(mk_update(4, 111, 123456789, "hello"))
-                check("typing: heartbeat failure is silent (no crash)", True)
-            except Exception as e:  # noqa: BLE001
-                check("typing: heartbeat failure is silent (no crash)", False,
-                      type(e).__name__)
-            log3 = Path(td) / "broken" / "service.log"
-            check("typing: heartbeat failure writes no log line",
-                  not log3.is_file() or "sendChatAction" not in log3.read_text())
+            except Exception:  # noqa: BLE001
+                crash_free = False
+
+            # transient: the first two beats fail, the third must land and
+            # the beat must keep going (no TYPING_FAIL anywhere).
+            class Flaky(FakeTgTransport):
+                def __init__(self, fail_first):
+                    super().__init__()
+                    self.fail_first = fail_first
+                def __call__(self, url, payload, timeout):
+                    if (url.rsplit("/", 1)[-1] == "sendChatAction"
+                            and self.fail_first > 0):
+                        self.fail_first -= 1
+                        raise RuntimeError("offline")
+                    return super().__call__(url, payload, timeout)
+            flaky = Flaky(2)
+            svc_f = ChatService(Path(td) / "flaky", frozenset({111}),
+                               transport=flaky, chat=ok_chat)
+            stop_f = svc_f._typing_heartbeat(111)
+            deadline = _t.time() + 2.0
+            while _t.time() < deadline and not flaky.actions:
+                _t.sleep(0.02)
+            stop_f()
+            check("typing: transient heartbeat failure is survived (beat keeps going)",
+                  crash_free and bool(flaky.actions)
+                  and "TYPING_FAIL" not in svc_f.log.read_text(),
+                  f"actions={flaky.actions[:3]}")
+
+            # sustained: TYPING_FAIL_MAX consecutive failures stop the beat
+            # with exactly one TYPING_FAIL line (no raw method name leaks).
+            svc4 = ChatService(Path(td) / "tfail", frozenset({111}),
+                               transport=Broken(), chat=ok_chat)
+            stop4 = svc4._typing_heartbeat(111)
+            log4 = Path(td) / "tfail" / "service.log"
+            deadline = _t.time() + 2.0
+            while _t.time() < deadline and "TYPING_FAIL" not in (
+                    log4.read_text() if log4.is_file() else ""):
+                _t.sleep(0.02)
+            stop4()
+            log4t = log4.read_text() if log4.is_file() else ""
+            check("typing: sustained failure stops the beat with one TYPING_FAIL line",
+                  "TYPING_FAIL" in log4t and "n=5" in log4t
+                  and log4t.count("TYPING_FAIL") == 1
+                  and "sendChatAction" not in log4t, log4t[-200:])
 
             # dry-run helper returns a no-op stop
             stop = svc2._typing_heartbeat(111)

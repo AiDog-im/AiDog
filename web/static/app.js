@@ -1492,6 +1492,11 @@ function applyAlert(adv) {
   const effective = isPreview ? forced : adv.level;
   const layer = document.getElementById("alertLayer");
   const show = effective === "urgent" && dismissedLevel !== forced + "|" + (adv.reasons || []).join(";");
+  // unsaved-changes prompt (owner 2026-11-13) owns the layer until it is
+  // answered: a non-urgent poll must never hide it, and a REAL urgent
+  // takeover drops it (mutual exclusion — urgent wins).
+  if (unsavedMode && !show) return;
+  if (show && unsavedMode) closeUnsavedAlert();
   const newlyShown = show && layer.hidden;   // speak once per takeover, not per poll
   layer.hidden = !show;
   document.getElementById("previewTag").hidden = !isPreview;
@@ -1500,6 +1505,7 @@ function applyAlert(adv) {
     document.getElementById("alertReasons").innerHTML =
       (reasons.length ? reasons : [t("alert.previewReason", "forced preview state")])
         .map(reasonLi).join("");
+    document.getElementById("alertActions").hidden = true;   // URGENT carries no actions
     beep(420, 0.12);
     if (newlyShown && voiceReady && settings.sound) {
       speak(t("alert.speak", "Urgent. Intervention required."));
@@ -1507,8 +1513,86 @@ function applyAlert(adv) {
   }
 }
 
+/* -------------------------------- unsaved-changes prompt (2026-11-13) --
+   Leaving Settings with pending edits raises the SAME takeover layer the
+   watchdog uses (two buttons, zero new locale keys) instead of silently
+   dropping them. SAVE runs the real save and only a clean save leaves;
+   CANCEL discards via saveBarCancel() and leaves; Esc / any other tap
+   dismisses and STAYS (the edits stay in the DOM). `pendingLeave` holds
+   the target view while the prompt is open. */
+let pendingLeave = null;      // target view once the prompt is answered
+let unsavedMode = false;      // the alert layer hosts the unsaved prompt
+let unsavedJustOpened = false; // the click that RAISED the prompt is still
+                               // bubbling — it must never count as a dismiss
+                               // (otherwise nav-with-dirty flashes the prompt
+                               // shut and the click looks like a dead button)
+
+function dirtyCards() {
+  return Array.from(
+    document.querySelectorAll(".set-grid > .card[data-dirty='1']"));
+}
+
+function showUnsavedAlert(dirty) {
+  unsavedMode = true;
+  unsavedJustOpened = true;
+  setTimeout(() => { unsavedJustOpened = false; }, 0);   // next tick only
+  const title = document.getElementById("alertTitle");
+  title.dataset.i18n = "save.dirty";       // relang repaints the right face
+  title.textContent = t("save.dirty", "unsaved changes");
+  document.getElementById("alertReasons").innerHTML = dirty.map(c => {
+    const h = c.querySelector("h2");
+    return `<li>&gt; ${escapeHtml(h ? h.textContent.trim() : "")}</li>`;
+  }).join("");
+  document.getElementById("previewTag").hidden = true;
+  document.getElementById("alertActions").hidden = false;
+  document.getElementById("alertLayer").hidden = false;
+}
+
+function closeUnsavedAlert() {
+  unsavedMode = false;
+  pendingLeave = null;
+  document.getElementById("alertActions").hidden = true;
+  const title = document.getElementById("alertTitle");
+  title.dataset.i18n = "alert.title";
+  title.textContent = t("alert.title", "⚠ URGENT");
+  document.getElementById("alertLayer").hidden = true;
+}
+
+async function unsavedSaveThenLeave() {
+  const target = pendingLeave;
+  await saveSettings();                       // err rows keep the user here
+  const st = document.getElementById("saveState");
+  const ok = !!(st && st.dataset.saveKind && !st.classList.contains("err"));
+  closeUnsavedAlert();
+  if (ok && target) {
+    // success clears every dirty mark (observer) — belt-and-suspenders so
+    // the gate can never re-fire on a lagging microtask
+    document.querySelectorAll(".set-grid > .card[data-dirty='1']")
+      .forEach(c => delete c.dataset.dirty);
+    setView(target, true);
+  }
+}
+
+async function unsavedCancelThenLeave() {
+  const target = pendingLeave;
+  try { await saveBarCancel(); } catch (e) { /* dirty flags already down */ }
+  closeUnsavedAlert();
+  if (target) setView(target, true);
+}
+
+document.getElementById("alertSaveBtn").addEventListener("click",
+  e => { e.stopPropagation(); unsavedSaveThenLeave().catch(() => {}); });
+document.getElementById("alertCancelBtn").addEventListener("click",
+  e => { e.stopPropagation(); unsavedCancelThenLeave().catch(() => {}); });
+
+// native prompt for reload / tab close while edits are pending
+window.addEventListener("beforeunload", e => {
+  if (dirtyCards().length) { e.preventDefault(); e.returnValue = ""; }
+});
+
 document.addEventListener("keydown", e => {
   if (e.key === "Escape") {
+    if (unsavedMode) { closeUnsavedAlert(); return; }   // dismiss = STAY
     const adv = (statusData && statusData.advisory) || { reasons: [] };
     const forced = (params.get("alert") || settings.alert_preview || "off").toLowerCase();
     dismissedLevel = forced + "|" + (adv.reasons || []).join(";");
@@ -1517,9 +1601,17 @@ document.addEventListener("keydown", e => {
 });
 document.addEventListener("click", e => {
   const layer = document.getElementById("alertLayer");
-  if (!layer.hidden && (layer.contains(e.target)) && !e.target.closest(".alert-box") === false) {
+  if (layer.hidden) return;
+  if (unsavedMode) {
+    // the two buttons own their own flow; ANY other tap dismisses and STAYS
+    if (unsavedJustOpened) return;     // the opening click itself — not a dismiss
+    if (e.target.closest && e.target.closest("#alertActions")) return;
+    closeUnsavedAlert();
+    return;
+  }
+  if ((layer.contains(e.target)) && !e.target.closest(".alert-box") === false) {
     layer.hidden = true;
-  } else if (!layer.hidden && e.target === layer) {
+  } else if (e.target === layer) {
     layer.hidden = true;
   }
 });
@@ -1686,7 +1778,12 @@ const DISCOVER_MAX = 32;              // mycore.models grammar: at most 32 ids
 // The ADD auto-fill below only ever touches a field still holding THIS id
 // (or an empty one) — a model the operator typed themselves is never moved.
 const DEFAULT_KERNEL_MODEL = "mimo-v2.6-flash";
-let discState = { models: [], total: 0, ready: false };
+/* owner 2026-11-13 (model settings UX): discovery state now carries a
+   SOURCE label per model (one run reads every configured upstream), the
+   active source filter, the current page (10 rows a page) and the collapsed
+   flag — the result list must fold and page without a browser refresh. */
+let discState = { models: [], total: 0, ready: false, srcs: [],
+                  filter: "", page: 0, collapsed: false };
 let discMsgState = null;              // {kind, a, b, reason, raw} — relang repaint
 
 function modelIdList() {
@@ -1792,14 +1889,128 @@ function discPaintAdd() {
     .replace("{n}", String(n));
 }
 
+const DISC_PAGE = 10;                 // owner 2026-11-13: 10 models a page
+
+/* Source label for one endpoint URL: host:port only (scheme and path drop
+   out); the path is re-attached later only when two sources share a host. */
+function epSrcLabel(u) {
+  const s = String(u || "").trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i, "");
+  const slash = s.indexOf("/");
+  return { host: (slash >= 0 ? s.slice(0, slash) : s) || "?",
+           path: slash >= 0 ? s.slice(slash + 1).replace(/\/+$/, "") : "" };
+}
+
+/* One painter for the bar above the list: fold glyph, source filter chips
+   (shown only when a run actually spanned more than one upstream) and the
+   pager. Pure symbols and numbers — no new locale keys. */
+function discPaintBar() {
+  const out = document.getElementById("discOut");
+  const tog = document.getElementById("discToggle");
+  const srcBox = document.getElementById("discSrcs");
+  const pager = document.getElementById("discPager");
+  const has = discState.ready && discState.models.length > 0;
+  if (tog) tog.textContent = discState.collapsed ? "+" : "\u2212";
+  if (srcBox) {
+    const multi = has && !discState.collapsed &&
+                  (discState.srcs || []).length > 1;
+    srcBox.hidden = !multi;
+    srcBox.innerHTML = "";
+    if (multi) {
+      const mk = (key, label, count, bad, title) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "disc-src" +
+          (String(discState.filter) === String(key) ? " on" : "") +
+          (bad ? " bad" : "");
+        b.textContent = label + " (" + count + ")";
+        if (title) b.title = title;
+        if (bad) b.disabled = true;
+        else b.addEventListener("click", () => {
+          discState.filter = key;
+          discState.page = 0;
+          discPaintBar();
+          discApplyView();
+        });
+        srcBox.appendChild(b);
+      };
+      mk("", t("set.grp.all", "All"), discState.models.length, false, "");
+      (discState.srcs || []).forEach(s => {
+        mk(s.label, s.label, s.count || 0, !s.ok, s.reason || "");
+      });
+    }
+  }
+  if (pager) {
+    const match = discState.models.filter(m =>
+      !discState.filter || m.src === discState.filter).length;
+    const pages = Math.max(1, Math.ceil(match / DISC_PAGE));
+    if (discState.page > pages - 1) discState.page = pages - 1;
+    const show = has && !discState.collapsed && pages > 1;
+    pager.hidden = !show;
+    const no = document.getElementById("discPageNo");
+    if (no) no.textContent = (discState.page + 1) + "/" + pages;
+    const prev = document.getElementById("discPrev");
+    const next = document.getElementById("discNext");
+    if (prev) prev.disabled = discState.page <= 0;
+    if (next) next.disabled = discState.page >= pages - 1;
+  }
+  if (out && has) out.hidden = discState.collapsed;
+}
+
+/* Visibility: every row STAYS in the DOM (the probes and select-all address
+   them all); page and filter only toggle a class — folding or paging can
+   never destroy a selection, and expanding needs no refresh. */
+function discApplyView() {
+  const out = document.getElementById("discOut");
+  if (!out) return;
+  const match = [];
+  discState.models.forEach((m, i) => {
+    if (!discState.filter || m.src === discState.filter) match.push(i);
+  });
+  const pages = Math.max(1, Math.ceil(match.length / DISC_PAGE));
+  if (discState.page > pages - 1) discState.page = pages - 1;
+  if (discState.page < 0) discState.page = 0;
+  const onPage = {};
+  match.slice(discState.page * DISC_PAGE,
+              discState.page * DISC_PAGE + DISC_PAGE)
+       .forEach(i => { onPage[i] = 1; });
+  out.querySelectorAll(":scope > .disc-row").forEach((row, idx) => {
+    row.classList.toggle("pg-off", !onPage[idx]);
+  });
+  out.hidden = !discState.ready || discState.models.length === 0 ||
+               discState.collapsed;
+  discPaintBar();
+}
+
+function discWireBar() {
+  const bar = document.getElementById("discBar");
+  if (!bar || bar.dataset.wired) return;
+  bar.dataset.wired = "1";
+  const tog = document.getElementById("discToggle");
+  if (tog) tog.addEventListener("click", () => {
+    discState.collapsed = !discState.collapsed;
+    discApplyView();
+  });
+  const prev = document.getElementById("discPrev");
+  if (prev) prev.addEventListener("click", () => {
+    if (discState.page > 0) { discState.page--; discApplyView(); }
+  });
+  const next = document.getElementById("discNext");
+  if (next) next.addEventListener("click", () => {
+    discState.page++; discApplyView();
+  });
+}
+
 function renderDiscResults() {
   const out = document.getElementById("discOut");
   const add = document.getElementById("discAddBtn");
+  const bar = document.getElementById("discBar");
   if (!out) return;
   out.innerHTML = "";
-  out.hidden = !discState.ready || discState.models.length === 0;
-  if (add) add.hidden = out.hidden;
-  if (out.hidden) { discPaintAdd(); return; }
+  const has = discState.ready && discState.models.length > 0;
+  out.hidden = !has;
+  if (add) add.hidden = !has;
+  if (bar) bar.hidden = !has;
+  if (!has) { discPaintAdd(); return; }
   const all = document.createElement("label");
   all.className = "disc-all";
   const allBox = document.createElement("input");
@@ -1807,7 +2018,12 @@ function renderDiscResults() {
   allBox.id = "discAll";
   allBox.addEventListener("change", () => {
     out.querySelectorAll("input.disc-chk").forEach(x => {
-      x.checked = allBox.checked;
+      const row = x.closest(".disc-row");
+      const src = row ? String(row.dataset.src || "") : "";
+      // select-all scopes to the ACTIVE source filter (the whole filtered
+      // list, every page — the label promises "select all", not "this page")
+      x.checked = allBox.checked &&
+        (!discState.filter || src === discState.filter);
     });
     discPaintAdd();
   });
@@ -1817,20 +2033,29 @@ function renderDiscResults() {
   all.appendChild(allBox);
   all.appendChild(allText);
   out.appendChild(all);
-  discState.models.forEach(id => {
+  discState.models.forEach(m => {
     const row = document.createElement("label");
     row.className = "disc-row";
+    row.dataset.src = m.src || "";
     const box = document.createElement("input");
     box.type = "checkbox";
     box.className = "disc-chk";
-    box.value = id;
+    box.value = m.id;
     box.addEventListener("change", discPaintAdd);
     const text = document.createElement("span");
-    text.textContent = id;
+    text.textContent = m.id;
     row.appendChild(box);
     row.appendChild(text);
+    if (m.src && (discState.srcs || []).length > 1) {
+      const tag = document.createElement("span");
+      tag.className = "disc-src-tag";
+      tag.textContent = m.src;
+      row.appendChild(tag);
+    }
     out.appendChild(row);
   });
+  discWireBar();
+  discApplyView();
   discPaintAdd();
 }
 
@@ -1913,53 +2138,108 @@ async function runDiscover() {
     return;
   }
   if (btn) btn.disabled = true;
-  discState = { models: [], total: 0, ready: false };
+  discState = { models: [], total: 0, ready: false, srcs: [],
+                filter: "", page: 0, collapsed: false };
   renderDiscResults();
   discMsg({ kind: "run" });
   try {
     const probeKey = ((keyEl && keyEl.value) || "").trim();
-    // model UX car: an EMPTY probe field now names the saved slot instead of
-    // depending on the url-match rule — the key lives one card up and works
-    // for ANY endpoint the operator types. A filled probe key stays inline
-    // and travels alone (the server refuses both together).
-    const reqBody = { base_url: ((urlEl && urlEl.value) || "").trim() };
-    if (probeKey) reqBody.api_key = probeKey;
-    else reqBody.slot = "MODEL_API_KEY";
-    const res = await fetch("/api/models/discover", {
-      method: "POST",
-      headers: { "Content-Type": "application/json",
-                 "Authorization": "Bearer " + token },
-      body: JSON.stringify(reqBody)
+    // owner 2026-11-13: ONE run now reads EVERY configured upstream — the
+    // primary endpoint plus each route row — and tags every model with the
+    // source that listed it, so the same id from two routes is visibly two
+    // entries. (The whitelist itself stays a flat id list; ADD de-dupes.)
+    // An EMPTY probe field names the saved MODEL_API_KEY slot (as before);
+    // a filled probe key stays inline and travels with the primary call only.
+    const srcs = [];
+    const primUrl = ((urlEl && urlEl.value) || "").trim();
+    const primBody = { base_url: primUrl };
+    if (probeKey) primBody.api_key = probeKey;
+    else primBody.slot = "MODEL_API_KEY";
+    srcs.push({ url: primUrl, body: primBody });
+    (Array.isArray(epRows) ? epRows : []).forEach(r => {
+      const u = String(r.url || "").trim();
+      if (!u) return;
+      const slot = (r.keys || []).find(s => epPresence[s]) || "";
+      srcs.push({ url: u, body: slot ? { base_url: u, slot } : { base_url: u } });
     });
-    let body = null;
-    try { body = await res.json(); } catch (e) { body = null; }
-    if (!res.ok) {
-      const details = (body && Array.isArray(body.details)) ? body.details : [];
-      // no key saved yet: the server's "slot not set" refusal is the same
-      // call-to-action as a 401 — plain words, not grammar.
-      if (res.status === 400 && details.length &&
-          /slot .*not set/.test(String(details[0]))) {
-        discMsg({ kind: "fail", reason: String(details[0]), needKey: true });
-        return;
+    // labels: host:port; a shared host gains its path, a residual clash an
+    // index — every chip and row tag stays unique and honest
+    const parts = srcs.map(s => epSrcLabel(s.url));
+    const perHost = {};
+    parts.forEach(p => { perHost[p.host] = (perHost[p.host] || 0) + 1; });
+    srcs.forEach((s, i) => {
+      s.label = perHost[parts[i].host] > 1 && parts[i].path
+        ? parts[i].host + "/" + parts[i].path : parts[i].host;
+    });
+    const seen = {};
+    srcs.forEach(s => {
+      seen[s.label] = (seen[s.label] || 0) + 1;
+      if (seen[s.label] > 1) s.label = s.label + "\u00b7" + seen[s.label];
+    });
+    const results = await Promise.all(srcs.map(async s => {
+      try {
+        const res = await fetch("/api/models/discover", {
+          method: "POST",
+          headers: { "Content-Type": "application/json",
+                     "Authorization": "Bearer " + token },
+          body: JSON.stringify(s.body)
+        });
+        let body = null;
+        try { body = await res.json(); } catch (e) { body = null; }
+        if (!res.ok) {
+          const details = (body && Array.isArray(body.details)) ? body.details : [];
+          // no key saved yet: the server's "slot not set" refusal is the same
+          // call-to-action as a 401 — plain words, not grammar.
+          if (res.status === 400 && details.length &&
+              /slot .*not set/.test(String(details[0]))) {
+            return { s, ok: false, needKey: true, reason: String(details[0]) };
+          }
+          return { s, ok: false, raw: res.status + " \u00b7 " +
+            (details.length ? details[0]
+              : ((body && body.error) || t("myc.testFail", "test failed"))) };
+        }
+        if (!body || body.ok !== true) {
+          return { s, ok: false, reason: String((body && body.reason) || "?") };
+        }
+        const models = (Array.isArray(body.models) ? body.models : [])
+          .map(m => (m && typeof m === "object") ? String(m.id || "") : "")
+          .filter(Boolean);
+        const total = Number.isFinite(Number(body.total))
+          ? Number(body.total) : models.length;
+        return { s, ok: true, models, total };
+      } catch (e) {
+        return { s, ok: false, net: true,
+                 reason: String((e && e.message) || e).slice(0, 80) };
       }
-      discMsg({ kind: "raw", raw: res.status + " · " +
-        (details.length ? details[0]
-          : ((body && body.error) || t("myc.testFail", "test failed"))) });
+    }));
+    const good = results.filter(r => r.ok);
+    if (!good.length) {
+      // no source answered: paint the FIRST failure with the original
+      // single-endpoint grammar (the one-endpoint case is byte-identical)
+      const f = results[0] || {};
+      if (f.needKey) discMsg({ kind: "fail", reason: f.reason, needKey: true });
+      else if (f.raw != null) discMsg({ kind: "raw", raw: f.raw });
+      else if (f.net) discMsg({ kind: "net", raw: f.reason });
+      else discMsg({ kind: "fail", reason: f.reason });
       return;
     }
-    if (!body || body.ok !== true) {
-      discMsg({ kind: "fail", reason: String((body && body.reason) || "?") });
-      return;
-    }
-    const models = (Array.isArray(body.models) ? body.models : [])
-      .map(m => (m && typeof m === "object") ? String(m.id || "") : "")
-      .filter(Boolean);
-    const total = Number.isFinite(Number(body.total))
-      ? Number(body.total) : models.length;
-    discState = { models: models, total: total, ready: true };
+    const items = [];
+    good.forEach(r => r.models.forEach(id =>
+      items.push({ id: id, src: r.s.label })));
+    const total = good.reduce((n, r) => n + r.total, 0);
+    discState = {
+      models: items, total: total, ready: true,
+      srcs: results.map(r => ({
+        label: r.s.label, ok: r.ok, count: r.ok ? r.models.length : 0,
+        reason: r.ok ? "" : (r.reason || r.raw || "")
+      })),
+      filter: "", page: 0, collapsed: false
+    };
     renderDiscResults();
-    discMsg(models.length
-      ? { kind: "found", a: models.length, b: total }
+    // a partially-failed run still shows what DID answer — the failed
+    // sources stay visible as disabled chips carrying the server's reason
+    discMsg(items.length
+      ? { kind: "found", a: items.length, b: total }
       : { kind: "none" });
   } catch (e) {
     discMsg({ kind: "net", raw: String((e && e.message) || e).slice(0, 80) });
@@ -2092,8 +2372,13 @@ async function loadEndpoints() {
         keys: (Array.isArray(e.keys) ? e.keys : [])
           .map(k => String((k && k.slot) || "")).filter(Boolean),
       }));
+      // Repaint ONLY with the clean data: while an edit is pending the rows
+      // cannot change, and a repaint would detach the operator's focused
+      // input mid-keystroke (and lose the fill under an E2E action) — the
+      // documented in-flight-read race. The chip/decision/key-pool paints
+      // below stay outside: they do not rebuild the row inputs.
+      renderEndpoints();
     }
-    renderEndpoints();
     paintDecisionStatus();
     if (epKeysOpen) renderKeyPool();
   } catch (e) {
@@ -2395,6 +2680,19 @@ async function epDiscRow(row, btn) {
       modelInput.dispatchEvent(new Event("input", { bubbles: true }));
     });
     res.appendChild(sel);
+    // owner 2026-11-13 (same rule as the #discPanel list): the discovered
+    // set must be foldable — a × puts the row back to its plain state
+    // without a browser refresh.
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "ep-disc-x";
+    clear.textContent = "\u00d7";
+    clear.addEventListener("click", () => {
+      res.hidden = true;
+      res.textContent = "";
+      res.className = "ep-result";
+    });
+    res.appendChild(clear);
   } catch (e) {
     show(false, t("myc.testNet", "request failed — ") +
       String((e && e.message) || e).slice(0, 60));
@@ -4432,6 +4730,9 @@ async function saveSettings() {
       return;
     }
     settings = Object.assign(settings, body.settings || payload);
+    // model picker freshness (owner 2026-11-13): a save refreshes the chat
+    // card's model dropdown from the just-saved document — no reload needed.
+    chatModelOptions();
     // restart-to-apply semantics (activation car): a save that touched the
     // registry-at-start mycore keys says so in the save row — the button
     // lives in the Overview activation card.
@@ -6706,7 +7007,8 @@ function initSettingsPanels() {
   // D1: chips mirror the field, and the discovery panel starts clean again
   // (programmatic fills fire no input event, so the chips are painted here)
   renderModelChips();
-  discState = { models: [], total: 0, ready: false };
+  discState = { models: [], total: 0, ready: false, srcs: [],
+                filter: "", page: 0, collapsed: false };
   renderDiscResults();
   discMsg(null);
   discPaintAdd();
@@ -7049,6 +7351,7 @@ function settingsRelang() {
   paintPresetMsg();           // car B: preset status line follows the pack
   discPaintMsg();              // D1: discovery status line repaints
   discPaintAdd();              // D1: ADD label repaints with the selection
+  discPaintBar();              // D1: source filter chips repaint with the pack
 }
 
 /* ------------------------------ car B2: evolution / exchange / overview --
@@ -10659,6 +10962,16 @@ function setView(name, fromUser) {
   // car I Q3: under region cn the Exchange view never activates — deep
   // links, journey buttons and orchestrator jumps all resolve to Overview
   if (name === "exchange" && regionCode() === "cn") name = "overview";
+  // unsaved-changes gate (owner 2026-11-13): a user leaving Settings with
+  // pending edits gets the takeover prompt, never a silent drop.
+  if (fromUser && currentView === "settings" && name !== "settings") {
+    const dirty = dirtyCards();
+    if (dirty.length) {
+      pendingLeave = name;
+      showUnsavedAlert(dirty);
+      return;
+    }
+  }
   currentView = name;
   document.querySelectorAll(".view").forEach(v =>
     v.classList.toggle("is-active", v.dataset.view === name));
@@ -10691,6 +11004,7 @@ function setView(name, fromUser) {
   // Wave 6 delta2: the gallery (X17) and the session browser (X13) lazy-load
   // with the SAME rule — first open, then only on a user nav click.
   if (name === "stream" && (fromUser || !artData)) refreshArtifacts();
+  if (name === "chat") chatModelOptions();   // picker follows the live model list
   if (name === "chat" && (fromUser || !sessData)) refreshSessions("");
   // delta4: the community panel fetches on first open, then only on a user
   // nav click (the server cache keeps the upstream read rate sane anyway).
