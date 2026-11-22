@@ -1240,7 +1240,14 @@ class ChatService:
         """The single Telegram outbound point (dry-run stops here; channel
         replies go through _channel_send with the same dry-run contract).
         `thread_id` threads the reply back into its forum topic (None =
-        plain chat reply, unchanged payload)."""
+        plain chat reply, unchanged payload).
+
+        C3 L1: the mask happens HERE, on the outbound side, so no secret
+        shape can leave through Telegram even if it was read from disk.
+        The count is logged (a number, never a value)."""
+        text, masked = self._mask_outbound(text)
+        if masked:
+            self.log.write("OUTBOUND_MASK", f"hits={masked}")
         if self.dry_run:
             preview = _scrub_paths(text)[:120]
             self.log.write("DRYRUN_SEND", f"chat={redact_chat(chat_id)}",
@@ -2141,6 +2148,17 @@ class ChatService:
         raw = envslots.wd_chat_target()
         return int(raw) if WD_CHAT_RE.fullmatch(raw) else None
 
+    def _mask_outbound(self, text: str) -> tuple[str, int]:
+        """One outbound text -> (masked_text, hit_count). Output-side only
+        (C3 L1): the model's input is untouched, and `run_bash` keeps its
+        declared trust boundary. Never raises — a masking failure leaves the
+        text as it is."""
+        try:
+            from . import redact
+            return redact.mask_secrets(text)
+        except Exception:  # noqa: BLE001 — masking must never break delivery
+            return text, 0
+
     def _origin_deliver(self, origin, text: str, *,
                         hook_event: str | None = None) -> str:
         """The ONE outbound fallback chain (two callers, never a parallel
@@ -2155,6 +2173,12 @@ class ChatService:
         if hook_event:
             self._fire_hooks(hook_event,
                              origin if isinstance(origin, (int, str)) else None)
+        # C3 L1: mask secret-shaped values on the OUTBOUND side, right
+        # before delivery. The count is logged (a name, never a value); the
+        # text that leaves the machine carries the mask.
+        text, masked = self._mask_outbound(text)
+        if masked:
+            self.log.write("OUTBOUND_MASK", f"hits={masked}")
         if isinstance(origin, str):
             route, sep, dest = origin.partition(":")
             if sep and dest:

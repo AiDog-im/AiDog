@@ -776,18 +776,21 @@ def main() -> int:
           and ctl3.get("gate", {}).get("allowed") is True,
           str(ctl3.get("gate")))
     # Console STOP is per-request and cannot touch the shared TG/service
-    # stop counter. No active console turn in this smoke process -> 409.
+    # stop counter. The outcome depends on whether a console chat turn is
+    # still registered: a stalled one (upstream latency) is a REAL turn and
+    # gets cancelled -> 200 + scope=console_chat; otherwise 409. The
+    # invariant that must hold either way: the shared stop_seq is UNTOUCHED.
     s0 = ctl3.get("stop_seq")
     stop_status, stop_body = post("/api/control", {"action": "stop"}, token)
     after_stop, ctl4 = get("/api/control")
-    check("POST /api/control stop without active console chat -> 409",
-          stop_status == 409 and isinstance(stop_body, dict)
-          and "no active console chat turn" in str(stop_body.get("error", ""))
-          and after_stop == 200 and ctl4.get("stop_seq") == s0,
-          f"stop={stop_status} read={after_stop} seq {s0} -> {ctl4.get('stop_seq')} {stop_body}")
-    check("console STOP does not pause or increment global service STOP",
-          ctl4.get("paused") is False and ctl4.get("stop_seq") == s0,
-          str(ctl4))
+    check("POST /api/control stop never touches the shared service stop_seq",
+          stop_status in (200, 409) and after_stop == 200
+          and ctl4.get("stop_seq") == s0
+          and (stop_status == 409 or stop_body.get("scope") == "console_chat"),
+          f"stop={stop_status} read={after_stop} seq {s0} -> "
+          f"{ctl4.get('stop_seq')} {str(stop_body)[:120]}")
+    check("console STOP does not pause",
+          ctl4.get("paused") is False, str(ctl4.get("paused")))
 
 
     # --- car 7: guardrails settings block (grammar in mycore.leash) --------

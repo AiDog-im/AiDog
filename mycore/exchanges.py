@@ -1251,6 +1251,55 @@ def _spent_today(store: dict) -> float:
     return _maybe_float(entry.get("spent_usd")) or 0.0
 
 
+def activity_baseline(state_dir: str | Path | None = None,
+                      days: int = 7) -> dict:
+    """The unexpected-activity baseline (audit #11 candidate 2).
+
+    Purely local facts from the order ledger: today vs the trailing
+    `days` days (today excluded). The verdict is a NUDGE, never an
+    action — the product never blocks, reverses or reports anything.
+
+    Returns
+      {"today": {"count": int, "spent_usd": float}, "baseline": {...},
+       "above": bool, "days": int, "note": str}
+    An empty or unreadable ledger is an honest zero baseline (the owner
+    sees nothing rather than a guess)."""
+    span = max(1, min(int(days) if isinstance(days, int) else 7, 30))
+    try:
+        store = _load_store(_store_path(state_dir))
+    except Exception:  # noqa: BLE001 — an unreadable store = no baseline
+        store = {}
+    ledger = store.get("ledger") if isinstance(store.get("ledger"), dict) else {}
+    today = _bj_day()
+    entry = ledger.get(today) if isinstance(ledger.get(today), dict) else {}
+    count = int(_maybe_float(entry.get("count")) or 0)
+    spent = _maybe_float(entry.get("spent_usd")) or 0.0
+    days_seen: list[tuple[int, float]] = []
+    for day, row in ledger.items():
+        if day == today or not isinstance(row, dict):
+            continue
+        days_seen.append((int(_maybe_float(row.get("count")) or 0),
+                          _maybe_float(row.get("spent_usd")) or 0.0))
+    days_seen.sort(reverse=True)
+    window = days_seen[:span]
+    base_count = max((c for c, _ in window), default=0)
+    base_spent = max((s for _, s in window), default=0.0)
+    above = (count > base_count and base_count > 0) or \
+            (spent > base_spent and base_spent > 0.0)
+    if not window:
+        note = "no earlier activity to compare against yet"
+    elif above:
+        note = ("today is above your trailing "
+                f"{span}-day activity baseline — check the orders if this "
+                "was not you")
+    else:
+        note = "activity is within your trailing baseline"
+    return {"today": {"count": count, "spent_usd": spent},
+            "baseline": {"count": base_count, "spent_usd": base_spent,
+                         "days": len(window)},
+            "above": bool(above), "days": span, "note": note}
+
+
 def _sweep_expired(store: dict) -> bool:
     """Lazily expire plans whose TTL elapsed (pending/approved only — an
     executed plan keeps its history). Returns True when anything changed."""

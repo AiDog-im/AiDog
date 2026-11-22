@@ -447,6 +447,7 @@
  "ex.thr.hint": "both caps are 0 — nothing auto-approves; every plan waits for your decision here",
  "ex.thr.needCaps": "threshold data unavailable — this build has no web3 capability block",
  "ex.plans": "ORDER APPROVAL",
+ "ex.activity.above": "Today is above your recent order activity ({c} orders, ${s} USD vs a baseline of {bc} / ${bs} USD) — check the orders below if this was not you.",
  "ex.plans.count": "{p} pending · {a} approved",
  "ex.plans.loading": "loading plans…",
  "ex.plans.empty": "no plans waiting — plans are created by exchange_prepare_order; nothing here executes by itself",
