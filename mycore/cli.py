@@ -73,6 +73,13 @@ def resolve_model_config() -> ModelConfig:
             eff = mc.get("reasoning_effort")
             if isinstance(eff, str) and eff in ("low", "medium", "high"):
                 cfg.extra_body = {"reasoning_effort": eff}
+            # backlog (owner 2026-11-02): per-request model timeout. The
+            # settings mycore.timeout is the only producer; anything absent
+            # or out of the 5..600 window leaves DEFAULT_TIMEOUT (the
+            # pre-backlog wire behavior, byte-identical).
+            tmo = mc.get("timeout")
+            if type(tmo) is int and 5 <= tmo <= 600:
+                cfg.timeout = float(tmo)
     except (OSError, ValueError):
         pass
     if os.environ.get("MYCORE_BASE_URL"):

@@ -1456,6 +1456,14 @@
             <input type="number" id="mycBudget" min="4000" max="1000000" step="1"
                    data-i18n-ph="ctl.mycBudgetPh" placeholder="24000 = default">
           </div>
+          <!-- backlog (owner 2026-11-02): per-request model timeout — the
+               slow-upstream wait knob (5..600s; absent = DEFAULT_TIMEOUT).
+               Dirty-block like budget: untouched never rides along. -->
+          <div class="ctl-row">
+            <label data-i18n="ctl.mycTimeout">Model timeout (s)</label>
+            <input type="number" id="mycTimeout" min="5" max="600" step="1"
+                   data-i18n-ph="ctl.mycTimeoutPh" placeholder="120 = default (5..600)">
+          </div>
           <!-- Wave 6 delta2 (X12/X15): OPT-IN switches — an untouched form
                changes nothing (0 days = off; effort off = the default wire
                byte-for-byte). Prune age is applied on save, at most hourly

@@ -47,7 +47,8 @@
     "docs/publish_iron_rules.md": "specification of the development-side publication gate (the tools it documents are not shipped)",
     "deploy/publish_transform.json": "desensitization rule table — states exactly what is being hidden",
     "deploy/githooks/*": "push-blocking hooks wired to the private development remote",
-    "docs/p5/swap_gap_assessment.md": "internal migration-gap assessment: point-in-time engineering notes citing the private AGENTS.md and its line numbers; no value to a product user (ruling 2026-10-29)"
+    "docs/p5/swap_gap_assessment.md": "internal migration-gap assessment: point-in-time engineering notes citing the private AGENTS.md and its line numbers; no value to a product user (ruling 2026-10-29)",
+    ".pi/*": "agent memory/sessions — the .pi archive lives on its own private branch (owner item #15), never exported from any ref"
   },
   "required_deny": [
     "secrets.env",

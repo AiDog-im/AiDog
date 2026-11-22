@@ -231,6 +231,25 @@ class TgClient:
             payload["message_thread_id"] = thread_id
         return self._call("sendMessage", payload)
 
+    def edit_message(self, chat_id: str | int, message_id: int,
+                     text: str) -> dict:
+        """Stateless edit of a message THIS bot sent — the typewriter
+        preview's update path (backlog, owner 2026-11-02). Same 4096 cap
+        and honest truncation as send_message; no message_thread_id (the
+        message id already names the message). Safe alongside a live
+        poller, same contract as every other stateless call here."""
+        if not chat_id:
+            raise TgError("chat_id is required")
+        if not isinstance(message_id, int) or isinstance(message_id, bool):
+            raise TgError("message_id is required")
+        if not isinstance(text, str) or not text.strip():
+            raise TgError("text is required")
+        if len(text) > 4096:
+            text = text[:4090] + " …[truncated]"
+        payload: dict = {"chat_id": chat_id, "message_id": message_id,
+                         "text": text}
+        return self._call("editMessageText", payload)
+
     def send_chat_action(self, chat_id: str | int, action: str = "typing") -> dict:
         """Stateless 'typing…' indicator (safe alongside a live poller).
 

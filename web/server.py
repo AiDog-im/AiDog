@@ -677,7 +677,7 @@ USAGE_KEYS = ("metrics_url", "pricing_config", "log_dir", "model_pricing")
 MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
-               "max_tpm", "sniff", "decision", "subagent")
+               "max_tpm", "sniff", "decision", "subagent", "timeout")
 # Car 4 (D6): fields the mycore.decision block accepts — the key slot is NOT
 # one of them (see the DEFAULT_SETTINGS note).
 DECISION_KEYS = ("enabled", "url", "model", "router_model")
@@ -1660,6 +1660,18 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             "mycore.reasoning_effort must be one of: "
                             + "|".join(e or "(empty)"
                                       for e in REASONING_EFFORTS))
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "timeout":
+                    # backlog (owner 2026-11-02): per-request model timeout in
+                    # seconds — the slow-upstream wait knob (chat/TG used to
+                    # block for the full DEFAULT_TIMEOUT). Closed range; the
+                    # absent key keeps DEFAULT_TIMEOUT byte-identically.
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not 5 <= val <= 600:
+                        errors.append(
+                            "mycore.timeout must be an integer of 5..600 seconds")
                         continue
                     clean_mc[key] = val
                     continue
