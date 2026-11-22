@@ -104,6 +104,42 @@ def resolve_model_config() -> ModelConfig:
     return cfg
 
 
+def resolve_runtime_facts(model: str | None = None) -> str:
+    """The `[runtime facts]` system slot (hotfix 0.5.76): product version
+    from the VERSION file + the EFFECTIVE model id for this turn.
+
+    WHY this exists: SOUL tells the model to answer "what model" from its
+    runtime context only — but the stack never carried that fact, so on
+    2026-11-04 the model went filesystem-diving and confidently reported a
+    stale upstream config (wrong model AND a machine-absolute path in the
+    reply). Facts must be injected; rules alone cannot invent them.
+
+    `model` = the caller's already-resolved effective id (per-chat /model
+    override and the decision router both run BEFORE this call on every
+    production turn path, so the block names the model actually used).
+    None -> resolve_model_config().model (same source as the ChatClient).
+    VERSION is read at call time (never cached) so a release bump is live
+    on the very next turn. A missing VERSION degrades honestly to
+    "unknown" — the slot never raises and never fabricates."""
+    if model is None:
+        model = resolve_model_config().model
+    try:
+        version = (REPO / "VERSION").read_text(encoding="utf-8").strip()
+    except OSError:
+        version = "unknown"
+    return (
+        "[runtime facts — answer \"what version\" / \"what model\" questions "
+        "ONLY from this block; never source them from config files, file "
+        "paths, logs, engine/vendor names, or older conversation messages]\n"
+        f"product: I'm AiDog version {version}\n"
+        f"model: {model}\n"
+        "If older messages in this conversation state a different version or "
+        "model, THIS block wins — they are stale. Scrub machine-absolute "
+        "paths and internal names before quoting any source (constitution "
+        "scrubbing rule)."
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(prog="mycore.cli", description="mycore one-shot runner")
     ap.add_argument("prompt", nargs="?", help="user prompt (one shot)")
@@ -148,7 +184,8 @@ def main(argv: list[str] | None = None) -> int:
     body: list[dict] = []
     if not args.no_body:
         body = build_system_stack(context_dirs=resolve_context_dirs(),
-                                   capability_path=resolve_capability_path())
+                                   capability_path=resolve_capability_path(),
+                                   runtime_facts=resolve_runtime_facts(cfg.model))
     system_msgs = body + ([{"role": "system", "content": args.system}]
                           if args.system else [])
     # Session files never persist system messages (the body stack is rebuilt
