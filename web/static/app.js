@@ -837,6 +837,70 @@ function exStateHtml(v) {
   return `<div class="vs-state">${escapeHtml(t("ex.state.unknown", "state unknown"))}</div>`;
 }
 
+function exScopeHtml(v) {
+  // Only a venue that holds a key has a scope to observe. The six keyless
+  // sources have no account, so there is nothing to show — say nothing
+  // rather than show an empty row.
+  if (!v || v.auth !== "key") return "";
+  const key = String(v.key || "");
+  return `<div class="ex-scope" data-scope-venue="${escapeHtml(key)}">` +
+    `<div class="stat-note">${escapeHtml(t("ex.scope.label",
+      "key scope (what the venue says this key may do)"))}</div>` +
+    `<button class="btn" type="button" data-scope-check="${escapeHtml(key)}" ` +
+    `data-i18n="ex.scope.check">CHECK SCOPE</button>` +
+    `<div class="ex-scope-out" data-scope-out="${escapeHtml(key)}"></div>` +
+    `</div>`;
+}
+
+async function runExScope(venue) {
+  const out = document.querySelector(`[data-scope-out="${CSS.escape(venue)}"]`);
+  if (!out) return;
+  out.innerHTML = `<span class="stat-note">${escapeHtml(t(
+    "ex.scope.working", "asking the venue..."))}</span>`;
+  try {
+    const r = await fetch("/api/exchange/scope?venue=" +
+      encodeURIComponent(venue)).then(x => x.json());
+    if (!r || r.error) {
+      out.innerHTML = `<span class="vs-state err">${escapeHtml(String(
+        (r && r.error) || "scope probe failed"))}</span>`;
+      return;
+    }
+    out.innerHTML = exScopeResultHtml(venue, r);
+  } catch (e) {
+    out.innerHTML = `<span class="vs-state err">${escapeHtml(String(e))}</span>`;
+  }
+}
+
+function exScopeResultHtml(venue, r) {
+  const obs = (r && r.observed) || {};
+  const grants = obs.grants || {};
+  const req = (r && r.requested) || {};
+  const flags = (r && r.flags) || [];
+  const state = String(obs.state || "");
+  if (state !== "granted") {
+    const word = t("ex.scope." + state, state || "unknown");
+    const detail = obs.detail ? ` — ${String(obs.detail)}` : "";
+    return `<div class="vs-state">${escapeHtml(word + detail)}</div>`;
+  }
+  const grantText = Object.keys(grants).length
+    ? Object.keys(grants).map(k => `${k}=${grants[k]}`).join(" · ")
+    : t("ex.scope.noFields", "no scope fields reported");
+  const uses = Array.isArray(req.uses) && req.uses.length
+    ? req.uses.join(", ") : t("ex.scope.unknownUse", "unknown");
+  let html = `<div class="vs-state">${escapeHtml(t(
+    "ex.scope.granted", "granted"))}</div>` +
+    `<div class="stat-note">${escapeHtml(t("ex.scope.observed",
+      "observed: {g}").replace("{g}", grantText))}</div>` +
+    `<div class="stat-note">${escapeHtml(t("ex.scope.requested",
+      "the product uses: {u}").replace("{u}", uses))}</div>`;
+  if (flags.length) {
+    html += `<div class="vs-state err">${escapeHtml(t("ex.scope.flagged",
+      "wider than the product needs: {f}").replace("{f}",
+      flags.join(", ")))}</div>`;
+  }
+  return html;
+}
+
 function exSyncSymbol() {
   const inp = document.getElementById("exSymbol");
   const sel = document.getElementById("exVenueSel");
@@ -872,12 +936,19 @@ function renderExchange() {
             .replace("{sym}", String(v.symbol || "\u2014")))}</div>
           <div class="gal-desc">${escapeHtml(String(v.summary || "\u2014"))}</div>
           ${exStateHtml(v)}
+          ${exScopeHtml(v)}
         </div>`).join("");
       list.querySelectorAll(".gal-card").forEach(el => {
         const flip = () => el.classList.toggle("open");
         el.addEventListener("click", flip);
         el.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") {
           e.preventDefault(); flip(); } });
+      });
+      list.querySelectorAll("[data-scope-check]").forEach(btn => {
+        btn.addEventListener("click", e => {
+          e.stopPropagation();
+          runExScope(String(btn.dataset.scopeCheck || ""));
+        });
       });
     }
   }
