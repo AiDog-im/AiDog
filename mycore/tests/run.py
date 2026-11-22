@@ -1954,7 +1954,10 @@ class FakeTgTransport:
     `send_threads` records message_thread_id per sendMessage (None = none)
     (car 4a-M3, topic isolation). `edits` records editMessageText as
     (chat_id, message_id, text) (backlog typewriter). `fail_sends` makes
-    the NEXT n sendMessage calls raise (the first-send failure leg)."""
+    the NEXT n sendMessage calls raise (the first-send failure leg).
+    `menus` records the command-menu sync as (method, commands) —
+    setMyCommands carries the parsed list, deleteMyCommands an empty one
+    (discoverability car)."""
 
     def __init__(self, updates=None):
         self.updates = list(updates or [])
@@ -1964,6 +1967,7 @@ class FakeTgTransport:
         self.edits = []            # [(chat_id, message_id, text)] backlog
         self.fail_sends = 0        # raise on the next n sendMessage calls
         self.polls = 0
+        self.menus = []            # [(method, commands)] menu sync (discover car)
 
     def __call__(self, url, payload, timeout):
         method = url.rsplit("/", 1)[-1]
@@ -1993,6 +1997,16 @@ class FakeTgTransport:
         if method == "getUpdates":
             self.polls += 1
             return json.dumps({"ok": True, "result": self.updates})
+        if method in ("setMyCommands", "deleteMyCommands"):
+            import urllib.parse as up
+            form = up.parse_qs((payload or b"").decode("utf-8"))
+            raw = form.get("commands", [""])[0]
+            try:
+                parsed = json.loads(raw) if raw else []
+            except ValueError:
+                parsed = []
+            self.menus.append((method, parsed))
+            return json.dumps({"ok": True, "result": True})
         if method == "getMe":
             return json.dumps({"ok": True, "result": {"username": "offline_bot"}})
         return json.dumps({"ok": True, "result": {}})
@@ -2653,6 +2667,71 @@ def test_service() -> None:
                                 transport=fake_q, chat=ok_chat, now=nowf)
             check("service: --once with nothing pending exits clean",
                   svc_q.run(once=True) == 0 and fake_q.sends == [])
+
+            # --- discoverability car: the TG command menu sync (once/start) --
+            # Controlled repos on purpose: the menu reads the LIVE settings
+            # file, so every leg writes its own web/settings.json instead of
+            # trusting the developer's machine.
+            from lib import i18n as _i18n_menu
+            menu_repo = tdp / "repo_menu"
+            (menu_repo / "web").mkdir(parents=True)
+            (menu_repo / "web" / "settings.json").write_text(
+                "{}", encoding="utf-8")
+            fake_m = FakeTgTransport([])
+            svc_m = ChatService(tdp / "st_menu", frozenset({111}),
+                                transport=fake_m, chat=ok_chat,
+                                repo=menu_repo, now=nowf)
+            svc_m.run(once=True)
+            check("menu: absent block -> the full 11-command menu published",
+                  len(fake_m.menus) == 1
+                  and fake_m.menus[0][0] == "setMyCommands"
+                  and len(fake_m.menus[0][1]) == 11,
+                  str(fake_m.menus)[:200])
+            menu_entries = fake_m.menus[0][1] if fake_m.menus else []
+            check("menu: every entry is {command, description} from menu.<cmd>",
+                  all(set(e) == {"command", "description"}
+                      and e["command"] in svc_mod.BOT_COMMANDS
+                      and e["description"]
+                      == _i18n_menu.get("en", "menu." + e["command"])
+                      and 0 < len(e["description"]) <= 120
+                      for e in menu_entries), str(menu_entries)[:300])
+            check("menu: one honest log line per sync",
+                  svc_m.log.read_text().count("BOT_MENU") == 1
+                  and "action=set" in svc_m.log.read_text(),
+                  svc_m.log.read_text()[-200:])
+
+            (menu_repo / "web" / "settings.json").write_text(
+                json.dumps({"botmenu": {"enabled": True,
+                                        "commands": ["help", "status"]}}),
+                encoding="utf-8")
+            fake_s = FakeTgTransport([])
+            svc_s = ChatService(tdp / "st_menu2", frozenset({111}),
+                                transport=fake_s, chat=ok_chat,
+                                repo=menu_repo, now=nowf)
+            svc_s.run(once=True)
+            check("menu: a configured subset is published exactly, in order",
+                  fake_s.menus[:1] == [("setMyCommands",
+                                        [{"command": "help",
+                                          "description": _i18n_menu.get(
+                                              "en", "menu.help")},
+                                         {"command": "status",
+                                          "description": _i18n_menu.get(
+                                              "en", "menu.status")}])],
+                  str(fake_s.menus)[:300])
+
+            (menu_repo / "web" / "settings.json").write_text(
+                json.dumps({"botmenu": {"enabled": False}}), encoding="utf-8")
+            fake_off = FakeTgTransport([])
+            svc_off = ChatService(tdp / "st_menu3", frozenset({111}),
+                                  transport=fake_off, chat=ok_chat,
+                                  repo=menu_repo, now=nowf)
+            svc_off.run(once=True)
+            check("menu: enabled=false clears the menu (deleteMyCommands)",
+                  [m for m, _ in fake_off.menus] == ["deleteMyCommands"]
+                  and fake_off.sends == [], str(fake_off.menus))
+            check("menu: the clear is logged, never silent",
+                  "action=delete" in svc_off.log.read_text(),
+                  svc_off.log.read_text()[-200:])
     finally:
         for k, v in saved.items():
             if v is None:
@@ -13235,6 +13314,197 @@ def test_wave3() -> None:
             _mt.SHARED_HEALTH.reset()
 
 
+def test_discover_hardening() -> None:
+    """Discover hardening (owner 2026-11-10, model-config UX fix): browser
+    UA on the directory GET, credential-shape degradation (Bearer ->
+    x-api-key -> x-goog-api-key on 401/403; one headerless request without
+    a key), control-char paste cleaning at the entry, and the root
+    /api/models path candidate. Loopback server + in-process handler
+    surgery only — production settings/secrets stay untouched; every value
+    is compared in-process and never printed."""
+    import io as _io
+    import threading as _threading
+    from http.server import (BaseHTTPRequestHandler as _BHR,
+                             ThreadingHTTPServer as _THSrv)
+    import web.server as ws
+
+    KEY = "sk-HARDEN-SENTINEL-0001"
+    TOKEN = "disc-token-0123456789abcdef"
+    seen: list[dict] = []
+    flag = {"api": False}          # root /api/models serves for ONE leg
+
+    class _H(_BHR):
+        def do_GET(self):  # noqa: N802
+            path = self.path.split("?", 1)[0]
+            seen.append({
+                "path": path,
+                "ua": self.headers.get("User-Agent") or "",
+                "auth": self.headers.get("Authorization") or "",
+                "xkey": self.headers.get("x-api-key") or "",
+                "gkey": self.headers.get("x-goog-api-key") or "",
+            })
+            mode = path.split("/")[1] if "/" in path else ""
+            if path == "/api/models":
+                st, body = ((200, b'{"data":[{"id":"api-model"}]}')
+                            if flag["api"] else (404, b"{}"))
+            elif mode == "xkey":
+                st, body = ((200, b'{"data":[{"id":"xkey-model"}]}')
+                            if self.headers.get("x-api-key") == KEY
+                            else (401, b"{}"))
+            elif mode == "gkey":
+                st, body = ((200, b'{"data":[{"id":"gkey-model"}]}')
+                            if self.headers.get("x-goog-api-key") == KEY
+                            else (401, b"{}"))
+            elif mode in ("nf", "apifb"):
+                st, body = 404, b"{}"
+            else:
+                st, body = 200, b'{"data":[{"id":"m1"}]}'
+            self.send_response(st)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):  # noqa: D102 — keep the suite quiet
+            return
+
+    srv = _THSrv(("127.0.0.1", 0), _H)
+    _threading.Thread(target=srv.serve_forever, daemon=True).start()
+    port = srv.server_address[1]
+    base = f"http://127.0.0.1:{port}"
+    tmp = Path(tempfile.mkdtemp(prefix="disc_hard_"))
+    secrets = tmp / "secrets.env"
+    secrets.write_text(f"WEB_TOKEN={TOKEN}\n", encoding="utf-8")
+    saved_secrets = ws.SECRETS
+
+    def route(doc, bearer: str | None = TOKEN):
+        """Run _handle_models_discover in-process (module surgery): the
+        response lands in a box instead of a socket."""
+        raw = json.dumps(doc).encode() if doc is not None else b""
+        h = ws.Handler.__new__(ws.Handler)
+        h.headers = {"Content-Length": str(len(raw))}
+        if bearer is not None:
+            h.headers["Authorization"] = f"Bearer {bearer}"
+        h.rfile = _io.BytesIO(raw)
+        box: dict = {}
+        h._json = lambda obj, code=200: box.setdefault("res", (code, obj))
+        h._handle_models_discover()
+        return box.get("res")
+
+    try:
+        ws.SECRETS = secrets
+
+        # ---------------- browser UA + first credential shape ----------
+        r = ws.discover_models(base + "/ok", KEY)
+        check("discover succeeds and the key never echoes",
+              r.get("ok") is True and r.get("count") == 1
+              and KEY not in json.dumps(r), str(r.get("reason")))
+        check("every directory GET carries a browser-shaped UA",
+              bool(seen) and all(s["ua"].startswith("Mozilla/5.0")
+                                 for s in seen),
+              seen[0]["ua"][:48] if seen else "no request")
+        check("the first credential shape is still Bearer (no downgrade)",
+              bool(seen) and seen[0]["auth"] == "Bearer " + KEY
+              and not seen[0]["xkey"] and not seen[0]["gkey"],
+              str(seen[:1]))
+
+        # ---------------- credential-shape degradation -----------------
+        seen.clear()
+        r = ws.discover_models(base + "/xkey", KEY)
+        check("Bearer-refusing endpoint degrades to x-api-key",
+              r.get("ok") is True and r.get("count") == 1
+              and [s["path"] for s in seen] == ["/xkey/models"] * 2
+              and seen[0]["auth"] == "Bearer " + KEY
+              and seen[1]["auth"] == "" and seen[1]["xkey"] == KEY,
+              str([(s["path"], bool(s["xkey"])) for s in seen]))
+
+        seen.clear()
+        r = ws.discover_models(base + "/gkey", KEY)
+        check("degradation reaches x-goog-api-key as the third shape",
+              r.get("ok") is True and len(seen) == 3
+              and seen[2]["gkey"] == KEY
+              and not seen[2]["auth"] and not seen[2]["xkey"],
+              str(len(seen)))
+
+        seen.clear()
+        r = ws.discover_models(base + "/open", "")
+        check("no key -> exactly ONE request with no credential header",
+              r.get("ok") is True and len(seen) == 1
+              and not seen[0]["auth"] and not seen[0]["xkey"]
+              and not seen[0]["gkey"], str(len(seen)))
+
+        seen.clear()
+        r = ws.discover_models(base + "/xkey", "sk-WRONG-0002")
+        check("every shape refused -> honest HTTP 401, zero key echo",
+              r.get("ok") is False and r.get("reason") == "HTTP 401"
+              and len(seen) == 3 and "sk-WRONG" not in json.dumps(r),
+              str(r.get("reason")))
+
+        # ---------------- path candidates -------------------------------
+        seen.clear()
+        flag["api"] = True
+        r = ws.discover_models(base + "/apifb", "")
+        flag["api"] = False
+        check("a base whose own paths 404 falls through to /api/models",
+              r.get("ok") is True and r.get("count") == 1
+              and [s["path"] for s in seen] ==
+              ["/apifb/models", "/apifb/v1/models", "/api/models"],
+              str([s["path"] for s in seen]))
+
+        seen.clear()
+        r = ws.discover_models(base + "/nf", "")
+        check("all candidates 404 -> honest HTTP 404, no bogus success",
+              r.get("ok") is False and r.get("reason") == "HTTP 404"
+              and len(seen) == 3, str(r.get("reason")))
+
+        c0 = ws._discover_candidates("http://vendor.example")
+        c1 = ws._discover_candidates("http://vendor.example/v1")
+        c2 = ws._discover_candidates("http://vendor.example/api")
+        check("candidate order: bare host = models, v1/models, api/models",
+              c0 == ["http://vendor.example/models",
+                     "http://vendor.example/v1/models",
+                     "http://vendor.example/api/models"], str(c0))
+        check("candidate order: /v1 base keeps its two paths + api root",
+              c1 == ["http://vendor.example/v1/models",
+                     "http://vendor.example/models",
+                     "http://vendor.example/api/models"], str(c1))
+        check("/api base dedupes; no shape ever exceeds four candidates",
+              c2 == ["http://vendor.example/api/models",
+                     "http://vendor.example/api/v1/models"]
+              and all(len(ws._discover_candidates(b)) <= 4
+                      for b in ("http://h", "http://h/v1",
+                                "http://h/api", "http://h/x/y")),
+              str(c2))
+
+        # ---------------- paste hygiene (CRLF) --------------------------
+        check("_strip_ctl drops mid-string control chars and trims ends",
+              ws._strip_ctl("a\r\nb\t c") == "ab c"
+              and ws._strip_ctl("\r\n http://x \t") == "http://x"
+              and ws._strip_ctl("plain") == "plain",
+              repr(ws._strip_ctl("a\r\nb\t c")))
+        r = route({"base_url": f"{base}\r/ok", "api_key": KEY})
+        check("handler cleans a CR mid-URL and still discovers",
+              r is not None and r[0] == 200
+              and r[1].get("ok") is True and r[1].get("count") == 1,
+              str(r[0] if r else None))
+        r = route({"base_url": f"{base}/xkey",
+                   "api_key": KEY[:6] + "\r" + KEY[6:]})
+        check("handler cleans a CR mid-key before the fetch",
+              r is not None and r[0] == 200
+              and r[1].get("models") == [{"id": "xkey-model"}]
+              and KEY not in json.dumps(r), str(r[0] if r else None))
+        r = route({"base_url": "\r\n"})
+        check("an all-control base_url is a 400 naming base_url",
+              r is not None and r[0] == 400
+              and "base_url" in str(r[1]), str(r[0] if r else None))
+        r = route({"base_url": base + "/ok"}, bearer=None)
+        check("the route gate still refuses without a Bearer",
+              r is not None and r[0] == 401, str(r[0] if r else None))
+    finally:
+        ws.SECRETS = saved_secrets
+        srv.shutdown()
+        srv.server_close()
+
+
 def test_delta2() -> None:
     """Wave 6 delta2 backend (parity lane delta): X12 session auto-prune +
     one-shot disk advisory, X13 sessions list/search/export, X15
@@ -13330,6 +13600,83 @@ def test_delta2() -> None:
     _, errs = ws.validate_settings_patch({"mycore": {"model": "m"}})
     check("timeout schema: absent key legal (default keeps working)",
           errs == [], str(errs))
+
+    # ---------------- discoverability car: botmenu partition ---------------
+    clean, errs = ws.validate_settings_patch(
+        {"botmenu": {"enabled": True, "commands": ["help", "cron"]}})
+    check("botmenu schema: enabled + subset accepted",
+          errs == [] and clean.get("botmenu")
+          == {"enabled": True, "commands": ["help", "cron"]}, str(errs))
+    clean, errs = ws.validate_settings_patch({"botmenu": {"commands": []}})
+    check("botmenu schema: empty list accepted (= publish every command)",
+          errs == [] and clean.get("botmenu") == {"commands": []}, str(errs))
+    clean, errs = ws.validate_settings_patch({"botmenu": {"enabled": False}})
+    check("botmenu schema: enabled=false accepted",
+          errs == [] and clean.get("botmenu") == {"enabled": False}, str(errs))
+    for _bad in ("yes", 1, None):
+        _, errs = ws.validate_settings_patch({"botmenu": {"enabled": _bad}})
+        check(f"botmenu schema: enabled {_bad!r} refused",
+              bool(errs) and "botmenu.enabled" in errs[0], str(errs))
+    _, errs = ws.validate_settings_patch({"botmenu": {"nope": 1}})
+    check("botmenu schema: unknown sub-key refused",
+          bool(errs) and "unknown botmenu key" in errs[0], str(errs))
+    _, errs = ws.validate_settings_patch({"botmenu": "all"})
+    check("botmenu schema: non-object refused",
+          bool(errs) and "botmenu must be an object" in errs[0], str(errs))
+    _, errs = ws.validate_settings_patch({"botmenu": {"commands": "help"}})
+    check("botmenu schema: non-list commands refused",
+          bool(errs) and "botmenu.commands must be a list" in errs[0], str(errs))
+    _, errs = ws.validate_settings_patch(
+        {"botmenu": {"commands": ["help", "nope"]}})
+    check("botmenu schema: unknown command refused",
+          bool(errs) and "botmenu.commands" in errs[0] and "nope" in errs[0],
+          str(errs))
+    _, errs = ws.validate_settings_patch(
+        {"botmenu": {"commands": ["help", "help"]}})
+    check("botmenu schema: duplicate command refused",
+          bool(errs) and "duplicate" in errs[0], str(errs))
+    _, errs = ws.validate_settings_patch(
+        {"botmenu": {"commands": list(ws.BOT_COMMANDS) + ["help"]}})
+    check("botmenu schema: more than the 11 known commands refused",
+          bool(errs) and "at most" in errs[0], str(errs))
+    _, errs = ws.validate_settings_patch({"botmenux": {"enabled": True}})
+    check("botmenu schema: unknown top-level key refused",
+          bool(errs) and "botmenux" in errs[0], str(errs))
+    clean, errs = ws.validate_settings_patch(
+        {"botmenu": {"enabled": True}, "sound": True})
+    check("botmenu schema: rides along with other keys in one patch",
+          errs == [] and clean.get("botmenu") == {"enabled": True}
+          and clean.get("sound") is True, str(errs))
+
+    # ---------------- the menu set can never drift -------------------------
+    # Three faces of ONE list: the /bot dispatcher branches, the published
+    # menu set and the console's allow-list — plus a menu.<cmd> description
+    # in BOTH packs. A new command added to only one of them fails here.
+    import mycore.service as _svc_menu
+    from lib import i18n as _i18n_lock
+    _src = Path(_svc_menu.__file__).read_text(encoding="utf-8")
+    _branches = re.findall(r'(?m)^\s*if name == "([a-z_]+)"', _src)
+    _en_pack = _i18n_lock.pack("en") or {}
+    _zh_pack = _i18n_lock.pack("zh") or {}
+    _help_names = [ln.split()[0].lstrip("/")
+                   for ln in (_en_pack.get("cmd.help.body") or "").split("\n")
+                   if ln.strip()]
+    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (11)",
+          tuple(_help_names) == tuple(_svc_menu.BOT_COMMANDS)
+          and set(_branches) == set(_svc_menu.BOT_COMMANDS)
+          and len(_svc_menu.BOT_COMMANDS) == 11,
+          f"help={_help_names} branches={_branches}")
+    check("menu lock: web.server validates against the SAME constant",
+          ws.BOT_COMMANDS is _svc_menu.BOT_COMMANDS, str(ws.BOT_COMMANDS))
+    _no_desc = [n for n in _svc_menu.BOT_COMMANDS
+                if "menu." + n not in _en_pack or "menu." + n not in _zh_pack]
+    check("menu lock: menu.<cmd> exists in both packs for all 11",
+          not _no_desc, str(_no_desc))
+    _too_long = [n for n in _svc_menu.BOT_COMMANDS
+                 if len(_en_pack.get("menu." + n, "")) > 120
+                 or len(_zh_pack.get("menu." + n, "")) > 120]
+    check("menu lock: descriptions stay inside the 120-char TG budget",
+          not _too_long, str(_too_long))
 
     saved = {"settings": ws.SETTINGS_FILE, "secrets": ws.SECRETS,
              "dirs": ws.chat_sessions_dir}
@@ -16200,6 +16547,17 @@ def test_leash() -> None:
             leash.resume()
         except OSError:
             pass
+        # ...and never leave the STOP counter bumped either: a lingering 1
+        # makes every later turn's baseline capture depend on cache timing
+        # (cross-test flake source). Pre-test value was 0 (fresh state dir).
+        try:
+            _doc = leash.read_state(ttl=0)
+            if int(_doc.get("stop_seq") or 0):
+                _doc["stop_seq"] = 0
+                _doc.pop("stop_ts", None)
+                leash._write(_doc)
+        except OSError:
+            pass
         leash._cache.clear()
         leash._cache.update(saved_cache)
 
@@ -17586,6 +17944,7 @@ def main() -> int:
         test_profiles,
         test_mission,
         test_wave3,
+        test_discover_hardening,
         test_delta2,
         test_ledger,
         test_agent_plan,

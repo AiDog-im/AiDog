@@ -99,6 +99,7 @@ while its carrier itself stays CLI/env):
 | Evolution | `#evoEnabled` `#evoDailyAt` `#evoWeeklyDay` `#evoMonthlyDay` `#evoSaveBtn` `#evoSaveState` (+ `#evoCrossNote`) | `POST /api/settings {evolution}` |
 | Exchange | `#exCapPerTx` `#exCapDaily` `#exCapSaveBtn` `#exCapState` (chips `#exThreshold` repaint) | `POST /api/settings {web3}` — both keys always |
 | Overview | `#capGrid` (kv rows) · `#cronList` (read-only job rows) | none — display only |
+| Help | — (static cards: Telegram commands from `cmd.help.body` · Console & CLI · Documentation links) | none — display only |
 
 Only blocks the operator actually edited join the save payload (dirty
 tracking), so the legacy 16-key payload keeps byte-identical behavior.

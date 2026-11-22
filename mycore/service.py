@@ -172,6 +172,17 @@ CHANNEL_POLL_SEC = 30                   # channel inbound leg cadence (seconds)
 VOICE_MAX_SECONDS = 60                  # TG voice/audio cap before STT (car 4c)
 VOICE_MAX_BYTES = 5_000_000             # download cap before STT (5MB, car 4c)
 
+# The 11 commands the TG bot answers — the single source of truth for
+#   * the `_command` dispatcher below (locked by tests: the branches must
+#     equal this tuple),
+#   * the BotFather-style menu published at poll-loop start (menu.<cmd> in
+#     the locale packs), and
+#   * web/server.py's botmenu.commands allow-list (imported from here, so
+#     the console can never offer a command the service does not answer).
+BOT_COMMANDS: tuple = ("help", "reset", "model", "status", "lang", "learn",
+                       "reflect", "evolution", "cron", "checkpoint",
+                       "version")
+
 # Honest one-line replies. The English constants stay importable (tests and
 # tooling compare against them); live replies resolve the SAME keys through
 # the locale packs (default en), so a language switch never weakens the
@@ -673,6 +684,12 @@ class ChatService:
         processed = 0
         errors = 0
         self.log.write("LOOP_START", f"mode={'once' if once else 'poll'}")
+        # Discoverability car: publish (or clear) the TG command menu ONCE,
+        # before the first getUpdates — a settings edit applies on the next
+        # service start. Guard + try/except both live here so no menu failure
+        # can ever reach the poll loop (fail-soft, one log line).
+        if self.tg.has_token:
+            self._sync_bot_menu()
         try:
             while not self._stop:
                 timeout = 0 if once else DEFAULT_POLL_TIMEOUT
@@ -715,6 +732,43 @@ class ChatService:
         finally:
             self.log.write("LOOP_END", f"processed={processed}")
         return processed
+
+    # ------------------------------------------------ command menu (TG) ---
+    def _sync_bot_menu(self) -> None:
+        """Publish or clear the Telegram command menu from web/settings.json.
+
+        botmenu.enabled=false -> deleteMyCommands; enabled (or an absent
+        block = the shipped default ON) -> setMyCommands with botmenu.commands
+        (absent/empty = every BOT_COMMANDS entry), each described by the
+        `menu.<cmd>` pack key in the service's current language. Fail-soft by
+        contract: any settings read problem or Telegram error is one log line
+        — the poll loop starts either way.
+        """
+        block = self._settings_doc().get("botmenu")
+        block = block if isinstance(block, dict) else {}
+        try:
+            if block.get("enabled") is False:
+                self.tg.delete_my_commands()
+                self.log.write("BOT_MENU", "action=delete")
+                return
+            names = block.get("commands")
+            if not isinstance(names, list):
+                names = []
+            known = [n for n in names if n in BOT_COMMANDS]  # hand-edited junk
+            if len(known) != len(names):
+                self.log.write("BOT_MENU", "action=set",
+                               "note=dropped_unknown_command")
+            if not known:                      # absent / empty / all-invalid
+                known = list(BOT_COMMANDS)
+            menu = [{"command": n, "description": self._t("menu." + n)}
+                    for n in known]
+            self.tg.set_my_commands(menu)
+            self.log.write("BOT_MENU", "action=set", f"n={len(menu)}",
+                           f"lang={self.lang}")
+        except TgError as e:
+            self.log.write("BOT_MENU_ERR", f"err={str(e)[:120]}")
+        except Exception as e:          # noqa: BLE001 — never break the loop
+            self.log.write("BOT_MENU_ERR", f"err={type(e).__name__}")
 
     # ------------------------------------------------------------- auth -----
     def _warn_denied(self, chat_id: object) -> None:

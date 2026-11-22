@@ -5,6 +5,11 @@
                                # credential slots, then optional boot + verify);
                                # --check = status report, --yes = non-interactive
                                # idempotent installer (provision + boot + verify)
+  ./aidog doctor               # health gate (forwards to deploy/aidog_doctor.py;
+                               # exit code propagated — 0 = 0 FAIL)
+  ./aidog update [check|apply] [--json]  # version channel (forwards to
+                               # deploy/aidog_update.py): check = read-only,
+                               # apply = dirty-tree guard -> fetch -> ff -> restart
   ./aidog profile list         # car F §13.1: default + per-profile runtime dirs
   ./aidog profile create <name>  # scaffold profiles/<name> (seeded, own slots)
   ./aidog profile rm <name> [--force]  # delete a non-default profile dir
@@ -805,12 +810,40 @@ def cmd_secrets(args: argparse.Namespace) -> int:
     return subprocess.call(argv)
 
 
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """`aidog doctor` — delegate to deploy/aidog_doctor.py (the health gate
+    every release runs green on). Extra args forward untouched; the target's
+    exit code is propagated (0 = 0 FAIL)."""
+    import subprocess
+    doctor_py = Path(__file__).resolve().parent / "aidog_doctor.py"
+    argv = [sys.executable, str(doctor_py)]
+    argv.extend(getattr(args, "rest", None) or [])
+    return subprocess.call(argv)
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    """`aidog update [check|apply] [--json]` — delegate to
+    deploy/aidog_update.py (check = read-only version channel by default;
+    apply = dirty-tree guard -> fetch -> fast-forward -> service restart).
+    The dispatcher never re-implements the target's grammar or validation:
+    verbs and flags travel verbatim in argv, the exit code is propagated."""
+    import subprocess
+    update_py = Path(__file__).resolve().parent / "aidog_update.py"
+    argv = [sys.executable, str(update_py),
+            getattr(args, "update_cmd", None) or "check"]
+    if getattr(args, "json", False):
+        argv.append("--json")
+    argv.extend(getattr(args, "rest", None) or [])
+    return subprocess.call(argv)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="aidog",
-        description="I'm AiDog CLI: setup (one-command install/verify) plus "
-                    "memory portability — export / import / list manifest-based "
-                    "memory bundles (private memory repo transport).")
+        description="I'm AiDog CLI: setup (one-command install/verify), "
+                    "doctor/update ops dispatch, plus memory portability — "
+                    "export / import / list manifest-based memory bundles "
+                    "(private memory repo transport).")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("setup", help="interactive setup wizard (fill credential slots, validate, boot); --check status only, --yes non-interactive installer")
@@ -821,6 +854,30 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("--no-boot", action="store_true",
                    help="skip the boot/verify step (wizard: no final question; --yes: provision + report only)")
     s.set_defaults(func=cmd_setup)
+
+    d = sub.add_parser(
+        "doctor",
+        help="health gate: run deploy/aidog_doctor.py (the checks every "
+             "release runs green on)",
+        description="Forward to deploy/aidog_doctor.py — its exit code is "
+                    "propagated (0 = 0 FAIL).")
+    d.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="extra arguments, forwarded verbatim")
+    d.set_defaults(func=cmd_doctor)
+
+    u = sub.add_parser(
+        "update",
+        help="version channel: check (default) | apply = dirty-tree guard "
+             "-> fetch -> fast-forward -> service restart",
+        description="Forward to deploy/aidog_update.py — its exit code is "
+                    "propagated.")
+    u.add_argument("update_cmd", nargs="?", default=None,
+                   help="check (default) | apply")
+    u.add_argument("--json", action="store_true",
+                   help="machine-readable output (forwarded)")
+    u.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="further flags, forwarded verbatim")
+    u.set_defaults(func=cmd_update)
 
     sc = sub.add_parser("secrets",
                         help="E2 static encryption of secrets.env (opt-in, "

@@ -361,7 +361,7 @@ if grep -q "## Product" /tmp/deploy_site_llms.txt \
    && grep -q "nine venues" /tmp/deploy_site_llms.txt \
    && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
    && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
-   && grep -q "2297/2297" /tmp/deploy_site_llms.txt \
+   && grep -q "2338/2338" /tmp/deploy_site_llms.txt \
    && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else
