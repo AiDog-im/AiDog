@@ -80,6 +80,13 @@ def resolve_model_config() -> ModelConfig:
             tmo = mc.get("timeout")
             if type(tmo) is int and 5 <= tmo <= 600:
                 cfg.timeout = float(tmo)
+            # console fix car (owner 2026-11-05): per-request output cap.
+            # The settings mycore.max_tokens is the only producer; anything
+            # absent or out of the 128..65536 window leaves
+            # ModelConfig.max_tokens (4096) byte-identical.
+            mxt = mc.get("max_tokens")
+            if type(mxt) is int and 128 <= mxt <= 65536:
+                cfg.max_tokens = mxt
     except (OSError, ValueError):
         pass
     if os.environ.get("MYCORE_BASE_URL"):

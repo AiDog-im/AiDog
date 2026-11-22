@@ -410,14 +410,16 @@ class _Typewriter:
       - push() accumulates deltas; the first send fires at the char
         threshold or the delay, whichever lands first (prefix + " …");
       - later edits need BOTH a char delta and the interval gap;
-      - edit failure -> dead: the text already on screen STAYS (never
-        rolled back, never re-sent — failure keeps the shown original);
+      - mid-stream edit failure -> dead: live edits stop, the shown text
+        STAYS (never rolled back) — finalize() is the recovery point;
       - first-send failure -> stays unstarted: finalize() returns False and
         the caller sends the full reply as ONE message (the fallback);
-      - finalize(text) is the last edit with the complete authoritative
-        text (the caller appends the release note first); True = the
-        preview owns delivery (started — even if it died mid-way), False =
-        the caller must take the ordinary single send.
+      - finalize(text) is the delivery point with the complete authoritative
+        text (the caller appends the release note first): ONE final edit;
+        if that edit fails (dead preview or transient error) the complete
+        text goes out as ONE new message — a reply is never silently left
+        truncated (owner 2026-11-05). True = the preview owns delivery
+        (started), False = the caller must take the ordinary single send.
 
     send/edit/now are injected for offline tests; all text passes through
     the tg client, which owns the 4096 cap."""
@@ -479,7 +481,10 @@ class _Typewriter:
                 self._edit(self.msg_id, self.buf + " …")
             except Exception as e:  # noqa: BLE001 — keep the shown text
                 self.dead = True
-                self._note("STREAM_EDIT_FAIL", f"err={type(e).__name__}")
+                # TgError text is sanitized in tg.py (method name + api
+                # description, never a token/URL) — safe as a log detail.
+                self._note("STREAM_EDIT_FAIL", f"err={type(e).__name__}",
+                           f"detail={str(e)[:120]}")
                 return
             self.edits += 1
             self._shown = self.buf + " …"
@@ -487,19 +492,38 @@ class _Typewriter:
             self._last_edit = now
 
     def finalize(self, text: str) -> bool:
+        """Delivery point for the complete authoritative text.
+
+        Never silently truncates: one final edit carries the full text
+        (even after a mid-stream death — the failure may have been
+        transient); if that edit fails, the full text goes out as ONE new
+        message instead of leaving the preview's partial words as the
+        final word (owner 2026-11-05). True = delivery handled here
+        (started preview owns it), False = never started: the caller
+        sends the ordinary single message.
+        """
         if not self.started:
             return False                 # caller: the ordinary single send
-        if self.dead:
-            return True                  # shown text stays; never re-sent
         if text and text != self._shown:
             try:
                 self._edit(self.msg_id, text)
                 self.edits += 1
                 self._note("STREAM_FINAL", f"edits={self.edits}",
                            f"chars={len(text)}")
-            except Exception as e:  # noqa: BLE001 — keep the shown text
+                return True
+            except Exception as e:  # noqa: BLE001 — dead or transient edit
+                self._note("STREAM_FINAL_EDIT_FAIL", f"err={type(e).__name__}",
+                           f"detail={str(e)[:120]}")
+            # Edit path broken: deliver the complete text as ONE new
+            # message (the shown partial stays visible above it — never
+            # rolled back, but never the last word either).
+            try:
+                self._send(text)
+                self._note("STREAM_FINAL_SEND", f"chars={len(text)}")
+            except Exception as e:  # noqa: BLE001 — best effort, honestly logged
                 self.dead = True
-                self._note("STREAM_EDIT_FAIL", f"err={type(e).__name__}")
+                self._note("STREAM_FINAL_SEND_FAIL", f"err={type(e).__name__}",
+                           f"detail={str(e)[:120]}")
         return True
 
 
@@ -909,12 +933,14 @@ class ChatService:
 
     def _finish_reply(self, chat_id: int, text: str,
                       thread_id: int | None = None) -> bool:
-        """Deliver a pipeline reply (backlog, owner 2026-11-02). When THIS
-        turn streamed, the live preview owns delivery: one final edit
-        carries the complete text (the release note is already appended by
-        the caller); if the preview died mid-way the already-shown text
-        STAYS — never rolled back, never re-sent. Everything else takes the
-        ordinary single send — byte-identical to the pre-backlog path."""
+        """Deliver a pipeline reply (backlog, owner 2026-11-02; recovery
+        added owner 2026-11-05). When THIS turn streamed, the live preview
+        owns delivery: one final edit carries the complete text (the
+        release note is already appended by the caller); if that edit
+        fails — dead preview or transient error — the complete text goes
+        out as ONE new message, so a reply is never left silently
+        truncated. Everything else takes the ordinary single send —
+        byte-identical to the pre-backlog path."""
         tw = self._tw
         self._tw = None
         if tw is not None and tw.started:
