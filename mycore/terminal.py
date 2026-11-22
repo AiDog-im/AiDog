@@ -158,7 +158,12 @@ def _invocation(backend: Backend, command: str):
     argv element survives the join and arrives as a single -c script argument.
     """
     if backend.kind == "local":
-        # Historical run_bash: local /bin/sh, cwd = repo root. Unchanged.
+        # Owner fix (2026-11-07): local run_bash runs /bin/bash so bashisms
+        # (set -o pipefail …) work; the command string reaches `bash -c` as
+        # ONE argv element — multi-line payloads arrive byte-for-byte.
+        # Fallback keeps the historical /bin/sh path where bash is absent.
+        if shutil.which("/bin/bash"):
+            return ["/bin/bash", "-c", command], False
         return command, True
     if backend.kind == "docker":
         if shutil.which("docker") is None:

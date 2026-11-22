@@ -36,6 +36,29 @@ from .modeltier import (HealthRegistry, SHARED_HEALTH, Upstream,  # noqa: F401
                         is_failover_class)
 
 DEFAULT_TIMEOUT = 120.0
+# L1/L2 long-task rules (owner 2026-11-07, benchmarked against the two
+# reference agents — docs/design/timeout_longtask_rules_design.md):
+# loopback gateways buffer then flush, so SILENCE is not a hang — their
+# per-read budget relaxes to this floor (the reference pattern relaxes
+# local endpoints120s -> 1800s the same way). MYCORE_STREAM_READ_TIMEOUT
+# overrides.
+LOOPBACK_IDLE_FLOOR = 1800.0
+# one transport timeout must not kill a multi-iteration turn: retry the
+# SAME unit this many times before the chain moves on (prior art:
+# "recovery continues the saved transcript").
+TRANSPORT_RETRY_MAX = 2
+
+
+def _loopback_idle() -> float:
+    """Effective per-read silence budget for loopback gateways (L1)."""
+    raw = os.environ.get("MYCORE_STREAM_READ_TIMEOUT", "")
+    try:
+        val = float(raw)
+        if val > 0:
+            return val
+    except (TypeError, ValueError):
+        pass
+    return LOOPBACK_IDLE_FLOOR
 
 
 @dataclass
@@ -455,6 +478,7 @@ class ChatClient:
         failed_from: str | None = None
         last: ModelError | None = None
         i = 0
+        retries = 0                # L2: same-unit transport-timeout budget
         while i < len(units):
             base_url, key_slot, model = units[i]
             ident = HealthRegistry.identity(base_url, key_slot)
@@ -478,6 +502,13 @@ class ChatClient:
                     self.health.record_failure(ident)
                 if emitted[0]:
                     raise              # strategy 5: no replay mid-stream
+                if ("transport failure: TimeoutError" in str(e)
+                        and retries < TRANSPORT_RETRY_MAX):
+                    # L2: one slow attempt must not kill the turn — the
+                    # transcript is already in memory, so the SAME unit
+                    # gets another chance before the chain moves on.
+                    retries += 1
+                    continue
                 nxt = self._next_unit(units, i, str(e), failover)
                 if nxt is None:
                     if failed_from is not None and failed_from != base_url:
@@ -487,6 +518,7 @@ class ChatClient:
                 if units[nxt][0] != base_url:
                     failed_from = base_url   # crossing to a different endpoint
                 i = nxt
+                retries = 0         # new unit: fresh transport-timeout budget
         raise last if last is not None else ModelError("no upstream to attempt")
 
     def _record_usage(self, base_url: str, model: str, doc: dict,
@@ -563,6 +595,9 @@ class ChatClient:
         body = json.dumps(payload).encode("utf-8")
         url = f"{base_url.rstrip('/')}/chat/completions"
         timeout = opts.get("timeout", cfg.timeout)
+        if _is_loopback(base_url):
+            # L1: local gateways get the silence floor (LOOPBACK_IDLE_FLOOR)
+            timeout = max(timeout, _loopback_idle())
         if not callable(on_delta):
             return self._finish(self.transport(url, headers, body, timeout))
 

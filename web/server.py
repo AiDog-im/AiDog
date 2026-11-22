@@ -398,6 +398,7 @@ from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, l
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore.assembly import (build_system_stack,  # noqa: E402
                               resolve_context_dirs, resolve_user_rules,
+                              resolve_capability_path,
                               DEFAULT_OBEDIENCE, validate_obedience)
 from mycore.compact import measure  # noqa: E402  (X14 context usage: the loop's own payload metric)
 from mycore.loop import run_turn  # noqa: E402
@@ -679,7 +680,7 @@ MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "tools_off", "models", "budget", "session_prune_days",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
                "max_tpm", "sniff", "decision", "subagent", "timeout",
-               "max_tokens")
+               "max_tokens", "run_deadline")
 # Car 4 (D6): fields the mycore.decision block accepts — the key slot is NOT
 # one of them (see the DEFAULT_SETTINGS note).
 DECISION_KEYS = ("enabled", "url", "model", "router_model")
@@ -1687,6 +1688,19 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             or not 128 <= val <= 65536:
                         errors.append(
                             "mycore.max_tokens must be an integer of 128..65536")
+                        continue
+                    clean_mc[key] = val
+                    continue
+                if key == "run_deadline":
+                    # long-task rules (owner2026-11-07, L3): turn wall-
+                    # clock ceiling —0 = off; the absent key keeps the cli
+                    # default (1800s). Closed range, bool refused like its
+                    # siblings.
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not 0 <= val <= 86400:
+                        errors.append(
+                            "mycore.run_deadline must be an integer of "
+                            "0..86400 seconds (0 = off)")
                         continue
                     clean_mc[key] = val
                     continue
@@ -4343,6 +4357,7 @@ def chat_context_usage() -> dict:
         stack = build_system_stack(
             context_dirs=resolve_context_dirs(),
             user_rules=resolve_user_rules(),
+            capability_path=resolve_capability_path(),
             runtime_facts=cli.resolve_runtime_facts())
         history = [m for m in Session(chat_session_path()).load()
                    if m.get("role") != "system"]
@@ -4693,6 +4708,7 @@ def _run_webhook_turn(text: str, sender: str):
     stack = build_system_stack(
         context_dirs=resolve_context_dirs(),
         user_rules=resolve_user_rules(),
+        capability_path=resolve_capability_path(),
         runtime_facts=cli.resolve_runtime_facts(cfg.model))
     messages = stack + history
     pre_ids = {id(m) for m in messages}
@@ -5837,6 +5853,12 @@ def _discover_candidates(base: str) -> list[str]:
     out = [build("/models")]
     if not tail.endswith("/v1"):
         out.append(build("/v1/models"))
+    else:
+        # A /v1 base may still serve the directory at the root (observed on
+        # the local gateway: /v1/models answers an empty list while /models
+        # carries the real one) — offer the root as the fallback candidate.
+        out.append(urllib.parse.urlunsplit(
+            (parts.scheme, parts.netloc, "/models", parts.query, "")))
     return out
 
 
@@ -5915,6 +5937,7 @@ def discover_models(base: str, api_key: str = "", slot: str = "") -> dict:
     raw = b""
     status = 0
     reason = "HTTP 404"
+    remembered: tuple[int, bytes] | None = None   # an empty-directory 200
     for i, url in enumerate(candidates):
         try:
             req = urllib.request.Request(url, headers=headers)
@@ -5925,17 +5948,45 @@ def discover_models(base: str, api_key: str = "", slot: str = "") -> dict:
             status = int(getattr(e, "code", 0) or 0)
             reason = f"HTTP {status}"
             if status in (404, 405) and i + 1 < len(candidates):
+                if remembered:                  # prefer the empty directory
+                    status, raw = remembered
+                    break
                 continue                       # try the standard /v1 path
+            if remembered:
+                status, raw = remembered
+                break
             return {"ok": False, "reason": reason, "auth": auth}
         except urllib.error.URLError as e:
+            if remembered:
+                status, raw = remembered
+                break
             inner = getattr(e, "reason", None)
             return {"ok": False, "auth": auth, "reason":
                     type(inner).__name__ if inner is not None else "URLError"}
         except Exception as e:  # noqa: BLE001 — class name only, never text
+            if remembered:
+                status, raw = remembered
+                break
             return {"ok": False, "reason": type(e).__name__, "auth": auth}
-        break                                   # a real response: stop asking
+        # a real response: stop asking — unless it is an empty directory
+        # with a fallback candidate left (the /v1-stub gateway case: the
+        # empty stub must not mask a real root /models list)
+        if i + 1 < len(candidates):
+            try:
+                probe = json.loads(raw.decode("utf-8"))
+                ent = probe.get("data") if isinstance(probe, dict) else None
+                if isinstance(ent, list) and not ent:
+                    remembered = (status, raw)
+                    reason = "HTTP 404"
+                    continue
+            except Exception:  # noqa: BLE001 — not JSON: treat as real
+                pass
+        break
     else:
-        return {"ok": False, "reason": reason, "auth": auth}
+        if remembered:
+            status, raw = remembered
+        else:
+            return {"ok": False, "reason": reason, "auth": auth}
     if not (200 <= status < 300):
         return {"ok": False, "reason": f"HTTP {status}", "auth": auth}
     if len(raw) > DISCOVER_BODY_MAX:
@@ -8402,6 +8453,7 @@ class Handler(BaseHTTPRequestHandler):
         stack = build_system_stack(
             context_dirs=resolve_context_dirs(),
             user_rules=resolve_user_rules(),
+            capability_path=resolve_capability_path(),
             runtime_facts=cli.resolve_runtime_facts(cfg.model))
         messages = stack + history
         pre_ids = {id(m) for m in messages}
@@ -8460,12 +8512,57 @@ class Handler(BaseHTTPRequestHandler):
                              and not isinstance(prog, bool) else None)})
 
         registry = build_registry(disabled=resolve_disabled_tools())
-        registry.bind_progress(on_mcp_progress)
+        # L4 (owner2026-11-07): while the model stays silent >=20s the
+        # stream shows a "thinking" progress line instead of dead air
+        # (prior art typed-progress parity; TG typing already covers its
+        # channel). turn_lock keeps the timer's frame from interleaving
+        # with a delta landing at the same instant.
+        turn_lock = threading.Lock()
+        last_act = [time.monotonic()]
+        orig_event, orig_delta, orig_prog = on_event, on_delta, on_mcp_progress
+
+        def _busy_event(kind: str, data: dict) -> None:
+            with turn_lock:
+                last_act[0] = time.monotonic()
+                orig_event(kind, data)
+
+        def _busy_delta(piece: str) -> None:
+            with turn_lock:
+                last_act[0] = time.monotonic()
+                orig_delta(piece)
+
+        def _busy_progress(payload: dict) -> None:
+            with turn_lock:
+                last_act[0] = time.monotonic()
+                orig_prog(payload)
+
+        registry.bind_progress(_busy_progress)
         chat_fn = ChatClient(cfg).chat
-        res = run_turn(messages, chat_fn, registry,
-                       on_event=on_event if alive[0] else None,
-                       budget_chars=chat_budget(), on_delta=on_delta,
-                       should_stop=lambda: leash.stop_requested(stop_base))
+        hb_stop = threading.Event()
+
+        def _heartbeat() -> None:
+            while not hb_stop.wait(10):
+                silent = time.monotonic() - last_act[0]
+                if silent >= 20 and alive[0]:
+                    with turn_lock:
+                        if alive[0] and not self._sse(
+                                "progress",
+                                {"server": "", "tool": "model",
+                                 "message": f"model thinking ({int(silent)}s)",
+                                 "progress": None}):
+                            alive[0] = False
+
+        hb = threading.Thread(target=_heartbeat, daemon=True,
+                              name="chat-think-heartbeat")
+        hb.start()
+        try:
+            res = run_turn(messages, chat_fn, registry,
+                           on_event=_busy_event if alive[0] else None,
+                           budget_chars=chat_budget(), on_delta=_busy_delta,
+                           should_stop=lambda: leash.stop_requested(stop_base))
+        finally:
+            hb_stop.set()
+            hb.join(timeout=2.0)
 
         delta = [m for m in messages
                  if id(m) not in pre_ids and m.get("role") != "system"]
@@ -8548,6 +8645,7 @@ class Handler(BaseHTTPRequestHandler):
         messages = build_system_stack(
             context_dirs=resolve_context_dirs(),
             user_rules=resolve_user_rules(),
+            capability_path=resolve_capability_path(),
             runtime_facts=cli.resolve_runtime_facts(cfg.model))
         if client_system:
             messages.append({"role": "system", "content": client_system})
