@@ -740,7 +740,11 @@ MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
 # Pipeline car: the six writable fields of the acquisition-pipeline controls
 # card (mycore.pipeline.py owns the bounds; this tuple owns the field set).
 PIPELINE_KEYS = ("enabled", "auto_source", "interval_min", "daily_cap",
-                 "from_name", "physical_address", "opt_out_note")
+                 "from_name", "physical_address", "opt_out_note",
+                 # the drafting brain (design D1/D2): the mode and the
+                 # money-burn cap. Both are in mycore.pipeline's
+                 # DEFAULT_SETTINGS, so the validator accepts them.
+                 "drafting", "model_drafts_per_day")
 # Car 4 (D6): fields the mycore.decision block accepts — the key slot is NOT
 # one of them (see the DEFAULT_SETTINGS note).
 DECISION_KEYS = ("enabled", "url", "model", "router_model")
@@ -1684,6 +1688,24 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                             or not pipeline.CAP_MIN <= val <= pipeline.CAP_MAX:
                         errors.append("pipeline.daily_cap must be an integer in "
                                       f"{pipeline.CAP_MIN}..{pipeline.CAP_MAX}")
+                        continue
+                    clean_pl[key] = val
+                    continue
+                if key == "drafting":
+                    # the drafting brain's mode: exactly two modes, and
+                    # anything else is refused rather than silently treated
+                    # as the template.
+                    if val in ("template", "model"):
+                        clean_pl[key] = val
+                    else:
+                        errors.append("pipeline.drafting must be 'template' "
+                                      "or 'model'")
+                    continue
+                if key == "model_drafts_per_day":
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not 0 <= val <= pipeline.CAP_MAX:
+                        errors.append("pipeline.model_drafts_per_day must be "
+                                      f"an integer in 0..{pipeline.CAP_MAX}")
                         continue
                     clean_pl[key] = val
                     continue
@@ -4363,6 +4385,20 @@ def _stt_rate_ok() -> bool:
             return False
         _stt_times.append(now)
         return True
+
+
+def _pipeline_brain(settings: dict | None = None):
+    """The drafting brain for the pipeline, or None (the template). The
+    brain is constructed ONLY when `pipeline.drafting` is "model" — with
+    the shipped default nothing is built and no model call can happen."""
+    try:
+        from mycore import pipeline_brain
+    except Exception:  # noqa: BLE001 — module absent = the template
+        return None
+    try:
+        return pipeline_brain.make_brain(settings)
+    except Exception:  # noqa: BLE001 — never break a pipeline action
+        return None
 
 
 def _exchange_quote_rate_ok() -> bool:
@@ -9291,7 +9327,8 @@ class Handler(BaseHTTPRequestHandler):
             payload: dict = {}
             try:
                 if action == "run":
-                    payload["report"] = pipeline.auto_tick(state, settings)
+                    payload["report"] = pipeline.auto_tick(
+                        state, settings, brain=_pipeline_brain(settings))
                 elif action == "source.discussions":
                     payload["report"] = pipeline.source_discussions(state)
                 elif action == "lead.add":
@@ -9309,7 +9346,8 @@ class Handler(BaseHTTPRequestHandler):
                     payload["suppressed"] = pipeline.suppress(
                         state, doc.get("email"), note="owner decision")
                 elif action == "draft.make":
-                    payload["drafted"] = pipeline.draft_ready(state, settings)
+                    payload["drafted"] = pipeline.draft_ready(
+                        state, settings, brain=_pipeline_brain(settings))
                 elif action == "draft.edit":
                     payload["draft"] = pipeline.edit_draft(
                         state, self._pipeline_id(doc), subject=doc.get("subject"),

@@ -783,6 +783,7 @@
         <section class="card">
           <h2><span data-i18n="sec.pipeQueue">APPROVAL QUEUE</span>
               <span class="chat-badge" id="pipeDraftCount">–</span></h2>
+          <div class="stat-note" id="pipeBrainMeter" hidden></div>
           <div id="pipeDrafts"></div>
         </section>
       </div>
@@ -832,6 +833,18 @@
           <input type="text" id="pipeOptOut" maxlength="240" autocomplete="off"
                  data-i18n-ph="pipe.optOutPh" placeholder="leave empty for the standard line">
         </div>
+        <div class="ctl-row">
+          <label for="pipeDrafting" data-i18n="pipe.drafting">Drafting</label>
+          <select id="pipeDrafting">
+            <option value="template" data-i18n="pipe.draftingTemplate">Template (no model)</option>
+            <option value="model" data-i18n="pipe.draftingModel">Model brain (one call per draft)</option>
+          </select>
+        </div>
+        <div class="ctl-row">
+          <label for="pipeModelCap" data-i18n="pipe.modelCap">Model drafts per day</label>
+          <input type="number" id="pipeModelCap" min="0" max="50" step="1">
+        </div>
+        <div class="stat-note" data-i18n="pipe.brainNote">the model brain writes the message only — the opt-out line, signature and postal address are appended by the product, and any rule violation falls back to the template. It costs one model call per draft, so it has its own daily cap.</div>
         <div class="stat-note" data-i18n="pipe.note">outbound messages carry a real subject, Reply-To and List-Unsubscribe; the postal address is required (CAN-SPAM) and an opt-out suppresses the address permanently.</div>
       </section>
     </section>

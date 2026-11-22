@@ -96,12 +96,39 @@ SMTP call (~1 s); skipping a write would be silent data loss.
 | `from_name` | `""` | signature line in the body |
 | `physical_address` | `""` | **required before the first send** (CAN-SPAM) |
 | `opt_out_note` | `""` | override for the standard opt-out line |
+| `drafting` | `"template"` | `"template"` (today) or `"model"` (the drafting brain) |
+| `model_drafts_per_day` | `5` | the brain's own money-burn cap (0–50), independent of `daily_cap` |
 
 The service leg (`_maybe_pipeline`, every `interval_min`) sources, qualifies and
 drafts only: `pipeline.auto_tick()` takes **no channel parameter**, so the
 automatic half of the pipeline cannot send by construction. Everything it does
 is one `PIPELINE_TICK` line in `service.log`; a failure is one `PIPELINE_ERR`
 line and the loop continues.
+
+## The drafting brain (`mycore/pipeline_brain.py`)
+
+Opt-in, off by default. With `pipeline.drafting = "model"`, each draft
+costs **one** model call: the model writes the **message body only**, and
+the product appends the opt-out line, the signature and the postal address
+itself — compliance cannot be lost to a model that forgot it.
+
+| Rule | What happens |
+|---|---|
+| the lead's text is untrusted data | the system message says so explicitly; the data sits in a `<lead_data>` block and may never act as an instruction |
+| no tools on the call | an injected instruction cannot make the model *do* anything — at worst it changes text the owner reads before sending |
+| the recipient is never model-chosen | it comes from the lead record; the model never sees an address |
+| a foreign address in the output | the body is **rejected** — the template is used instead |
+| executable markup (`<script>`, `javascript:` …) | rejected |
+| a model error, a timeout, an unusable answer | **fallback to the template**, with the reason recorded on the draft |
+| the money-burn cap | checked **before** the call; a lead that misses the cap still gets a template draft, and the row says `template (model cap reached)` |
+| token accounting | per draft and per day; an incomplete provider usage reads `?`, never a made-up number |
+
+The draft's body is the model's text; the footer is the product's. With the
+switch off, or with no model configured, the output is byte-identical to
+the template's.
+
+Design and adjudication (D1–D9):
+`docs/design/pipeline_drafting_brain_design.md`.
 
 ## API
 
@@ -115,14 +142,15 @@ view never has to guess what happened.
 
 ## Honest gaps (queued, not hidden)
 
-- **The model drafting brain is a deliberately unwired seam.** D4 (a gateway
-  model as the qualifying/drafting brain) stays valid, but wiring it changes the
-  cost and prompt-injection surface (one model call per draft, meter accounting,
-  lead-supplied text in a prompt) — that is its own increment, not a smuggled
-  default. Today the body is a template the owner edits.
 - **Real-provider SMTP acceptance is still pending credentials** (D6). The send
   path is exercised against a local SMTP sink in the core suite and in the smoke
   tests; the channel route itself has been shipping since 0.5.5x.
+- **The drafting brain does not know the recipient.** It reacts to the lead's
+  text, but it cannot research the company, and it must never invent facts —
+  so a thin lead signal yields a short honest note rather than a clever hook.
+- **A drafting brain needs a model endpoint.** With none configured the
+  factory builds nothing and the pipeline stays on the template; the switch
+  being on is never enough to make a call happen.
 - **No auto-reply.** A triaged reply is for the owner's eyes; replying is done in
   the owner's own mail client (or through the existing chat path, which is
   governed by its own allowlist).

@@ -2922,6 +2922,19 @@ class ChatService:
         self._drain_channel_files(chan, route, target)
 
     # ------------------------------------------------- acquisition pipeline ---
+    def _pipeline_brain(self, settings: dict | None = None):
+        """The drafting brain for the pipeline leg, or None (the template).
+        Built ONLY when `pipeline.drafting` is "model" — the shipped default
+        constructs nothing, so the leg cannot call a model by accident."""
+        try:
+            from mycore import pipeline_brain
+        except Exception:  # noqa: BLE001 — module absent = the template
+            return None
+        try:
+            return pipeline_brain.make_brain(settings)
+        except Exception:  # noqa: BLE001 — never break the loop
+            return None
+
     def _maybe_pipeline(self) -> None:
         """Acquisition-pipeline leg (pipeline car): at most once per
         `pipeline.interval_min` while the block is enabled. It sources,
@@ -2949,7 +2962,9 @@ class ChatService:
             # on the next send (auditor P2-1, cross-process layer).
             with pipeline_mod.mutation_lock():
                 doc = pipeline_mod.load()
-                report = pipeline_mod.auto_tick(doc, doc_settings, now=nowt)
+                report = pipeline_mod.auto_tick(
+                    doc, doc_settings, now=nowt,
+                    brain=self._pipeline_brain(doc_settings))
                 pipeline_mod.save(doc)
         except Exception as e:        # noqa: BLE001 — one line, loop survives
             self.log.write("PIPELINE_ERR", f"err={type(e).__name__}")
