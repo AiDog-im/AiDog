@@ -13,7 +13,14 @@ const DEFAULT_PORT = '19167';
 
 function portFromEnv(env, pinned) {
   const raw = env && env.AIDOG_WEB_PORT;
-  if (raw && String(raw).trim()) return String(raw).trim();
+  if (raw && String(raw).trim()) {
+    const v = String(raw).trim();
+    // Wrap-up audit W4-01: only a plain integer port may reach URL
+    // construction — a corrupt/hostile value (`19167@evil:443`) must fall
+    // through exactly like web/server.py _resolve_web_port does, never
+    // become `http://127.0.0.1:19167@evil:443` (userinfo@host injection).
+    if (/^\d{1,5}$/.test(v) && Number(v) >= 1 && Number(v) <= 65535) return v;
+  }
   if (pinned && String(pinned).trim()) return String(pinned).trim();
   return DEFAULT_PORT;
 }
