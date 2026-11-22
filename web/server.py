@@ -122,6 +122,10 @@ Routes:
                                    WITHOUT id the list shape is unchanged
   GET  /api/fleet               -> local-only read model: recent clone fleets,
                                    bounded rows, no auth, fail-soft empty
+  GET  /api/fleet/plans          -> the owner's sign-off queue for a
+                                   WRITE-capable clone fleet (read-only list)
+  POST /api/fleet/plans/<id>    -> Bearer; {action: approve|reject|cancel}
+                                   -> one approval serves ONE dispatch
   POST /api/mission             -> Bearer; {action: start|stop|pause|resume,
                                    goal?, id?, reporting?, budget?, deadline?,
                                    redlines?, deliverable?} -> mission
@@ -721,7 +725,7 @@ MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
                "max_tpm", "sniff", "decision", "subagent", "timeout",
                "max_tokens", "run_deadline", "allowed_roots", "profiling",
-               "search")
+               "search", "fleet")
 # Pipeline car: the six writable fields of the acquisition-pipeline controls
 # card (mycore.pipeline.py owns the bounds; this tuple owns the field set).
 PIPELINE_KEYS = ("enabled", "auto_source", "interval_min", "daily_cap",
@@ -2011,6 +2015,41 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                     if bad:
                         errors.append(f"mycore.decision: {bad}")
                         continue
+                    clean_mc[key] = block
+                    continue
+                if key == "fleet":
+                    # Need-B P1a: the auto-split mode of the decision key.
+                    # off = the band is not computed; advise (default) = the
+                    # band is computed and reported but never refuses;
+                    # enforce = a fan-out wider than the band justifies is
+                    # refused with the reason. One key, three honest modes.
+                    if not isinstance(val, dict):
+                        errors.append("mycore.fleet must be an object")
+                        continue
+                    unknown = [k for k in val
+                               if k not in ("auto_split", "require_signoff")]
+                    if unknown:
+                        errors.append("unknown mycore.fleet key: "
+                                      f"{str(unknown[0])[:40]}")
+                        continue
+                    block = {}
+                    mode = val.get("auto_split")
+                    if mode is not None:
+                        if not isinstance(mode, str) or mode.strip().lower() \
+                                not in ("off", "advise", "enforce"):
+                            errors.append("mycore.fleet.auto_split must be "
+                                          "one of: off | advise | enforce")
+                            continue
+                        block["auto_split"] = mode.strip().lower()
+                    signoff = val.get("require_signoff")
+                    if signoff is not None:
+                        if not isinstance(signoff, str) \
+                                or signoff.strip().lower() not in (
+                                    "off", "roles", "writes"):
+                            errors.append("mycore.fleet.require_signoff must "
+                                          "be one of: off | roles | writes")
+                            continue
+                        block["require_signoff"] = signoff.strip().lower()
                     clean_mc[key] = block
                     continue
                 if key == "subagent":
@@ -6196,6 +6235,32 @@ def collect_profiling() -> dict:
     }
 
 
+def collect_fleet_plans() -> dict:
+    """GET /api/fleet/plans — the owner's sign-off queue for a write-capable
+    clone fleet (Need-B P1b). Read-only list; the decision is a separate
+    Bearer POST."""
+    try:
+        from mycore import fleetplan
+        rows = [fleetplan.public_row(p) for p in fleetplan.load_plans()]
+    except Exception as e:  # noqa: BLE001 — the queue must always answer
+        return {"plans": [], "note": f"fleet plans unavailable "
+                                    f"({type(e).__name__})"}
+    return {"plans": rows, "read_only": True}
+
+
+def collect_memory(query: str = "") -> dict:
+    """GET /api/memory — the read-only browsable view of the curated memory
+    files (Need-B B-11). Local-only, no auth, never writes; an absent file
+    is an empty slot with a note, never a guess."""
+    try:
+        from mycore import memoryview
+        return memoryview.collect(REPO, query)
+    except Exception as e:  # noqa: BLE001 — the view must always answer
+        return {"slots": [], "entries_total": 0, "query": "",
+                "read_only": True, "local_only": True, "editable": False,
+                "note": f"memory view unavailable ({type(e).__name__})"}
+
+
 def collect_fleet() -> dict:
     """GET /api/fleet — local-only, read-only fleet board. Fail-soft to an
     honest empty structure when the ledger is inactive or unavailable."""
@@ -7534,6 +7599,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_mission())
         if path == "/api/fleet":
             return self._json(collect_fleet())
+        if path == "/api/fleet/plans":
+            return self._json(collect_fleet_plans())
+        if path.startswith("/api/fleet/plans/"):
+            return self._handle_fleet_plan_decision(
+                path[len("/api/fleet/plans/"):])
+        if path == "/api/memory":
+            q = ""
+            if "?" in self.path:
+                q = (urllib.parse.parse_qs(
+                    self.path.split("?", 1)[1]).get("q") or [""])[0]
+            return self._json(collect_memory(q))
         if path == "/api/sniff":
             return self._json(collect_sniff())
         if path == "/api/profiling":
@@ -10494,6 +10570,37 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write(f"agent plans read failed err={type(e).__name__}\n")
             return self._json({"error": "plan store unreadable"}, 502)
         return self._json({"plans": rows})
+
+    def _handle_fleet_plan_decision(self, plan_id: str) -> None:
+        """POST /api/fleet/plans/<id> — the owner's sign-off for a
+        write-capable clone fleet (Need-B P1b). Bearer first (the model has
+        no token and therefore no approve path), then
+        {action: approve|reject|cancel}. An approval authorizes ONE dispatch
+        and is consumed by it. Unknown id 404, closed plan 409."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if not isinstance(action, str) or action not in (
+                "approve", "reject", "cancel"):
+            return self._json(
+                {"error": "invalid action",
+                 "details": ["action must be one of approve|reject|cancel"]},
+                400)
+        pid = str(urllib.parse.unquote(plan_id) or "").strip()
+        try:
+            from mycore import fleetplan as _fleetplan
+        except Exception as e:  # noqa: BLE001 — module absent = honest 503
+            sys.stderr.write(f"fleet plans import failed err={type(e).__name__}\n")
+            return self._json({"error": "plan store unavailable"}, 503)
+        plan, err = _fleetplan.decide(pid, action)
+        if plan is None:
+            code = 404 if err == "unknown plan id" else 409
+            return self._json({"error": err or "decision failed"}, code)
+        return self._json({"ok": True, "plan_id": pid,
+                           "status": plan.get("status")})
 
     def _handle_agent_settings_plan_decide(self, plan_id: str) -> None:
         """POST /api/agent/settings-plans/<id> — THE approval surface (car C).

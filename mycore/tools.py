@@ -1167,7 +1167,7 @@ def _cron_locked(action, spec, text, kind, job_id, state_dir):
 
 
 def _delegate(tasks: list, extra_tools: list | None,
-              registry: "ToolRegistry") -> str:
+              registry: "ToolRegistry", approval: str = "") -> str:
     """The `delegate` tool handler (car 2-D6): isolated parallel sub-agents.
     Chat + budget come from the ACTIVE turn's binding (loop.run_turn) — a
     dispatch outside run_turn fails honestly instead of inventing a model."""
@@ -1177,7 +1177,8 @@ def _delegate(tasks: list, extra_tools: list | None,
     run_deadline = remaining() if remaining is not None else None
     return subagent.run_tasks(tasks, registry, extra_tools, chat, budget,
                               should_stop=should_stop,
-                              run_deadline=run_deadline)
+                              run_deadline=run_deadline,
+                              approval_id=approval or "")
 
 
 def _execute_code(steps: list | None, code: str | None, timeout: int,
@@ -1641,10 +1642,17 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                "skill_route); name extra tools in `tools` to grant them "
                "explicitly. `delegate` and `execute_code` can never be granted "
                "to a sub-agent. Each tasks item is a string, or an object "
-               "{task, model} to run that one sub-agent on a different model "
-               "— model must be listed in settings mycore.models (an unknown "
-               "or unconfigured list fails that task honestly). Returns one "
-               "labelled block per task.",
+               "{task, model, role} to run that one sub-agent on a different "
+               "model and/or a named role — model must be listed in settings "
+               "mycore.models (an unknown or unconfigured list fails that "
+               "task honestly); role is one of scout | analyst | implementer "
+               "| verifier and fixes that clone's tool policy, iteration "
+               "bound and report contract (a role can narrow the granted "
+               "tools, never widen them). A fleet that may WRITE needs the "
+               "owner's approval first: the call is refused with a plan id, "
+               "and once the owner approves that plan in the console, pass "
+               "it back as `approval`. Returns one labelled block per "
+               "task.",
                {"type": "object", "properties": {
                    "tasks": {"type": "array",
                              "items": {
@@ -1652,18 +1660,25 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
                                      {"type": "string"},
                                      {"type": "object",
                                       "properties": {
-                                          "task": _STR, "model": _STR},
+                                          "task": _STR, "model": _STR,
+                                          "role": _STR},
                                       "required": ["task"]}]},
                              "minItems": 1, "maxItems": 3,
                              "description": "1-3 independent task "
                                             "descriptions (plain strings, "
-                                            "or {task, model} to override "
-                                            "the model for that task)"},
+                                            "or {task, model, role} to "
+                                            "override the model and/or "
+                                            "pick a role for that task)"},
                    "tools": {"type": "array", "items": _STR,
                              "description": "extra tool names to grant beyond "
-                                            "the read-only default"}},
+                                            "the read-only default"},
+                   "approval": {"type": "string",
+                                "description": "the id of an owner-approved "
+                                               "fleet plan, required when the "
+                                               "fleet may write"}},
                 "required": ["tasks"]},
-               lambda tasks, tools=None: _delegate(tasks, tools, r))
+               lambda tasks, tools=None, approval=None: _delegate(
+                   tasks, tools, r, approval or ""))
     r.register("execute_code",
                "Fold multi-step work into ONE round trip. Exactly one of: "
                "`steps` = ordered [{name, args}, ...] tool calls (max 8) run "

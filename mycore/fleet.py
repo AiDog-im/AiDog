@@ -392,6 +392,10 @@ def public_clone(row: dict) -> dict:
         "out_tok": row.get("out_tok"),
         "usage_complete": row.get("usage_complete") is True,
         "model": safe_model,
+        "role": (row.get("role") if isinstance(row.get("role"), str)
+                 and len(str(row.get("role"))) <= 20 else ""),
+        "band": (row.get("band") if isinstance(row.get("band"), str)
+                 and len(str(row.get("band"))) <= 4 else ""),
         "tools": safe_tools,
         "task_digest": row.get("task_digest"),
         "lint": row.get("lint"),

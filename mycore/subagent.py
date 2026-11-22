@@ -36,6 +36,8 @@ from typing import Callable
 from .loop import run_turn
 from .tools import ToolError, ToolRegistry
 from . import fleet
+from . import fleetgate
+from . import fleetplan
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 MAX_PARALLEL = 3                    # alignment target: 3 parallel slots
@@ -117,13 +119,24 @@ def _one(task: str, idx: int, total: int, sub_registry: ToolRegistry,
          chat: Callable[..., dict], budget: int | None,
          model: str | None = None, max_iters: int = SUB_MAX_ITERS,
          should_stop: Callable[[], bool] | None = None,
-         run_deadline: float | None = None) -> dict:
+         run_deadline: float | None = None,
+         role: str | None = None, role_name: str | None = None,
+         band: str = "") -> dict:
     """Run one sub-agent turn. Never raises; every outcome is structured.
     The provider's usage block is captured from the existing chat response;
-    no extra model call is made."""
+    no extra model call is made. `role` fixes the clone's system line and
+    report contract; the tool set is the role's policy intersected with what
+    the parent granted."""
     import time
-    messages = [{"role": "system", "content": SYSTEM_LINE},
-                {"role": "user", "content": task}]
+    # No role named -> today's behavior exactly: the shared system line and
+    # the task text verbatim. A role is opt-in, never a silent change.
+    role_record = fleetgate.ROLE_CATALOG.get(role or "", {})
+    system_line = role_record.get("system") or SYSTEM_LINE
+    brief = task
+    if role_record:
+        brief = f"{task}\n\n{fleetgate.report_prompt(role_record)}"
+    messages = [{"role": "system", "content": system_line},
+                {"role": "user", "content": brief}]
     usage = {"in_tok": None, "out_tok": None, "complete": True}
     base = chat
 
@@ -186,6 +199,8 @@ def _one(task: str, idx: int, total: int, sub_registry: ToolRegistry,
     row_model = model or "parent"
     row = {"clone": f"c{idx}", "task_digest": task_digest,
            "task_excerpt": excerpt, "lint": lint, "model": row_model,
+           "role": role_name or "", "report": fleetgate.parse_report(body),
+           "band": band,
            "tools": list(sub_registry.names()), "stop": stop,
            "tool_calls": calls,
            "in_tok": usage["in_tok"] if usage["complete"] else None,
@@ -196,10 +211,26 @@ def _one(task: str, idx: int, total: int, sub_registry: ToolRegistry,
             "row": row}
 
 
+def _approval_valid(plan_id: str, granted: list[str]) -> bool:
+    """An approval is valid when the plan is APPROVED and its recorded tool
+    set covers every write tool this dispatch would use. One approval serves
+    one dispatch: the plan is consumed so a second write needs a new one."""
+    plan = fleetplan.get_plan(plan_id)
+    if not plan or plan.get("status") != "approved":
+        return False
+    approved = set(plan.get("tools") or [])
+    needed = {t for t in granted if t in fleetplan.WRITE_TOOLS}
+    if not needed.issubset(approved):
+        return False
+    fleetplan.consume(plan_id)   # consume: one approval, one dispatch
+    return True
+
+
 def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
               chat: Callable[..., dict] | None, budget: int | None, *,
               should_stop: Callable[[], bool] | None = None,
-              run_deadline: float | None = None) -> str:
+              run_deadline: float | None = None,
+              approval_id: str = "") -> str:
     """Validate + fan out up to MAX_PARALLEL tasks in parallel, fold the
     results. Raises ToolError for caller mistakes (validation), never for a
     sub-agent's runtime outcome. A task entry is a plain string or an object
@@ -213,9 +244,10 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
     if len(tasks) > max_parallel:
         raise ToolError(f"at most {max_parallel} tasks per call "
                         f"(got {len(tasks)})")
-    clean: list[tuple[str, str | None]] = []
+    clean: list[tuple[str, str | None, str | None]] = []
     for i, t in enumerate(tasks, 1):
         model = None
+        role = None
         if isinstance(t, str):
             if not t.strip():
                 raise ToolError(f"task {i} must be a non-empty string")
@@ -228,10 +260,16 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
                                       or not model.strip()):
                 raise ToolError(f"task {i}: 'model' must be a non-empty "
                                 "string when present")
+            role = t.get("role")
+            if role is not None and (not isinstance(role, str)
+                                     or not role.strip()):
+                raise ToolError(f"task {i}: 'role' must be a non-empty "
+                                "string when present")
             t = text
         else:
             raise ToolError(f"task {i} must be a non-empty string")
-        clean.append((t.strip(), model.strip() if model else None))
+        clean.append((t.strip(), model.strip() if model else None,
+                      role.strip().lower() if role else None))
     if chat is None:
         raise ToolError("no model connection bound to this turn "
                         "(delegate is only available inside a run_turn)")
@@ -243,9 +281,9 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
     if non_str:
         raise ToolError("tools entries must be tool-name strings")
     sub_registry = registry.select(names)
-    allowed = _allowed_models() if any(m for _, m in clean) else None
+    allowed = _allowed_models() if any(m for _, m, _ in clean) else None
     plan: list[tuple[int, str, str | None, str | None]] = []
-    for i, (text, model) in enumerate(clean, 1):
+    for i, (text, model, role) in enumerate(clean, 1):
         why = None
         if model:
             if not allowed:
@@ -257,7 +295,55 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
                        "fallback")
         plan.append((i, text, model, why))
     total = len(clean)
-    fleet_id = f"f{int(time.time())}{__import__('secrets').token_hex(2)}"
+    # The decision key + the sign-off gate both read the same settings block.
+    gate = fleetgate.settings_block()
+    mode = fleetgate.resolve_mode(gate)
+    # D3 sign-off gate (P1b): a WRITE-capable fleet waits for the owner's
+    # approval. The gate's scope is the owner's setting: `roles` (default)
+    # covers the new multi-role surface, `writes` covers every write-capable
+    # fleet, `off` disables it. A read-only fleet is never gated.
+    granted_names = list(sub_registry.names())
+    signoff = fleetgate.resolve_signoff(gate)
+    named_role = any(r for _, _, r in clean)
+    gate_write = (signoff == "writes") or (signoff == "roles" and named_role)
+    # The gate reads the tools the fleet would ACTUALLY use: a role may
+    # narrow them, and the narrowest role in the fleet decides.
+    effective_names: list[str] = []
+    for _t, _m, role_name in clean:
+        if not role_name:
+            effective_names = list(granted_names)
+            break
+        role_record = fleetgate.ROLE_CATALOG.get(role_name, {})
+        allowed = set(fleetgate.role_tools(role_record))
+        effective_names.extend(t for t in granted_names if t in allowed)
+    write_capable = gate_write and fleetplan.is_write_capable(effective_names)
+    approval = ""
+    if write_capable:
+        approval = str(approval_id or "").strip()
+        if not approval:
+            plan = fleetplan.propose(
+                [{"summary": t} for t, _, _ in clean], granted_names)
+            if plan.get("error"):
+                raise ToolError(plan["error"])
+            raise ToolError(
+                f"this fleet may write ({', '.join(sorted(set(granted_names) & fleetplan.WRITE_TOOLS))}) "
+                f"and needs your approval first — plan {plan['id']} is waiting "
+                "for you (approve it in the console, then dispatch again with "
+                "approval=\"<plan id>\")")
+        if not _approval_valid(approval, granted_names):
+            raise ToolError("the approval for this fleet is not valid")
+    # THE DECISION KEY (Need-B P1a): a deterministic, zero-token band over
+    # the briefs. `advise` (default) only reports; `enforce` may refuse a
+    # split wider than the band justifies; `off` skips the band entirely.
+    band = (fleetgate.band_for([t for t, _, _ in clean]) if mode != "off"
+            else {"band": "-", "ceiling": total, "score": 0, "reasons": []})
+    if mode == "enforce" and total > int(band.get("ceiling") or total):
+        raise ToolError(
+            f"this request does not warrant {total} clones (band "
+            f"{band.get('band')}, ceiling {band.get('ceiling')}: "
+            f"{'; '.join(band.get('reasons') or ['narrow request'])} — "
+            "do it inline or dispatch fewer briefs")
+    fleet_id = f"f{int(time.time())}{secrets.token_hex(2)}"
     # budget_chars is a context-compaction threshold, not a spend cap. Split
     # the parent's threshold across clones so a fan-out cannot multiply it.
     clone_budget = max(1, budget // total) if budget else None
@@ -267,9 +353,22 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
 
     def _run(item: tuple[int, str, str | None, str | None]) -> str:
         i, text, model, why = item
+        role_name, role_record = fleetgate.role_for(clean[i - 1][2])
+        # A role may NARROW the tool set only, and only when the parent
+        # NAMED one: without an explicit role the clone keeps today's
+        # behavior (the granted tools, the shared system line) so the
+        # existing delegate contract does not change under the owner's feet.
+        role_allowed = set(fleetgate.role_tools(role_record)) \
+            if clean[i - 1][2] else set()
+        role_registry = (sub_registry.select(
+            [t for t in sub_registry.names() if t in role_allowed])
+            if role_allowed else sub_registry)
+        role_iters = fleetgate.role_max_iters(role_record, max_iters) \
+            if clean[i - 1][2] else max_iters
         if why:
             row = {"clone": f"c{i}", "task_digest": fleet.digest(text),
                    "task_excerpt": "", "lint": "", "model": "unavailable",
+                   "role": role_name,
                    "tools": list(sub_registry.names()), "stop": "error",
                    "tool_calls": 0, "in_tok": None, "out_tok": None,
                    "ts": time.time(), "ended": time.time(),
@@ -284,6 +383,7 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
             rows[i - 1] = {"clone": f"c{i}", "task_digest": task_digest,
                            "task_excerpt": excerpt, "lint": lint,
                            "model": model or "parent",
+                           "role": clean[i - 1][2] or "",
                            "tools": list(sub_registry.names()),
                            "stop": "deadline", "tool_calls": 0,
                            "in_tok": None, "out_tok": None,
@@ -292,9 +392,12 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
             return (f"[{i}/{total} · deadline · 0 tool call(s)]\\n"
                     "[mycore: sub-agent was not started because the parent "
                     "turn deadline had elapsed]")
-        result = _one(text, i, total, sub_registry, chat, clone_budget, model,
-                      max_iters=max_iters, should_stop=should_stop,
-                      run_deadline=deadline)
+        result = _one(text, i, total, role_registry, chat, clone_budget, model,
+                      max_iters=role_iters, should_stop=should_stop,
+                      run_deadline=deadline,
+                      role=role_name if clean[i - 1][2] else None,
+                      role_name=role_name,
+                      band=str(band.get("band", "")))
         rows[i - 1] = result["row"]
         return result["text"]
 
@@ -318,5 +421,6 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
         if row is not None:
             row["clone_total"] = total
     parent_usage = registry.turn_usage()
-    fleet.note_fleet({"id": fleet_id, "clones": rows}, parent_usage)
+    fleet.note_fleet({"id": fleet_id, "clones": rows, "band": band,
+                     "mode": mode}, parent_usage)
     return "\n\n".join(parts)
