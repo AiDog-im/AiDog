@@ -138,6 +138,9 @@ from . import ledger as ledger_mod
 from . import leash
 from . import mission as mission_mod
 from . import pipeline as pipeline_mod
+from . import profiling as profiling_mod
+from . import propush as propush_mod
+from . import prosearch as prosearch_mod
 from . import scheduler
 from . import sniff
 from .assembly import (build_system_stack, resolve_capability_path,
@@ -174,6 +177,8 @@ MAX_POLL_ERRORS = 20                   # bounded backoff, then give up (tg.py pa
 DEFAULT_POLL_TIMEOUT = 30              # long-poll seconds (0 in --once mode)
 REFLECT_CHECK_SEC = 60.0               # evolution cron evaluation cadence
 SNIFF_CHECK_SEC = 60.0                 # SENSE leg cadence (sweep + delivery)
+PROFILING_CHECK_SEC = 300.0            # owner-profiling leg cadence (local only)
+PROSEARCH_CHECK_SEC = 1800.0           # outer-web search leg cadence (the one egress)
 MISSION_TICK_SEC = 5.0                 # mission leg cadence (design 3.2: ~5s)
 MISSION_CATCHUP_SEC = 600.0            # leg absence worth one honest CATCHUP line
 TYPING_INTERVAL_SEC = 4.0               # TG typing heartbeat (5s Telegram TTL)
@@ -193,7 +198,7 @@ INBOX_MAX_BYTES = 5_000_000             # document download cap before save
 #     the console can never offer a command the service does not answer).
 BOT_COMMANDS: tuple = ("help", "reset", "rewind", "model", "status", "lang",
                        "learn", "reflect", "evolution", "cron", "checkpoint",
-                       "version")
+                       "sniff", "version")
 
 # Honest one-line replies. The English constants stay importable (tests and
 # tooling compare against them); live replies resolve the SAME keys through
@@ -649,6 +654,8 @@ class ChatService:
         self._mission_check = 0.0       # last mission tick evaluation (clock)
         self._chan_check = 0.0          # last channel inbound poll (clock)
         self._sniff_check = 0.0         # last SENSE sweep/delivery evaluation
+        self._profiling_check = 0.0     # last owner-profiling leg evaluation
+        self._prosearch_check = 0.0     # last outer-web search leg evaluation
         self._pipe_check = 0.0          # last acquisition-pipeline pass (clock)
         self._ledger_check = 0.0        # last daily usage-report evaluation (D2)
         self._hold_state: dict[str, str] = {}   # car 7: gate log dedupe (leg -> code)
@@ -800,6 +807,8 @@ class ChatService:
                 self._maybe_fire_cron()        # scheduler leg (no-op with no due jobs)
                 self._maybe_tick_missions()    # mission leg (0.5.44; no-op without an active mission)
                 self._maybe_sniff()            # SENSE leg (SNIFF car; no-op when off/paused)
+                self._maybe_profile()          # owner-profiling leg (need-A; local only, no tokens)
+                self._maybe_prosearch()        # outer-web search leg (need-A P1; the only egress)
                 self._maybe_pipeline()         # acquisition pipeline leg (no-op when off)
                 self._maybe_ledger()           # D2 ledger leg (no-op when off/already sent)
                 self._maybe_release_check(once=once)  # car G: daily release notice (skipped in --once tooling)
@@ -1281,6 +1290,33 @@ class ChatService:
         mc = self._settings_doc().get("mycore")
         return mc if isinstance(mc, dict) else {}
 
+    def _write_settings_partition(self, key: str, block: dict) -> None:
+        """Merge ONE `mycore.<key>` partition into the stored settings file
+        atomically (the chat-side twin of the console's validated save).
+
+        The caller has already parsed the block through the owning module's
+        grammar, so this only owns the write: read the RAW document (never
+        load_settings()'s filtered view — an unknown hand-written key must
+        survive), merge, replace via a sibling temp file, and let OSError
+        propagate to the caller (which reports an honest save failure)."""
+        path = pp.settings_path(self.repo)
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            doc = {}
+        if not isinstance(doc, dict):
+            doc = {}
+        mc = doc.get("mycore")
+        if not isinstance(mc, dict):
+            mc = {}
+            doc["mycore"] = mc
+        mc[key] = block
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + f".tmp-{os.getpid()}")
+        tmp.write_text(json.dumps(doc, ensure_ascii=False, indent=2) + "\n",
+                       encoding="utf-8")
+        os.replace(tmp, path)
+
     def _budget(self) -> int | None:
         """Compaction budget: web/settings.json mycore.budget when present,
         else the cli default (same number the one-shot runner uses)."""
@@ -1513,9 +1549,67 @@ class ChatService:
             return self._cron_command(chat_id, arg)
         if name == "checkpoint":
             return self._checkpoint_command(chat_id, arg)
+        if name == "sniff":
+            return self._sniff_command(chat_id, arg)
         if name == "version":
             return self._version_command()
         return self._t("cmd.unknown")
+
+    def _sniff_command(self, chat_id: int | str, arg: str) -> str:
+        """`/sniff` — the SNIFF board's reopen surface in any chat session.
+
+        No argument = status (on/off, paused, last sweep). `run` = turn the
+        board back on and sweep now (the same two writes the console's
+        RESUME+SWEEP pair performs, persisted so it survives a restart).
+        `pause` = deliberate off. The board is read-only by construction, so
+        no branch here can actuate anything."""
+        action = arg.strip().lower()
+        if action not in ("", "run", "pause", "status"):
+            return self._t("cmd.sniff.usage")
+        try:
+            block = sniff.settings_block(self.repo)
+            cfg = sniff.parse_config(block, strict_rules=False)
+        except Exception:  # noqa: BLE001 — a hand-edited block is not a crash
+            return self._t("cmd.sniff.bad")
+        if action in ("", "status"):
+            state = sniff.load_state()
+            last = float(state.get("last_swept") or 0.0)
+            when = (self._t("cmd.sniff.never") if not last else
+                    fmt_uptime(self._now() - last) + " ago")
+            mode = (self._t("cmd.sniff.off") if not cfg["enabled"] else
+                    self._t("cmd.sniff.paused") if cfg["pause"] else
+                    self._t("cmd.sniff.on"))
+            return self._t("cmd.sniff.status", mode=mode,
+                           sources=len(cfg["sources"]),
+                           rules=len(cfg["rules"]), when=when)
+        target = {"enabled": action != "pause",
+                  "pause": action == "pause"}
+        if action == "run":
+            target = {"enabled": True, "pause": False}
+        block = dict(block)
+        block.update(target)
+        try:
+            sniff.parse_config(block, strict_rules=False)
+            self._write_settings_partition("sniff", block)
+        except Exception as e:  # noqa: BLE001
+            self.log.write("SNIFF_SET_ERR", f"chat={redact_chat(chat_id)}",
+                           f"err={type(e).__name__}")
+            return self._t("cmd.sniff.save_err")
+        self.log.write("SNIFF_SET", f"chat={redact_chat(chat_id)}",
+                       f"action={action}")
+        if action == "pause":
+            return self._t("cmd.sniff.pausedText")
+        try:
+            report = sniff.tick(now=self._now(), block=block, force=True)
+        except Exception as e:  # noqa: BLE001
+            self.log.write("SNIFF_ERR", f"err={type(e).__name__}")
+            return self._t("cmd.sniff.save_err")
+        if report.get("skipped"):
+            return self._t("cmd.sniff.skipped", s=str(report["skipped"]))
+        if report.get("error"):
+            return self._t("cmd.sniff.err")
+        return self._t("cmd.sniff.ran", n=int(report.get("findings_new") or 0),
+                       sources=len(report.get("sources") or {}))
 
     def _version_command(self) -> str:
         """`/version` — installed vs latest, honest when the check fails.
@@ -2224,7 +2318,19 @@ class ChatService:
             if report.get("error"):
                 self.log.write("SNIFF_ERR", "phase=sweep",
                                f"err={str(report['error'])[:120]}")
-            take = sniff.delivery_take(cfg, now=nowt)
+            # The closed loop speaks through the SAME chain: when the push
+            # mode is `auto`, the profiling lane's own findings are
+            # speakable too (one quiet-hours gate, one digest cap, one
+            # mark-first write — no second delivery path).
+            extra = ()
+            try:
+                pcfg = profiling_mod.parse_config(
+                    profiling_mod.settings_block(self.repo))
+                if pcfg["push_mode"] == "auto":
+                    extra = (propush_mod.RULE_ID,)
+            except profiling_mod.ProfilingError:
+                extra = ()
+            take = sniff.delivery_take(cfg, now=nowt, extra_speak=extra)
             if take.get("held"):
                 self.log.write("SNIFF_HELD", f"reason={take['held']}",
                                f"pending={take.get('more', 0)}",
@@ -2241,6 +2347,84 @@ class ChatService:
                            f"more={take['more']}", f"delivered={label}")
         except Exception as e:  # noqa: BLE001 — a fire failure never kills the loop
             self.log.write("SNIFF_ERR", f"err={type(e).__name__}")
+
+    # ------------------------------------------------------------ profiling --
+    def _maybe_profile(self) -> None:
+        """Owner-profiling leg (need-A, P0): throttled local analysis.
+
+        Reads the session history and the turn ledger, derives the keyword
+        profile and stores it under the runtime state. It spends NO model
+        tokens and makes NO network call — `mycore.profiling` has neither a
+        model client nor a transport (both absences are asserted by the core
+        suite). Nothing is ever spoken from here: push is a later, separately
+        ruled increment. A failure is one log line and the loop continues."""
+        nowt = self._now()
+        if nowt - self._profiling_check < PROFILING_CHECK_SEC:
+            return
+        self._profiling_check = nowt
+        try:
+            mc = self._settings_doc().get("mycore")
+            raw = mc.get("profiling") if isinstance(mc, dict) else None
+            if not isinstance(raw, dict):
+                return                 # absent partition = nothing to do
+            report = profiling_mod.tick(now=nowt, block=raw)
+            if report.get("skipped"):
+                return                 # disabled / interval / config: silent
+            if report.get("error"):
+                self.log.write("PROFILING_ERR", f"err={str(report['error'])[:120]}")
+                return
+            corpus = report.get("corpus") or {}
+            self.log.write("PROFILING",
+                           f"keywords={len(report.get('keywords') or [])}",
+                           f"msgs={int(corpus.get('messages_used') or 0)}",
+                           f"days={len(corpus.get('days') or [])}")
+        except Exception as e:  # noqa: BLE001 — a leg failure never kills the loop
+            self.log.write("PROFILING_ERR", f"err={type(e).__name__}")
+
+    # --------------------------------------------------------- outer search --
+    def _maybe_prosearch(self) -> None:
+        """Outer-web search leg (need-A, P1): the feature's ONLY egress.
+
+        It runs only when `mycore.search.enabled` is true — the kill switch
+        ships false, so a fresh install never sends anything. The leg turns
+        the profile's retrieval gaps into knowledge cards and (when the push
+        mode says `auto`) raises the urgent rows as SNIFF findings that the
+        OWN delivery chain speaks. Every cap is enforced inside
+        mycore.prosearch; a failure is one log line and the loop continues."""
+        nowt = self._now()
+        if nowt - self._prosearch_check < PROSEARCH_CHECK_SEC:
+            return
+        self._prosearch_check = nowt
+        try:
+            block = self._settings_block().get("search")
+            if not isinstance(block, dict):
+                return                     # absent partition = nothing to do
+            report = prosearch_mod.tick(now=nowt, block=block)
+            if report.get("skipped"):
+                return
+            if report.get("error"):
+                self.log.write("PROSEARCH_ERR",
+                               f"err={str(report['error'])[:120]}")
+                return
+            self.log.write("PROSEARCH",
+                           f"status={report.get('status')}",
+                           f"searched={report.get('searched')}",
+                           f"fetched={report.get('fetched')}",
+                           f"cards={report.get('cards_total')}")
+            # the closed loop: raise the urgent rows (passive mode records
+            # them on the board only; auto mode lets the delivery chain
+            # speak them)
+            profile = profiling_mod.load_profile()
+            try:
+                cfg = profiling_mod.parse_config(
+                    profiling_mod.settings_block(self.repo))
+            except profiling_mod.ProfilingError:
+                return
+            pushed = propush_mod.raise_findings(profile, mode=cfg["push_mode"])
+            if pushed.get("raised"):
+                self.log.write("PROPUSH_RAISE", f"n={pushed['raised']}")
+        except Exception as e:  # noqa: BLE001 — a leg failure never kills the loop
+            self.log.write("PROSEARCH_ERR", f"err={type(e).__name__}")
 
     # ------------------------------------------------------------- missions --
     def _mission_deliver(self, mission_rec: dict, text: str) -> str:

@@ -989,7 +989,8 @@ def mark_delivered(findings: list[dict], rows: list[dict]) -> int:
 
 
 def delivery_take(cfg: dict, *, now: float,
-                  findings: list[dict] | None = None) -> dict:
+                  findings: list[dict] | None = None,
+                  extra_speak: tuple[str, ...] = ()) -> dict:
     """Take this window's spoken batch out of the findings log.
 
     Selection gates (in order): per-rule `speak`, quiet hours, then
@@ -999,6 +1000,12 @@ def delivery_take(cfg: dict, *, now: float,
     philosophy (a crash loses one batch, never duplicates one). `enabled`
     and `pause` are the CALLER's gates — the service leg returns before this
     seam when the board is off or paused.
+
+    `extra_speak` names rules that are speakable even though they are not
+    in the owner's rule list: the owner-profiling car raises its own
+    findings (rule `owner_profile`) when the push mode says so, and this
+    seam keeps them on the SAME delivery chain — one quiet-hours gate, one
+    digest cap, one mark-first write, no second delivery path.
 
     Returns {"lines", "count", "more", "held", "error"}: `held` is
     "quiet" (batch waits for the first non-quiet window) or "persist" (the
@@ -1012,6 +1019,7 @@ def delivery_take(cfg: dict, *, now: float,
     if not isinstance(findings, list):
         findings = []
     speak = {r["id"] for r in cfg.get("rules", []) if r.get("speak")}
+    speak.update(str(r) for r in (extra_speak or ()))
     rows = [row for row in findings
             if not row.get("delivered") and row.get("rule") in speak]
     rows.sort(key=lambda row: _num(row.get("first_seen")) or 0.0)

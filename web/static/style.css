@@ -2419,3 +2419,83 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
   .pipe-stage { padding: 6px 10px; }
   .pipe-row-main { gap: 6px; }
 }
+
+/* OWNER ANALYSIS (need-A): the owner's own words, scored locally. The
+   segment switch is a pure local toggle; every row expands to its own
+   evidence (never a claim without a source). */
+.sniff-seg {
+  display: flex; gap: 6px; margin: 10px 0 4px;
+}
+.sniff-seg-btn {
+  font: inherit; font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; padding: 4px 10px; cursor: pointer;
+  border: 1px solid var(--line); border-radius: 999px;
+  background: none; color: var(--muted);
+}
+.sniff-seg-btn.is-active {
+  color: var(--blue-ink); border-color: var(--blue-dim);
+  background: var(--blue-wash);
+}
+.prof-row {
+  display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: baseline;
+  padding: 9px 0; border-top: 1px solid var(--line-solid);
+}
+.prof-row:first-child { border-top: 0; padding-top: 2px; }
+.prof-token {
+  font-family: var(--mono); font-size: 13px; font-weight: 650;
+  color: var(--text);
+}
+.prof-row-sub {
+  flex: 1 1 100%; font-size: 12px; color: var(--muted);
+  overflow-wrap: anywhere;
+}
+.prof-ev {
+  flex: 1 1 100%; margin: 4px 0 0; padding: 6px 0 0;
+  border-top: 1px dashed var(--line); font-size: 12px; color: var(--muted);
+}
+.prof-ev li { margin: 2px 0; overflow-wrap: anywhere; }
+.prof-ev time { color: var(--blue-ink); font-family: var(--mono); }
+.prof-badge {
+  font-size: 11px; letter-spacing: .05em; text-transform: uppercase;
+  padding: 1px 7px; border-radius: 999px; border: 1px solid var(--line);
+  color: var(--muted); white-space: nowrap;
+}
+.prof-badge.keen { color: var(--blue-ink); border-color: var(--blue-dim); }
+.prof-badge.gap { color: var(--amber); border-color: rgba(160, 90, 4, .4); }
+.prof-badge.growth { color: var(--ok); border-color: rgba(10, 122, 82, .4); }
+.prof-badge.weak { color: var(--muted); border-style: dashed; }
+.prof-dim-cols {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px; padding-top: 8px;
+}
+.prof-dim-col h4 {
+  margin: 0 0 4px; font-size: 11px; letter-spacing: .08em;
+  text-transform: uppercase; color: var(--muted);
+}
+.prof-dim-row {
+  display: flex; justify-content: space-between; gap: 8px;
+  padding: 3px 0; font-size: 12.5px; color: var(--text);
+  border-bottom: 1px solid var(--line);
+}
+.prof-dim-row span:last-child { color: var(--muted); font-family: var(--mono); }
+.prof-ev-box { flex: 1 1 100%; margin-top: 4px; }
+.prof-ev-box > summary {
+  cursor: pointer; font-size: 12px; color: var(--muted);
+  list-style: none; padding: 2px 0;
+}
+.prof-ev-box > summary::-webkit-details-marker { display: none; }
+.prof-ev-box > summary::before { content: "▸ "; color: var(--blue-ink); }
+.prof-ev-box[open] > summary::before { content: "▾ "; }
+.prof-ev-box > summary:hover { color: var(--blue-ink); }
+
+/* the closed loop's controls: SEARCH (the only egress) + PUSH (the delivery
+   mode). Both are switches the owner flips; the default is off/passive. */
+.prof-ctl {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  margin: 12px 0 4px; padding-top: 10px;
+  border-top: 1px solid var(--line-solid);
+}
+.prof-ctl .ctl-row-label {
+  font-size: 11px; letter-spacing: .08em; text-transform: uppercase;
+  color: var(--muted);
+}

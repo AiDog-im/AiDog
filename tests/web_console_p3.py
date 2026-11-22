@@ -1467,6 +1467,146 @@ def main() -> int:
     s, body = post("/api/settings", {"mycore": {"mcp": ""}}, token)
     check("POST mycore mcp back to off -> 200", s == 200, f"got {s} {body}")
 
+    # --- Need-A: the owner-profiling partition + the OWNER ANALYSIS board
+    # (grammar in mycore.profiling; local-only analysis, zero model tokens) ---
+    s, st = get("/api/settings")
+    _pr = (st.get("mycore") or {}).get("profiling") if isinstance(st, dict) \
+        else None
+    check("GET settings always carries mycore.profiling (documented defaults)",
+          s == 200 and isinstance(_pr, dict)
+          and _pr.get("enabled") is True and _pr.get("since") == ""
+          and _pr.get("top_k") == 100 and _pr.get("half_life_days") == 14
+          and _pr.get("interval_s") == 3600 and _pr.get("topics") == [],
+          str(_pr)[:240])
+    s, body = get("/api/profiling")
+    check("GET /api/profiling answers the read model without a token",
+          s == 200 and isinstance(body, dict)
+          and body.get("local_only") is True and body.get("zero_tokens") is True
+          and isinstance(body.get("keywords"), list)
+          and isinstance(body.get("corpus"), dict)
+          and "analyzed_since" in body
+          and isinstance(body.get("window_changed"), bool), str(body)[:200])
+    if token:
+        def prof_patch(part: dict, tk: str | None = token):
+            return post("/api/settings", {"mycore": {"profiling": part}}, tk)
+
+        s, body = prof_patch({"since": "2026-11-01", "top_k": 40,
+                              "half_life_days": 21,
+                              "topics": [{"slug": "mine", "terms": ["alpha", "beta"]}],
+                              "exclude": ["webhook_e2e*"]})
+        check("POST mycore.profiling valid partition -> 200", s == 200,
+              f"got {s} {str(body)[:200]}")
+        s, st = get("/api/settings")
+        _pr = (st.get("mycore") or {}).get("profiling")
+        check("GET echoes the profiling partition",
+              s == 200 and isinstance(_pr, dict)
+              and _pr.get("since") == "2026-11-01" and _pr.get("top_k") == 40
+              and _pr.get("half_life_days") == 21
+              and _pr.get("topics") == [{"slug": "mine",
+                                          "terms": ["alpha", "beta"]}],
+              str(_pr)[:240])
+        for part, needle in (({"top_k": 1}, "top_k must be an integer"),
+                              ({"since": "2026/01/01"}, "since must be"),
+                              ({"since": "2026-02-31"}, "not a real date"),
+                              ({"half_life_days": 0}, "half_life_days"),
+                              ({"topics": "x"}, "topics must be a list"),
+                              ({"topics": [{"slug": "BAD", "terms": ["x"]}]}, "slug"),
+                              ({"exclude": "x"}, "exclude must be a list"),
+                              ({"zz": 1}, "unknown field")):
+            s, body = prof_patch(part)
+            check(f"POST profiling refuses {part!r} -> 400",
+                  s == 400 and needle in str(body), f"got {s} {body}")
+        s, body = post("/api/profiling", {"action": "analyze"}, token)
+        check("POST /api/profiling analyze -> 200 + a brief report",
+              s == 200 and isinstance(body, dict)
+              and isinstance(body.get("report"), dict)
+              and isinstance(body.get("profiling"), dict),
+              f"got {s} {str(body)[:200]}")
+        # --- Need-A P1: the search partition + the closed-loop actions ---
+        s, st = get("/api/settings")
+        _se = (st.get("mycore") or {}).get("search") if isinstance(st, dict) \
+            else None
+        check("GET settings always carries mycore.search (shipped OFF)",
+              s == 200 and isinstance(_se, dict)
+              and _se.get("enabled") is False
+              and _se.get("engine") == "bing_rss"
+              and _se.get("daily_cap") == 20, str(_se)[:200])
+
+        def search_patch(part: dict, tk: str | None = token):
+            return post("/api/settings", {"mycore": {"search": part}}, tk)
+
+        s, body = search_patch({"enabled": True, "engine": "bing_rss",
+                                "searches_per_run": 3, "fetches_per_run": 5,
+                                "daily_cap": 10, "interval_s": 1800,
+                                "priority_domains": ["example.com"]})
+        check("POST mycore.search valid partition -> 200", s == 200,
+              f"got {s} {str(body)[:200]}")
+        s, st = get("/api/settings")
+        _se = (st.get("mycore") or {}).get("search")
+        check("GET echoes the search partition",
+              s == 200 and isinstance(_se, dict) and _se.get("enabled") is True
+              and _se.get("searches_per_run") == 3
+              and _se.get("priority_domains") == ["example.com"],
+              str(_se)[:200])
+        for part, needle in (({"engine": "google"}, "engine must be"),
+                              ({"daily_cap": 0}, "daily_cap must be"),
+                              ({"priority_domains": "x"}, "must be a list"),
+                              ({"priority_domains": ["a/b"]}, "bare domain"),
+                              ({"api_key": "sk-secret"}, "unknown field"),
+                              ({"zz": 1}, "unknown field")):
+            s, body = search_patch(part)
+            check(f"POST search refuses {part!r} -> 400",
+                  s == 400 and needle in str(body), f"got {s} {body}")
+        s, body = post("/api/profiling", {"action": "search"}, token)
+        check("POST /api/profiling search -> 200 with a report",
+              s == 200 and isinstance(body, dict)
+              and isinstance(body.get("report"), dict), f"got {s} {str(body)[:200]}")
+        s, body = post("/api/profiling", {"action": "push"}, token)
+        check("POST /api/profiling push -> 200 (passive by default)",
+              s == 200 and isinstance(body, dict)
+              and isinstance(body.get("report"), dict)
+              and (body["report"].get("raised") or 0) == 0,
+              f"got {s} {str(body)[:200]}")
+        s, body = post("/api/profiling",
+                       {"action": "propose", "keyword": "chain",
+                        "url": "https://example.com/a"}, token)
+        check("POST /api/profiling propose -> 200 and writes NOTHING",
+              s == 200 and isinstance(body.get("proposals"), list)
+              and body.get("proposals")
+              and "nothing was written" in str(body.get("note") or ""),
+              f"got {s} {str(body)[:200]}")
+        s, body = post("/api/profiling", {"action": "propose"}, token)
+        check("POST /api/profiling propose without a keyword -> 400",
+              s == 400 and "keyword" in str(body), f"got {s} {body}")
+        s, body = post("/api/profiling", {"action": "nope"}, token)
+        check("POST /api/profiling unknown action -> 400", s == 400
+              and "action must be" in str(body), f"got {s} {body}")
+        s, body = post("/api/profiling", {"action": "analyze"}, "wrong-token")
+        check("POST /api/profiling without the Bearer token -> 401",
+              s == 401, f"got {s} {str(body)[:120]}")
+        # leave settings as found: the documented default partition
+        s, body = prof_patch({
+            "enabled": True, "since": "", "top_k": 100,
+            "half_life_days": 14, "interval_s": 3600, "topics": [],
+            "exclude": ["webhook_e2e*"]})
+        check("profiling leg cleanup -> 200", s == 200, f"got {s} {body}")
+        s, st = get("/api/settings")
+        _pr = (st.get("mycore") or {}).get("profiling")
+        check("cleanup verified: profiling back to empty defaults",
+              s == 200 and isinstance(_pr, dict) and _pr.get("since") == ""
+              and _pr.get("top_k") == 100 and _pr.get("topics") == [],
+              str(_pr)[:240])
+        s, body = search_patch({"enabled": False, "engine": "bing_rss",
+                                "searches_per_run": 5, "fetches_per_run": 10,
+                                "daily_cap": 20, "interval_s": 3600,
+                                "priority_domains": []})
+        check("search leg cleanup -> 200", s == 200, f"got {s} {body}")
+        s, st = get("/api/settings")
+        _se = (st.get("mycore") or {}).get("search")
+        check("cleanup verified: search back to shipped OFF",
+              s == 200 and isinstance(_se, dict) and _se.get("enabled") is False
+              and _se.get("daily_cap") == 20, str(_se)[:200])
+
     # --- SNIFF car: the sense board partition (grammar in mycore.sniff,
     # slot NAMES only, all-or-nothing like every other settings block) ---
     s, st = get("/api/settings")
