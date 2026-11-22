@@ -135,6 +135,28 @@
       "install_status": "bundled"
     },
     {
+      "slug": "chain-balances-read",
+      "name": "chain-balances-read",
+      "category": "trading-readonly",
+      "description": "Use when you need the native balance of one address on Base, Ethereum or Solana — wallet checks, portfolio snapshots, checking how much an address holds. Not for token-level holdings (token-positions-read), not for prices or valuation, not for moving funds.",
+      "version": "1.0.0",
+      "requires": [
+        "chain_read"
+      ],
+      "install_status": "bundled"
+    },
+    {
+      "slug": "contract-read",
+      "name": "contract-read",
+      "category": "trading-readonly",
+      "description": "Use when you need state from a view function on a Base or Ethereum contract — totalSupply, reserves, config getters read via eth_call. Not for balances by holder (chain-balances-read), not for transactions, and no call here can change state.",
+      "version": "1.0.0",
+      "requires": [
+        "chain_read"
+      ],
+      "install_status": "bundled"
+    },
+    {
       "slug": "kraken-read-only",
       "name": "kraken-read-only",
       "category": "trading-readonly",
@@ -160,6 +182,28 @@
         "OKX_API_PASSPHRASE",
         "exchange_portfolio",
         "exchange_orders"
+      ],
+      "install_status": "bundled"
+    },
+    {
+      "slug": "token-positions-read",
+      "name": "token-positions-read",
+      "category": "trading-readonly",
+      "description": "Use when you need which tokens an address holds — ERC-20 balances on Base or Ethereum, SPL token accounts on Solana. Not for native balances (chain-balances-read), not for prices or valuation, not for NFTs, not for moving tokens.",
+      "version": "1.0.0",
+      "requires": [
+        "chain_read"
+      ],
+      "install_status": "bundled"
+    },
+    {
+      "slug": "tx-history-read",
+      "name": "tx-history-read",
+      "category": "trading-readonly",
+      "description": "Use when you need a transaction receipt by hash on Base or Ethereum, or the recent signature history of a Solana address. Not for EVM address-scoped history — no keyless source exists here, so say so honestly — not for balances.",
+      "version": "1.0.0",
+      "requires": [
+        "chain_read"
       ],
       "install_status": "bundled"
     }
