@@ -1,7 +1,7 @@
 {
   "name": "aidog-desktop",
   "productName": "aidog-desktop",
-  "version": "0.5.30",
+  "version": "0.5.73",
   "private": true,
   "description": "I'm AiDog desktop shell -- transparent HUD window over the local web console",
   "main": "main.js",
@@ -11,7 +11,8 @@
     "selftest": "electron . --selftest --no-sandbox",
     "test": "node --test test/*.test.mjs",
     "pack:dir": "electron-builder --linux --dir",
-    "pack:tar": "electron-builder --linux tar.gz"
+    "pack:tar": "electron-builder --linux tar.gz",
+    "pack:win": "electron-builder --win zip"
   },
   "build": {
     "appId": "im.aidog.desktop",
@@ -34,6 +35,12 @@
         "tar.gz"
       ],
       "category": "Utility"
+    },
+    "win": {
+      "target": [
+        "zip"
+      ],
+      "icon": "assets/icon.ico"
     }
   },
   "devDependencies": {

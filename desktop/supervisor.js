@@ -65,6 +65,18 @@ async function ensureConsole(opts = {}) {
     );
   }
 
+  // Car J (owner #5): the Windows shell is attach-only by design — there is
+  // no python3/tmux stack for it to spawn, so fail fast with the honest
+  // instruction instead of waiting out a spawn that cannot exist.
+  const platform = opts.platform || process.platform;
+  if (platform === 'win32') {
+    throw new Error(
+      `Local console at ${base} is not running. The Windows shell only attaches: ` +
+      `start the console where it runs (WSL2: bash deploy/boot_services.sh) ` +
+      `or point AIDOG_WEB_PORT at a running one, then reopen.`
+    );
+  }
+
   logger(`console unhealthy at ${base} -- spawning python3 server.py in ${repo}/web`);
   const child = spawnImpl('python3', ['server.py'], {
     cwd: require('path').join(repo, 'web'),
