@@ -10,7 +10,7 @@ you — by **name**, never by value — exactly what still needs a human.
 |---|---|---|
 | Linux (or WSL) + bash | runtime (tmux sessions, watchdog) | **clone inside WSL's native filesystem** (e.g. `~/aidog`) — a Windows-drive mount (9p/CIFS) rejects `chmod` and breaks tmux; do NOT copy a Windows-side clone in (CRLF breaks the `.sh` scripts — re-clone inside WSL instead) |
 | Python **3.10+** | console, services, quality gates | `python3 --version`; Apple's stock interpreter is 3.9 — use Miniconda (see [macOS](#macos)) |
-| `tmux` | process supervision | Linux: `sudo apt-get install tmux` · macOS: `conda install -y -c conda-forge tmux` (no sudo) |
+| `tmux` | process supervision | **auto-bootstrapped by `install.sh` when missing** — a user-space copy under `~/.local` with no administrator rights (Debian/Ubuntu/WSL; manual fallback: `sudo apt-get install tmux`) · macOS: `conda install -y -c conda-forge tmux` (no sudo) |
 | `git` | clone + version updates | optional; archives can run without it |
 | A model endpoint | chat/brain | any OpenAI-compatible endpoint — see [Model backend](#model-backend); Zhipu's base ends in `/api/paas/v4` (not `/v1`, no trailing slash) |
 | A Telegram bot token | chat channel | from @BotFather — see [Credential slots](#credential-slots); **optional for a channel-only install** (no TG token + ≥1 enabled non-TG channel, e.g. Feishu — see [channels.md §10](features/channels.md)) |
@@ -141,7 +141,7 @@ your machine. From a phone you get the two supported faces:
 
 ## What the installer does
 
-1. **Preflight** — Python 3.10+, tmux, port sanity (`:19167` free or already ours).
+1. **Preflight** — Python 3.10+, tmux (bootstrapped user-space when missing, no admin rights), port sanity (`:19167` free or already ours).
 2. **Provisions machine-local files, only when missing** (all gitignored):
    | File | From template | Purpose |
    |---|---|---|
@@ -217,7 +217,7 @@ and exits `2` — that is an honest "no brain configured yet", not a crash.
 | Symptom | Fix |
 |---|---|
 | `port 19167 is used by another service` | stop the foreign process or run with `AIDOG_WEB_PORT=<free port>` |
-| `tmux not found` | Linux: install the package · macOS: `conda install -y -c conda-forge tmux` |
+| `tmux not found` | `install.sh` bootstraps a user-space tmux automatically (no admin); if that fails (no network/apt): Linux: `sudo apt-get install tmux` · macOS: `conda install -y -c conda-forge tmux` |
 | `git clone` hangs / `curl github.com` times out | the git endpoint can be blocked while GitHub's CDN is not — fetch the archive instead: `curl -L -o aidog.zip "https://codeload.github.com/AiDog-im/AiDog/zip/refs/heads/main"` (see [macOS](#macos) step 3) |
 | local probes fail although the network works | an inherited `HTTP(S)_PROXY` may be dead — write an empty `deploy/proxy.local` (forces direct) or unset the variables |
 | chat service stays `PENDING` | fill `MYCORE_TG_TOKEN` + `AIDOG_TG_ALLOWED_USERS`, re-run `aidog setup` |

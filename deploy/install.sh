@@ -73,7 +73,27 @@ import sys; sys.exit(0 if sys.version_info >= (3, 10) else 1)
 PY
 note "python3 $(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:3])))')"
 if ! command -v tmux >/dev/null 2>&1; then
-  echo "[install] FAIL: tmux not found (e.g. 'sudo apt-get install tmux')" >&2; exit 1
+  # aibox difficulty car (0.5.91): tmux used to demand `sudo apt-get install`
+  # — the #1 install-difficulty driver. Bootstrap a user-space tmux instead
+  # (no admin rights; ~/.local/share/aidog/tmux + ~/.local/bin/tmux wrapper).
+  # --check never writes: report-only keeps the historical hard failure.
+  if [ "$CHECK_ONLY" = 1 ]; then
+    echo "[install] FAIL: tmux not found (run without --check to bootstrap it, no admin rights needed)" >&2
+    exit 1
+  fi
+  note "tmux not found — bootstrapping a user-space copy (no admin rights)"
+  if bash deploy/bootstrap_tmux.sh; then
+    # same shell: make the wrapper visible to every step below (boot/verify)
+    PATH="$HOME/.local/bin:$PATH"; export PATH
+    note "tmux ready: $(command -v tmux) ($(tmux -V 2>/dev/null | tr -d '\n'))"
+  else
+    echo "[install] FAIL: tmux not found and bootstrap failed (fallback: sudo apt-get install tmux)" >&2
+    exit 1
+  fi
+fi
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "[install] FAIL: tmux not found even after bootstrap (is $HOME/.local/bin on PATH?)" >&2
+  exit 1
 fi
 command -v git >/dev/null 2>&1 || note "WARN: git not found — version updates (aidog update) need it"
 if [ ! -d "$REPO/.git" ]; then

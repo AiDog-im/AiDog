@@ -32,6 +32,12 @@ set -u
 shq() { python3 -c 'import shlex,sys; print(shlex.quote(sys.argv[1]), end="")' "$1"; }
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)  # self-deriving: no machine path
+# aibox difficulty car (0.5.91): user-space tmux lives behind the wrapper in
+# ~/.local/bin (deploy/bootstrap_tmux.sh) — a non-login launcher (Task
+# Scheduler -> wsl.exe, console subprocess) may not have that dir on PATH.
+if ! command -v tmux >/dev/null 2>&1 && [ -x "$HOME/.local/bin/tmux" ]; then
+  PATH="$HOME/.local/bin:$PATH"; export PATH
+fi
 # P5-5 phase resolver: the upstream shim marks the transition stack.
 #   transition (shim present) = current behavior: source it, run gw/wd.
 #   post (shim deleted)       = gw/wd retired; no upstream facts are sourced,

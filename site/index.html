@@ -23,7 +23,7 @@
 <meta name="twitter:image" content="https://aidog.im/assets/icons/icon-512.png">
 <script>document.documentElement.classList.add("js");</script>
 <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"I'm AiDog","alternateName":"aidog.im","url":"https://aidog.im/","description":"A personal embodied AI: a constitution for a personality, curated memory for a life, and a self-developed core that answers to you alone. Permanently free, local-first.","inLanguage":["en","zh-CN"],"dateModified":"2026-11-12","publisher":{"@type":"Organization","name":"I'm AiDog","url":"https://aidog.im/"}}</script>
-<link rel="stylesheet" href="assets/style.css?v=20261113-1">
+<link rel="stylesheet" href="assets/style.css?v=20261117-1">
 </head>
 <body>
 
@@ -163,8 +163,29 @@
   <div class="section-head reveal">
     <span class="section-index">01</span>
     <h2 data-i18n="start.title">Get Started</h2>
-    <p class="section-sub" data-i18n="start.sub">From zero to a running console in three steps. What you need first: Linux, or Windows through WSL2, with Python 3.10+, tmux and git — plus two things only you can bring: a model endpoint and a chat-channel token (a Telegram bot, or any adapter you prefer).</p>
+    <p class="section-sub" data-i18n="start.sub">From zero to a running console in three steps. What you need first: Linux, or Windows through WSL2, with Python 3.10+ and git — tmux is provisioned for you automatically, no administrator rights needed. Plus two things only you can bring: a model endpoint and a chat-channel token (a Telegram bot, or any adapter you prefer).</p>
   </div>
+
+  <!-- AiBOX one-click route (aibox difficulty car 0.5.91) — deliberately
+       NOT class=.step: the e2e wall asserts exactly three manual steps. -->
+  <div class="aibox-panel reveal">
+    <div class="aibox-head">
+      <span class="badge badge-core" data-i18n="start.aiboxTag">ONE-CLICK · WINDOWS &amp; MAC</span>
+      <h4 data-i18n="start.aiboxTitle">No terminal? Install with AiBOX instead</h4>
+      <p data-i18n="start.aiboxSub">AiBOX is a portable installer that downloads the verified release, runs the official installer and walks you through the wizard — nothing to type, no administrator rights, your keys stay on your machine.</p>
+    </div>
+    <ol class="aibox-mini">
+      <li data-i18n="start.aiboxStep1">Download AiBOX — one file, double-click and it runs</li>
+      <li data-i18n="start.aiboxStep2">Open the catalog → AiDog → Install</li>
+      <li data-i18n="start.aiboxStep3">Follow the wizard — download, checksum, config, done</li>
+    </ol>
+    <div class="aibox-cta">
+      <a class="btn btn-primary" href="https://aibox.im/en/apps/aidog/" data-i18n-href="start.aiboxHref" target="_blank" rel="noopener" data-i18n="start.aiboxCta">Install with AiBOX</a>
+      <span class="aibox-note" data-i18n="start.aiboxNote">free · open source · credentials never leave your computer</span>
+    </div>
+  </div>
+
+  <p class="start-divider reveal" data-i18n="start.manualHead">Prefer the terminal? The manual route:</p>
 
   <div class="steps reveal">
     <div class="step">
@@ -782,6 +803,13 @@
                referrerpolicy="no-referrer" data-i18n-alt="footer.ckx">
         </a>
       </div>
+      <div class="footer-aibox">
+        <a href="https://aibox.im/en/apps/aidog/" data-i18n-href="footer.aiboxHref" target="_blank" rel="noopener noreferrer">
+          <img src="assets/aibox-badge.svg" alt="Available on AiBOX"
+               width="176" height="44" loading="lazy" decoding="async"
+               data-i18n-alt="footer.aibox">
+        </a>
+      </div>
       <div class="footer-afr">
         <a href="https://afr.im/site/aidog.im" target="_blank" rel="noopener noreferrer">
           <img src="https://afr.im/badge/aidog.im.svg" alt="AI-Friendly Rating B"
@@ -796,6 +824,6 @@
   </div>
 </footer>
 
-<script src="assets/main.js?v=20261102"></script>
+<script src="assets/main.js?v=20261117-1"></script>
 </body>
 </html>
