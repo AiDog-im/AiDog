@@ -12,7 +12,8 @@
     "test": "node --test test/*.test.mjs",
     "pack:dir": "electron-builder --linux --dir",
     "pack:tar": "electron-builder --linux tar.gz",
-    "pack:win": "electron-builder --win zip"
+    "pack:win": "electron-builder --win zip",
+    "pack:mac": "electron-builder --mac"
   },
   "build": {
     "appId": "im.aidog.desktop",
@@ -41,6 +42,13 @@
         "zip"
       ],
       "icon": "assets/icon.ico"
+    },
+    "mac": {
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "category": "public.app-category.utilities"
     }
   },
   "devDependencies": {

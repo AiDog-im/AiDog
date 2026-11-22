@@ -167,7 +167,12 @@ def check_repo() -> None:
         dirty = sh(["git", "-C", str(REPO), "status", "--porcelain"])
         add("PASS" if not dirty else "WARN", "repo.git", "clean" if not dirty else f"dirty: {len(dirty.splitlines())} entries")
     else:
-        add("FAIL", "repo.git", "not a git work tree")
+        # 0.5.87 (Mac user report): an archive install — a codeload zip when
+        # GitHub's git endpoint is blocked — carries no .git by construction
+        # and is a LEGITIMATE install path, not a broken one. There is
+        # nothing to check here, so the check does not apply: SKIP, never a
+        # FAIL that would tell an archive user their working install is bad.
+        add("SKIP", "repo.git", "not a git work tree (archive install)")
 
 
 def _git_out(*args: str) -> tuple[bool, str]:
@@ -461,6 +466,18 @@ def check_endpoints() -> None:
     try:
         with urllib.request.urlopen(f"{base}/models", timeout=6) as r:
             add("PASS" if r.status == 200 else "WARN", "model.endpoint", f"{hostport} /v1/models -> {r.status}")
+    except urllib.error.HTTPError as e:
+        # 0.5.87 (Mac user report): this probe sends NO key, and an
+        # auth-gated endpoint answers 401 to that — an ALIVE server, not an
+        # unreachable one. Same rule as web.server._http_answered: any
+        # status below 500 counts as answered; 5xx means the upstream never
+        # replied and stays a FAIL. The product's own calls carry the key
+        # and are unaffected either way.
+        if e.code < 500:
+            add("PASS", "model.endpoint",
+                f"{hostport} /v1/models -> {e.code} (answered; auth required)")
+        else:
+            add("FAIL", "model.endpoint", f"{hostport} /v1/models -> HTTP {e.code}")
     except Exception as e:  # noqa: BLE001
         add("FAIL", "model.endpoint", f"{hostport} unreachable: {type(e).__name__}")
     # Telegram identity (outbound; token never printed). Post-swap the poller
