@@ -4464,6 +4464,12 @@ async function loadSettings() {
   try {
     const s = await fetch("/api/settings").then(r => r.json());
     settings = Object.assign(settings, s);
+    // The pipeline's nav entry follows its switch wherever the settings
+    // were loaded from (boot, save, another view) — one rule, one place.
+    if (settings.pipeline && typeof settings.pipeline === "object") {
+      pipeCfg = settings.pipeline;
+    }
+    applyPipeNav();
     document.getElementById("soundToggle").setAttribute("aria-pressed", String(!!settings.sound));
     const vol = document.getElementById("voiceVol");
     if (vol) vol.value = String(settings.voice_volume ?? 80);
@@ -11521,6 +11527,7 @@ function setView(name, fromUser) {
     if (fromUser || !fleetPlanData) refreshFleetPlans();  // P1b fleet sign-off
     if (fromUser || !recData) refreshRecovery();   // car K: recovery facts
     if (fromUser || !secData) refreshSecurity();   // car E: security check
+    wirePipeNav();   // the pipeline switch in Settings (owner ruling)
   }
   // car D: the journey card loads when Overview opens (local facts only)
   if (name === "overview" && (fromUser || !jrnData)) refreshJourney();
@@ -11569,6 +11576,7 @@ async function pipeCfgRefresh() {
     settings = Object.assign(settings, doc);
     pipeCfg = settings.pipeline || {};
   } catch (e) { pipeCfg = pipeCfg || {}; }
+  applyPipeNav();
   return pipeCfg;
 }
 
@@ -11799,6 +11807,41 @@ async function pipePost(payload, okText) {
   }
 }
 
+/* Owner ruling 2026-11-20: the acquisition pipeline is a SETTINGS switch.
+ * The left-nav entry appears only while the pipeline is enabled (off by
+ * default). A deep link still lands — the same rule the Exchange nav
+ * follows — and only a visible -> hidden FLIP walks the user off the
+ * view. */
+let pipeNavWasVisible = null;
+
+function applyPipeNav() {
+  const item = document.querySelector('.nav-item[data-view="pipeline"]');
+  const next = !!(pipeCfg && pipeCfg.enabled === true);
+  if (item) item.classList.toggle("is-hidden", !next);
+  const box = document.getElementById("pipeNavEnabled");
+  if (box && box.checked !== next) box.checked = next;
+  if (pipeNavWasVisible === true && !next && currentView === "pipeline") {
+    setView("overview", true);
+  }
+  pipeNavWasVisible = next;
+}
+
+function wirePipeNav() {
+  const box = document.getElementById("pipeNavEnabled");
+  if (box && !box.dataset.wired) {
+    box.dataset.wired = "1";
+    box.addEventListener("change", async () => {
+      const want = box.checked === true;
+      const ok = await pipeCfgWrite(b => { b.enabled = want; },
+        t("pipe.saved", "{what} saved").replace("{what}",
+          t("pipe.enabled", "Pipeline on")));
+      applyPipeNav();
+      if (!ok) return;
+    });
+  }
+  applyPipeNav();
+}
+
 async function pipeCfgWrite(mutate, okText) {
   const token = localStorage.getItem(TOKEN_KEY) || "";
   if (!token) { pipeNote("err", t("save.needToken", "token required")); return false; }
@@ -11922,6 +11965,7 @@ function wirePipeline() {
     el.addEventListener("change", async () => {
       await pipeCfgWrite(b => { b[key] = el.checked === true; },
         t("pipe.saved", "{what} saved").replace("{what}", label));
+      applyPipeNav();   // the nav entry follows the same switch
     });
   };
   chk("pipeEnabled", "enabled", t("pipe.enabled", "Pipeline on"));

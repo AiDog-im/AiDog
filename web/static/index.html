@@ -2209,6 +2209,19 @@
                fleet. A separate card on purpose: a fleet plan authorizes
                ONE dispatch, a settings plan carries a patch — they are not
                the same decision. -->
+          <!-- Need-B / owner ruling 2026-11-20: the acquisition pipeline is
+               a SETTINGS switch, not a permanent left-nav entry. The nav
+               item appears only while the pipeline is enabled; a deep link
+               still lands (the same rule the Exchange nav follows). -->
+          <div class="card" data-setgroup="services" id="pipelineCard">
+            <h2 data-i18n="pipe.settingsSec">Acquisition pipeline</h2>
+            <div class="stat-note" data-i18n="pipe.settingsHint">off by default — the left-nav entry appears only while this is on; every send still waits for your approval</div>
+            <div class="ctl-row">
+              <label for="pipeNavEnabled" data-i18n="pipe.enabled">Pipeline on</label>
+              <input type="checkbox" id="pipeNavEnabled">
+              <span class="save-state" id="pipeNavMsg" role="status"></span>
+            </div>
+          </div>
           <div class="card" data-setgroup="services" id="fleetPlanCard">
             <h2 data-i18n="fplan.sec">Clone fleet approvals</h2>
             <div class="stat-note" data-i18n="fplan.hint">a delegated fleet that may write waits for you here — approving it authorizes that one dispatch, nothing else</div>

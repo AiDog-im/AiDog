@@ -491,11 +491,17 @@ body {
   display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
   overflow: hidden; }
 .gal-card.open .gal-desc { -webkit-line-clamp: 12; color: var(--text); }
-.gal-tag { position: absolute; top: 9px; right: 11px; font-size: 11px;
+.gal-tag { position: static; top: auto; right: auto; font-size: 11px;
   letter-spacing: .16em; padding: 1px 6px; border: 1px solid;
-  border-radius: 999px; background: #fff; }
+  border-radius: 999px; background: #fff; display: inline-block;
+  max-width: 100%; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; margin-bottom: 6px; }
 .gal-tag.body { color: var(--blue-ink); border-color: var(--blue-dim); }
 .gal-tag.external { color: var(--violet); border-color: rgba(101, 88, 214, .55); }
+/* The category tag was absolutely positioned in the card corner, so a long
+   skill name ran UNDER it and the two overlapped. It is now an inline block
+   on its own line above the name — no overlap at any width or name length,
+   and no modern CSS selector is needed. */
 .gal-empty { color: var(--muted); font-size: 13px; font-family: var(--mono); }
 
 /* ---------------------------------------------------------- evolution ----- */
