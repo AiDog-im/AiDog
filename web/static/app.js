@@ -3407,8 +3407,17 @@ async function refreshSkills() {
     skillsMounted = new Set(list.map(s => s && s.id).filter(Boolean));
     count.textContent = list.length ? `×${list.length}` : "";
     if (!list.length) {
-      grid.innerHTML = `<div class="gal-empty">${escapeHtml(t("gal.empty", "no skills mounted"))}</div>`;
+      grid.innerHTML = `<div class="gal-empty">${escapeHtml(t("gal.empty", "no skills mounted"))}</div>` +
+        `<div class="ctl-actions" style="margin-top:8px;">` +
+        `<button class="btn" type="button" id="galEmptyCatalog" ` +
+        `data-i18n="gal.emptyCatalog">BROWSE THE CATALOG</button></div>`;
       renderSkillCatalog();
+      const cat = document.getElementById("galEmptyCatalog");
+      if (cat) cat.addEventListener("click", () => {
+        const panel = document.getElementById("sklCatalog");
+        if (panel) panel.hidden = false;
+        renderSkillCatalog();
+      });
       return;
     }
     grid.innerHTML = list.map(s => {
@@ -7695,7 +7704,20 @@ function renderCronList() {
   }
   if (!cronData.jobs.length) {
     el.innerHTML = `<div class="stat-note">${escapeHtml(t("cron.empty",
-      "no cron jobs yet — ask in chat, the CLI or any connected channel to create one"))}</div>`;
+      "no cron jobs yet — ask in chat, the CLI or any connected channel to create one"))}</div>` +
+      `<div class="ctl-actions" style="margin-top:8px;">` +
+      `<button class="btn" type="button" id="cronEmptyAsk" ` +
+      `data-i18n="cron.emptyAsk">ASK IN CHAT</button></div>`;
+    const ask = document.getElementById("cronEmptyAsk");
+    if (ask) ask.addEventListener("click", () => {
+      setView("chat", true);
+      const input = document.getElementById("chatInput");
+      if (input) {
+        input.value = t("cron.emptyPrompt",
+          "every morning at 8:00, send me a summary of yesterday's memory");
+        try { input.focus(); } catch (e) { /* focus is optional */ }
+      }
+    });
     return;
   }
   el.innerHTML = cronData.jobs.map(j => {

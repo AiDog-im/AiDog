@@ -256,7 +256,7 @@ Every release is cut only after these run green on a clean tree:
 Catalog scope: **30 registered tools** · **9 exchange venues** · **28
 real-machine E2E suites** — all green.
 
-Locale packs: `en` (default) + `zh`, **1764 keys** each, parity lint in CI;
+Locale packs: `en` (default) + `zh`, **1769 keys** each, parity lint in CI;
 the marketing site ships its own **382-key** bilingual pack.
 
 ## Documentation

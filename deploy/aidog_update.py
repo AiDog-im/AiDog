@@ -200,7 +200,11 @@ def apply() -> int:
         env["AIDOG_GH_PAT"] = pat
     env["GIT_CONFIG_GLOBAL"] = "/dev/null"
     env["GIT_CONFIG_SYSTEM"] = "/dev/null"
-    helper = '-c', ('credential.helper=!f(){ test "$1" = get && '
+    # The helper runs under /bin/sh (POSIX), not bash: `test "$1" = get`
+    # without quoting the `=` is a syntax error there, and the whole fetch
+    # died with "could not read Username". The release procedure's helper
+    # (echo-only, no test) is the shape that works; the `=` is quoted anyway.
+    helper = '-c', ('credential.helper=!f(){ test "$1" = "get" && '
                     'echo "username=x-access-token" && '
                     'echo "password=$AIDOG_GH_PAT"; }')
     git_env = ["git", "-C", str(REPO), helper[0], helper[1]]
