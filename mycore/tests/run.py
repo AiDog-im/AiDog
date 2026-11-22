@@ -2756,10 +2756,10 @@ def test_service() -> None:
                                 transport=fake_m, chat=ok_chat,
                                 repo=menu_repo, now=nowf)
             svc_m.run(once=True)
-            check("menu: absent block -> the full 14-command menu published",
+            check("menu: absent block -> the full 15-command menu published",
                   len(fake_m.menus) == 1
                   and fake_m.menus[0][0] == "setMyCommands"
-                  and len(fake_m.menus[0][1]) == 14,
+                  and len(fake_m.menus[0][1]) == 15,
                   str(fake_m.menus)[:200])
             menu_entries = fake_m.menus[0][1] if fake_m.menus else []
             check("menu: every entry is {command, description} from menu.<cmd>",
@@ -14348,16 +14348,16 @@ def test_delta2() -> None:
     _help_names = [ln.split()[0].lstrip("/")
                    for ln in (_en_pack.get("cmd.help.body") or "").split("\n")
                    if ln.strip()]
-    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (14)",
+    check("menu lock: BOT_COMMANDS == /help body == dispatcher branches (15)",
           tuple(_help_names) == tuple(_svc_menu.BOT_COMMANDS)
           and set(_branches) == set(_svc_menu.BOT_COMMANDS)
-          and len(_svc_menu.BOT_COMMANDS) == 14,
+          and len(_svc_menu.BOT_COMMANDS) == 15,
           f"help={_help_names} branches={_branches}")
     check("menu lock: web.server validates against the SAME constant",
           ws.BOT_COMMANDS is _svc_menu.BOT_COMMANDS, str(ws.BOT_COMMANDS))
     _no_desc = [n for n in _svc_menu.BOT_COMMANDS
                 if "menu." + n not in _en_pack or "menu." + n not in _zh_pack]
-    check("menu lock: menu.<cmd> exists in both packs for all 14",
+    check("menu lock: menu.<cmd> exists in both packs for all 15",
           not _no_desc, str(_no_desc))
     _too_long = [n for n in _svc_menu.BOT_COMMANDS
                  if len(_en_pack.get("menu." + n, "")) > 120

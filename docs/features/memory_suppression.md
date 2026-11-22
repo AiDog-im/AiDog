@@ -200,3 +200,17 @@ the rule, never the content.
   session search index still holds the transcript row.
 - Evidence: `tests/profiling_forget_api.py` (50/50) and
   `tests/profiling_forget_ui.py` (61/61, offline browser).
+
+## Stage 5 — forgetting from the chat
+
+- `/forget <query>` lists matching sources and hands out a one-shot code per
+  candidate; `/forget confirm <code>` performs the write. The command is
+  answered by the service's command layer, which runs BEFORE the model
+  pipeline, and no tool is registered for it — the model cannot forget
+  anything, only the owner can.
+- Candidates are labelled, never quoted: a heading for a stored entry, the
+  token for a derived item. No body, no excerpt, no path and no credential.
+- The pending list is one per chat, expires after five minutes, and lives in
+  the per-profile state root.
+- Evidence: `tests/tg_forget_flow.py` (47/47), including an assertion that
+  the model client is never called for a forget command.

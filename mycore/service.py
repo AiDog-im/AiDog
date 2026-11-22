@@ -136,6 +136,7 @@ from . import evolution
 from . import hooks as hooks_mod
 from . import ledger as ledger_mod
 from . import fleet as fleet_mod
+from . import forgetcmd
 from . import leash
 from . import mission as mission_mod
 from . import pipeline as pipeline_mod
@@ -190,7 +191,7 @@ VOICE_MAX_BYTES = 5_000_000             # download cap before STT (5MB, car 4c)
 INBOX_MAX_BYTES = 5_000_000             # document download cap before save
                                         # (file car; mirrors tg.MAX_FILE_BYTES)
 
-# The 11 commands the TG bot answers — the single source of truth for
+# The 15 commands the TG bot answers — the single source of truth for
 #   * the `_command` dispatcher below (locked by tests: the branches must
 #     equal this tuple),
 #   * the BotFather-style menu published at poll-loop start (menu.<cmd> in
@@ -199,7 +200,7 @@ INBOX_MAX_BYTES = 5_000_000             # document download cap before save
 #     the console can never offer a command the service does not answer).
 BOT_COMMANDS: tuple = ("help", "reset", "rewind", "model", "status", "lang",
                        "learn", "reflect", "evolution", "cron", "checkpoint",
-                       "sniff", "fleet", "version")
+                       "sniff", "fleet", "version", "forget")
 
 # Honest one-line replies. The English constants stay importable (tests and
 # tooling compare against them); live replies resolve the SAME keys through
@@ -1563,7 +1564,33 @@ class ChatService:
             return self._fleet_command(arg)
         if name == "version":
             return self._version_command()
+        if name == "forget":
+            return self._forget_command(chat_id, arg)
         return self._t("cmd.unknown")
+
+    def _forget_command(self, chat_id: int | str, arg: str) -> str:
+        """`/forget` — the owner-facing forget control (the chat half).
+
+        SAFETY: this branch lives in the SERVICE COMMAND LAYER, which
+        answers BEFORE the model pipeline — so the model can never trigger a
+        forget, and no tool is registered for it. Only an allowlisted
+        sender reaches it at all: the allowlist gate runs before every
+        command, and this adds no second, weaker gate.
+
+        A forget RECORDS A TOMBSTONE (mycore.memforget) — it deletes
+        nothing: the source stays in its file and only leaves ACTIVE
+        memory. The answer says so (D10).
+
+        The pending confirmation lives in the per-profile state root, never
+        in a tracked file; the reply never carries an entry body, an
+        excerpt, a path or a credential."""
+        try:
+            return forgetcmd.handle(chat_id, arg, t=self._t, repo=self.repo,
+                                     state=self.state, now=self._now)
+        except Exception as e:  # noqa: BLE001 — a bad command never kills the loop
+            self.log.write("FORGET_ERR", f"chat={redact_chat(chat_id)}",
+                           f"err={type(e).__name__}")
+            return self._t("cmd.forget.fail")
 
     def _fleet_command(self, arg: str) -> str:
         """`/fleet` — read-only summary of recent clone fleets."""
