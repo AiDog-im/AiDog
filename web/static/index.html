@@ -224,6 +224,157 @@
         <div class="stat-grid" id="mycoreFacts" hidden></div>
       </div>
       <div class="ov-grid">
+        <!-- relayout 4.1 (0.5.82): the ONE Today KPI strip leads the grid --
+             hero cost with its context line on the left, today's counters on
+             the right, the self-metered 7-day row (sparklines) beneath. Same
+             ids and paint paths (renderUsage / renderSelf) as the old Usage
+             card; only the arrangement and the title changed. -->
+        <div class="card span-4 ov-today">
+          <h2><span data-i18n="tool.today">Today</span>
+              <span class="live-dot" id="usageLive" hidden></span></h2>
+          <div class="ov-kpi">
+            <div class="kpi hero">
+              <div class="metric-unit" id="costUnit">$ TODAY</div>
+              <div class="metric-val" id="costVal">–</div>
+              <div class="stat-note" id="usageNote"></div>
+            </div>
+            <div class="stat-grid" id="usageStats"></div>
+          </div>
+          <!-- v0.5.55: self-metered block (own log — works without the
+               external metrics source; hidden when the meter is inactive) -->
+          <div class="sub-head" id="selfHead" hidden>
+            <span data-i18n="usage.selfHead">SELF-METERED (7 DAYS)</span>
+          </div>
+          <div class="stat-grid" id="selfStats" hidden></div>
+          <div class="stat-note" id="selfNote" hidden></div>
+        </div>
+
+        <div class="card span-4">
+          <h2><span data-i18n="sec.services">Services</span>
+              <span class="svc-summary" id="svcSummary">–</span></h2>
+          <!-- relayout 4.1 (0.5.82): the panels became a table. The mockup's
+               LATENCY/RESTARTS columns have no source in /api/status (a panel
+               carries id/state/detail only), so the third column prints the
+               detail the cards used to show - no invented numbers. -->
+          <table class="tbl svc">
+            <thead>
+              <tr>
+                <th scope="col" data-i18n="svc.col.service">Service</th>
+                <th scope="col" data-i18n="svc.col.state">State</th>
+                <th scope="col" data-i18n="svc.col.detail">Detail</th>
+              </tr>
+            </thead>
+            <tbody id="panels"></tbody>
+          </table>
+          <!-- Wave 3 (X3): the raw mycore readout moved into the Overview
+               head's TECHNICAL DETAILS toggle (round C, P4) — same id. -->
+          <!-- Wave 5 (X10): checkpoint catalog beside the mycore readout —
+               METADATA ONLY (id, time, size, repo-relative path, hash): a
+               snapshot may cover a credential file, so no snapshot byte can
+               ever render here. app.js hides the whole block when the read
+               fails (an honest absence beats a guess) and shows the empty
+               list as its own note. -->
+          <div id="ckptBlock" hidden>
+            <div class="ctl-row token-row"
+                 style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);margin-bottom:6px;">
+              <label data-i18n="ckpt.head">CHECKPOINTS</label>
+              <span class="save-state" id="ckptMsg" role="status"></span>
+            </div>
+            <div id="ckptList"></div>
+          </div>
+        </div>
+
+        <div class="card span-2">
+          <h2 data-i18n="sec.advisory">ADVISORY</h2>
+          <div class="voice-row">
+            <button class="voice-orb locked" id="voiceOrb" data-i18n-t="voice.tip"
+                    title="tap to arm voice" aria-pressed="false">
+              <span class="orb-core"></span>
+            </button>
+            <div class="voice-meta">
+              <div class="voice-state" id="voiceState">VOICE LOCKED</div>
+              <div class="voice-sub" id="voiceSub">—</div>
+            </div>
+          </div>
+          <div class="ticker" id="ticker">
+            <span class="ticker-dot"></span><span id="tickerText">—</span>
+          </div>
+          <div class="reason-list" id="reasonList"></div>
+        </div>
+
+        <div class="card span-1">
+          <h2 data-i18n="sec.memory">Memory Core</h2>
+          <div class="bar-block">
+            <label data-i18n="memory.curated">Curated memory</label>
+            <div class="bar"><div class="bar-fill" id="memBar"></div></div>
+            <span class="num" id="memNum">–</span>
+          </div>
+          <div class="bar-block">
+            <label data-i18n="memory.user">User profile</label>
+            <div class="bar bar-violet"><div class="bar-fill" id="userBar"></div></div>
+            <span class="num" id="userNum">–</span>
+          </div>
+        </div>
+
+        <!-- UX round 2 (B2): the backup entry point Overview was missing — a
+             POINTER, not a second write surface. OPEN navigates to Settings and
+             reveals the real Backup & Restore card (active chip/search filter
+             included); the card itself, its passphrase fields and its E2E stay
+             untouched in one place. Labels reuse sec.backup / bk.hint /
+             sess.openBtn, so this pointer adds no key of its own (the badge
+             above contributes bk.ckx; the file face adds bk.choose/bk.noFile). -->
+        <div class="card span-1">
+          <h2 data-i18n="sec.backup">Backup &amp; Restore</h2>
+          <div class="stat-note" data-i18n="bk.hint">one .ckx file holds this console's credentials, settings and memory — encrypted inside this browser, read over the local loopback only</div>
+          <div class="ctl-actions">
+            <button class="btn primary" id="ovBackupOpen" type="button"
+                    data-i18n="sess.openBtn">OPEN</button>
+          </div>
+        </div>
+
+        <!-- car B2: system capability catalog + the read-only cron list.
+             Both render from no-auth GET /api/capabilities and GET /api/cron
+             (names and counts only); a field the server does not send shows
+             "unavailable" instead of a guess, and nothing here can write. -->
+        <div class="card span-4">
+          <h2 data-i18n="sec.system">SYSTEM CAPABILITIES</h2>
+          <table class="kv" id="capGrid"></table>
+          <!-- activation & operations car: doctor self-check (POST
+               /api/doctor/run) — verbatim output, monospace, scrollable;
+               non-zero FAIL renders as honest output, not as a hidden state -->
+          <div class="ctl-actions" style="margin-top:14px;">
+            <button class="btn" id="doctorRunBtn" type="button"
+                    data-i18n="cap.doctor">RUN DOCTOR</button>
+            <span class="save-state" id="doctorMsg" role="status"></span>
+          </div>
+          <pre class="vs-live" id="doctorOut" hidden
+               style="max-height:280px;overflow:auto;font-family:Consolas,monospace;font-size:12px;"></pre>
+          <div class="ctl-row token-row" style="margin-top:16px">
+            <label data-i18n="cron.title">CRON JOBS</label>
+            <span class="save-state" id="cronMsg" role="status"></span>
+          </div>
+          <div class="stat-note" data-i18n="cron.createHint" style="margin-top:0;">create a job by asking in chat or sending /cron from a connected channel</div>
+          <!-- Wave 4 (X9): structured create — the NL path above stays -->
+          <div class="cron-create" id="cronCreate">
+            <input type="text" id="cronName" maxlength="64" autocomplete="off"
+                   aria-label="cron name"
+                   data-i18n-ph="cron.namePh" placeholder="name (list label, no slash)">
+            <input type="text" id="cronSpec" maxlength="120" autocomplete="off"
+                   spellcheck="false" aria-label="cron schedule" data-i18n-ph="cron.schedPh"
+                   placeholder="every 30m | daily 08:00 | weekly mon 08:00 | once 2026-10-26 09:00">
+            <input type="text" id="cronPrompt" maxlength="4000" autocomplete="off"
+                   aria-label="cron message"
+                   data-i18n-ph="cron.promptPh" placeholder="message sent when the job fires">
+            <div class="ctl-actions">
+              <button class="btn primary" id="cronCreateBtn" type="button"
+                      data-i18n="cron.createBtn">CREATE</button>
+              <span class="save-state" id="cronCreateMsg" role="status"></span>
+            </div>
+          </div>
+          <div id="cronList"></div>
+          <div class="stat-note" data-i18n="cron.hint">delete a job with × on its row</div>
+        </div>
+
         <!-- activation & operations car (0.5.40): the first-run "am I ready?"
              checklist. Renders ONLY from GET /api/setup (presence / format /
              probe states — never a value); a build without that endpoint
@@ -268,6 +419,10 @@
             <div id="jrnMoments"></div>
           </div>
         </div>
+        <!-- Draft E signature card: hold-to-seal authority preview + four
+             guilloche medallions. Honest by contract: this card previews a
+             gesture only — it never claims a live service or an executed
+             action (all copy lives in the locale packs, auth.*). -->
         <div class="card span-2" id="authCard">
           <h2><span data-i18n="auth.title">Your authority</span>
               <span class="auth-stamp" data-i18n="auth.stamp">Preview · no live service</span></h2>
@@ -323,146 +478,13 @@
           <div class="auth-toast" id="authToast" role="status"></div>
         </div>
 
-        <div class="card span-2">
-          <h2><span data-i18n="sec.services">Services</span>
-              <span class="svc-summary" id="svcSummary">–</span></h2>
-          <div class="panel-row" id="panels"></div>
-          <!-- Wave 3 (X3): the raw mycore readout moved into the Overview
-               head's TECHNICAL DETAILS toggle (round C, P4) — same id. -->
-          <!-- Wave 5 (X10): checkpoint catalog beside the mycore readout —
-               METADATA ONLY (id, time, size, repo-relative path, hash): a
-               snapshot may cover a credential file, so no snapshot byte can
-               ever render here. app.js hides the whole block when the read
-               fails (an honest absence beats a guess) and shows the empty
-               list as its own note. -->
-          <div id="ckptBlock" hidden>
-            <div class="ctl-row token-row"
-                 style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);margin-bottom:6px;">
-              <label data-i18n="ckpt.head">CHECKPOINTS</label>
-              <span class="save-state" id="ckptMsg" role="status"></span>
-            </div>
-            <div id="ckptList"></div>
-          </div>
-        </div>
-
-        <div class="card span-2">
-          <h2><span data-i18n="sec.usage">Usage &amp; Cost</span>
-              <span class="live-dot" id="usageLive" hidden></span></h2>
-          <div class="metric">
-            <div class="metric-val" id="costVal">–</div>
-            <div class="metric-unit" id="costUnit">$ TODAY</div>
-          </div>
-          <div class="stat-grid" id="usageStats"></div>
-          <div class="stat-note" id="usageNote"></div>
-          <!-- v0.5.55: self-metered block (own log — works without the
-               external metrics source; hidden when the meter is inactive) -->
-          <div class="sub-head" id="selfHead" hidden>
-            <span data-i18n="usage.selfHead">SELF-METERED (7 DAYS)</span>
-          </div>
-          <div class="stat-grid" id="selfStats" hidden></div>
-          <div class="stat-note" id="selfNote" hidden></div>
-        </div>
-
-        <div class="card span-1">
-          <h2 data-i18n="sec.memory">Memory Core</h2>
-          <div class="bar-block">
-            <label data-i18n="memory.curated">Curated memory</label>
-            <div class="bar"><div class="bar-fill" id="memBar"></div></div>
-            <span class="num" id="memNum">–</span>
-          </div>
-          <div class="bar-block">
-            <label data-i18n="memory.user">User profile</label>
-            <div class="bar bar-violet"><div class="bar-fill" id="userBar"></div></div>
-            <span class="num" id="userNum">–</span>
-          </div>
-        </div>
-
-        <!-- UX round 2 (B2): the backup entry point Overview was missing — a
-             POINTER, not a second write surface. OPEN navigates to Settings and
-             reveals the real Backup & Restore card (active chip/search filter
-             included); the card itself, its passphrase fields and its E2E stay
-             untouched in one place. Labels reuse sec.backup / bk.hint /
-             sess.openBtn, so this pointer adds no key of its own (the badge
-             above contributes bk.ckx; the file face adds bk.choose/bk.noFile). -->
-        <div class="card span-1">
-          <h2 data-i18n="sec.backup">Backup &amp; Restore</h2>
-          <div class="stat-note" data-i18n="bk.hint">one .ckx file holds this console's credentials, settings and memory — encrypted inside this browser, read over the local loopback only</div>
-          <div class="ctl-actions">
-            <button class="btn primary" id="ovBackupOpen" type="button"
-                    data-i18n="sess.openBtn">OPEN</button>
-          </div>
-        </div>
-
-        <div class="card span-1">
-          <h2 data-i18n="sec.advisory">ADVISORY</h2>
-          <div class="voice-row">
-            <button class="voice-orb locked" id="voiceOrb" data-i18n-t="voice.tip"
-                    title="tap to arm voice" aria-pressed="false">
-              <span class="orb-core"></span>
-            </button>
-            <div class="voice-meta">
-              <div class="voice-state" id="voiceState">VOICE LOCKED</div>
-              <div class="voice-sub" id="voiceSub">—</div>
-            </div>
-          </div>
-          <div class="ticker" id="ticker">
-            <span class="ticker-dot"></span><span id="tickerText">—</span>
-          </div>
-          <div class="reason-list" id="reasonList"></div>
-        </div>
-
-        <!-- car B2: system capability catalog + the read-only cron list.
-             Both render from no-auth GET /api/capabilities and GET /api/cron
-             (names and counts only); a field the server does not send shows
-             "unavailable" instead of a guess, and nothing here can write. -->
-        <div class="card span-2">
-          <h2 data-i18n="sec.channel">CHANNEL</h2>
+        <!-- relayout 4.1 (0.5.82): the read-only CHANNEL kv duplicates the
+             Settings model card - demoted to a collapsed disclosure at the end
+             of the grid (design 4.1). Same #cfgTable, same paint path. -->
+        <details class="card span-2 ov-disc" id="cfgDisc">
+          <summary data-i18n="sec.runtime">Runtime configuration</summary>
           <table class="kv" id="cfgTable"></table>
-        </div>
-
-        <div class="card span-4">
-          <h2 data-i18n="sec.system">SYSTEM CAPABILITIES</h2>
-          <table class="kv" id="capGrid"></table>
-          <!-- activation & operations car: doctor self-check (POST
-               /api/doctor/run) — verbatim output, monospace, scrollable;
-               non-zero FAIL renders as honest output, not as a hidden state -->
-          <div class="ctl-actions" style="margin-top:14px;">
-            <button class="btn" id="doctorRunBtn" type="button"
-                    data-i18n="cap.doctor">RUN DOCTOR</button>
-            <span class="save-state" id="doctorMsg" role="status"></span>
-          </div>
-          <pre class="vs-live" id="doctorOut" hidden
-               style="max-height:280px;overflow:auto;font-family:Consolas,monospace;font-size:12px;"></pre>
-          <div class="ctl-row token-row" style="margin-top:16px">
-            <label data-i18n="cron.title">CRON JOBS</label>
-            <span class="save-state" id="cronMsg" role="status"></span>
-          </div>
-          <div class="stat-note" data-i18n="cron.createHint" style="margin-top:0;">create a job by asking in chat or sending /cron from a connected channel</div>
-          <!-- Wave 4 (X9): structured create — the NL path above stays -->
-          <div class="cron-create" id="cronCreate">
-            <input type="text" id="cronName" maxlength="64" autocomplete="off"
-                   aria-label="cron name"
-                   data-i18n-ph="cron.namePh" placeholder="name (list label, no slash)">
-            <input type="text" id="cronSpec" maxlength="120" autocomplete="off"
-                   spellcheck="false" aria-label="cron schedule" data-i18n-ph="cron.schedPh"
-                   placeholder="every 30m | daily 08:00 | weekly mon 08:00 | once 2026-10-26 09:00">
-            <input type="text" id="cronPrompt" maxlength="4000" autocomplete="off"
-                   aria-label="cron message"
-                   data-i18n-ph="cron.promptPh" placeholder="message sent when the job fires">
-            <div class="ctl-actions">
-              <button class="btn primary" id="cronCreateBtn" type="button"
-                      data-i18n="cron.createBtn">CREATE</button>
-              <span class="save-state" id="cronCreateMsg" role="status"></span>
-            </div>
-          </div>
-          <div id="cronList"></div>
-          <div class="stat-note" data-i18n="cron.hint">delete a job with × on its row</div>
-        </div>
-
-        <!-- Draft E signature card: hold-to-seal authority preview + four
-             guilloche medallions. Honest by contract: this card previews a
-             gesture only — it never claims a live service or an executed
-             action (all copy lives in the locale packs, auth.*). -->
+        </details>
       </div>
     </section>
 

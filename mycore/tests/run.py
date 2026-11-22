@@ -4083,7 +4083,11 @@ def test_subagent() -> None:
             def chat(self, messages, tools=None, **kw):
                 if messages and messages[0].get("role") == "system":
                     self.sub_calls += 1
-                    if self.sub_calls == 1:
+                    # Subs run in parallel threads: key the injected failure
+                    # off the TASK TEXT, never off call order — a call-order
+                    # counter races the scheduler and flips which task ends
+                    # up as [1/2], turning this leg into a coin flip.
+                    if str(messages[-1].get("content", "")).strip() == "one":
                         raise ModelError("HTTP 500 Internal Server Error")
                     return fake_response(text="second ok")
                 self.parent_calls += 1
