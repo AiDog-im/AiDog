@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Usage statistics — I'm AiDog</title>
+<meta name="description" content="The full I'm AiDog usage-statistics page: all-time totals, the last seven UTC days, and the per-model / per-scenario breakdowns rendered from the public /api/stats endpoint. Aggregate totals only — never a per-install record.">
+<link rel="icon" type="image/png" href="assets/favicon.png">
+<link rel="apple-touch-icon" href="assets/icons/apple-touch-icon.png">
+<meta name="theme-color" content="#2892ff">
+<meta name="robots" content="index,follow">
+<link rel="stylesheet" href="assets/style.css?v=20261031-2">
+</head>
+<body>
+
+<header class="nav" id="nav">
+  <a class="brand" href="index.html">
+    <img src="assets/logo.jpg" alt="I'm AiDog logo" width="30" height="30" data-i18n-alt="brand.logoAlt">
+    <span class="brand-name">AIDOG<span class="brand-dot">.IM</span></span>
+  </a>
+  <button class="burger" id="burger" aria-label="menu" aria-expanded="false"><span></span><span></span><span></span></button>
+  <nav class="nav-links" id="navLinks">
+    <a href="index.html#home" class="nav-link" data-i18n="nav.home">Home</a>
+    <a href="index.html#start" class="nav-link" data-i18n="nav.start">Start</a>
+    <a href="index.html#skills" class="nav-link" data-i18n="nav.skills">Skills</a>
+    <a href="index.html#capabilities" class="nav-link" data-i18n="nav.capabilities">Capabilities</a>
+    <a href="index.html#sniff" class="nav-link" data-i18n="nav.sniff">Sniff</a>
+    <a href="index.html#console" class="nav-link" data-i18n="nav.console">Console</a>
+    <a href="index.html#models" class="nav-link active" data-i18n="nav.models">Models</a>
+    <a href="index.html#security" class="nav-link" data-i18n="nav.security">Security</a>
+    <a href="index.html#architecture" class="nav-link" data-i18n="nav.architecture">Architecture</a>
+  </nav>
+  <div class="nav-right">
+    <button class="lang-btn" id="langBtn" aria-label="switch language"><span id="langLabel" data-i18n="i18n.toggle">ZH</span></button>
+    <a class="btn btn-ghost nav-gh" href="https://github.com/AiDog-im/AiDog" target="_blank" rel="noopener" data-i18n="nav.github">GitHub</a>
+  </div>
+</header>
+
+<main>
+
+<!-- ============================================ STATS HERO -->
+<section class="section" id="top">
+  <div class="section-head">
+    <span class="section-index">STATS</span>
+    <h1 data-i18n="md.pageTitle">Usage statistics</h1>
+    <p class="section-sub" data-i18n="md.pageSub">The full picture behind the home-page chart: what the anonymous daily reports say about how this product actually runs. Aggregate totals only — this page never shows a per-install record.</p>
+  </div>
+
+  <div class="sk-note reveal in" style="margin-top:18px">
+    <b data-i18n="md.totals">All-time totals</b>
+    <div class="feature-grid" style="margin-top:10px">
+      <div class="feature"><h4 id="mdInstalls">—</h4><p data-i18n="md.installs">installs</p></div>
+      <div class="feature"><h4 id="mdReports">—</h4><p data-i18n="md.reports">daily reports</p></div>
+      <div class="feature"><h4 id="mdRequests">—</h4><p data-i18n="md.requests">requests</p></div>
+      <div class="feature"><h4 id="mdTokens">—</h4><p data-i18n="md.tokens">tokens (in + out)</p></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================================ DAILY CHART -->
+<section class="section" id="daily">
+  <div class="section-head reveal">
+    <span class="section-index">DAILY</span>
+    <h2 data-i18n="md.daily">Last seven UTC days</h2>
+    <p class="section-sub" data-i18n="md.source">Source: GET /api/stats — the same public endpoint the home-page chart reads, refreshed as each install reports once a day.</p>
+  </div>
+
+  <div class="chart-frame reveal" role="img" aria-label="requests per day">
+    <div class="chart-gridlines" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="chart-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+    <div class="chart-message">
+      <span class="chart-icon" aria-hidden="true">◔</span>
+      <span id="mdChartMsg" data-i18n="models.chartNote">Last checked: never — no stats endpoint has answered yet.</span>
+    </div>
+    <div class="chart-axis" aria-hidden="true"><span></span><span></span><span></span><span></span></div>
+  </div>
+
+  <div class="pipeline reveal" id="mdBreakdown" hidden>
+    <div class="pnode">
+      <span class="pnode-ic" aria-hidden="true">▤</span>
+      <h4 data-i18n="models.breakModels">Models in use</h4>
+      <div id="mdByModel" class="chart-breakdown"></div>
+    </div>
+    <div class="parrow" aria-hidden="true">⟶</div>
+    <div class="pnode">
+      <span class="pnode-ic" aria-hidden="true">◑</span>
+      <h4 data-i18n="models.breakScenarios">Activity</h4>
+      <div id="mdByScenario" class="chart-breakdown"></div>
+    </div>
+  </div>
+
+  <div class="sk-note reveal">
+    <b data-i18n="md.privacyT">What is in these numbers</b>
+    <p data-i18n="md.privacy">Model names, request counts and token totals — never prompts, files, paths or credentials. Verification canary rows are stored but never aggregated, and install_id is a random, resettable pseudonym rather than a device fingerprint. The reporting toggle lives in the console's Settings.</p>
+  </div>
+
+  <div class="sk-meta reveal">
+    <a class="btn btn-ghost" href="index.html" data-i18n="skills.backHome">Back to the home page</a>
+  </div>
+</section>
+
+</main>
+
+<footer class="footer">
+  <div class="footer-inner">
+    <div class="footer-top">
+      <p class="footer-big"><span data-i18n="footer.taglineA">Not a platform.</span><br><span data-i18n="footer.taglineB">A dog that knows you.</span></p>
+      <div class="footer-brand">
+        <img src="assets/logo.jpg" alt="" width="28" height="28">
+        <span>© <span id="year">2026</span> I'm AiDog</span>
+      </div>
+    </div>
+    <div class="footer-links">
+      <span class="footer-free" data-i18n="footer.free">permanently free</span>
+      <a href="index.html#capabilities" data-i18n="footer.caps">Capabilities</a>
+      <a href="llms.txt">llms.txt</a>
+      <a href="https://github.com/AiDog-im/AiDog" target="_blank" rel="noopener">GitHub</a>
+      <span class="footer-dim" data-i18n="footer.aidogim">aidog.im</span>
+    </div>
+    <div class="footer-fine">
+      <span data-i18n="footer.fine">Grown for one · built for anyone</span>
+      <span>aidog.im</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+/* Usage statistics page — self-contained (same pattern as skills.html:
+   no assets/main.js on purpose, its nav links are index.html#… anchors).
+   Reads GET /api/stats and renders the FULL document: totals, the seven-day
+   chart, the per-model and per-scenario breakdowns. Honesty rules copied
+   from the home page: a failed fetch says so, zero data waits for the first
+   report, and no number is ever fabricated. */
+(function () {
+  "use strict";
+
+  var LANG_KEY = "aidog.site.lang";
+  var qsLang = null;
+  try {
+    var m = location.search.match(/[?&]lang=(en|zh)\b/);
+    if (m) qsLang = m[1];
+  } catch (e) { /* ignore */ }
+  var lang = qsLang;
+  if (!lang) {
+    try { lang = localStorage.getItem(LANG_KEY); } catch (e) { /* private mode */ }
+  }
+  if (lang !== "en" && lang !== "zh") lang = "en";
+
+  var dicts = {};
+  var stats = null;
+
+  function loadDict(l) {
+    if (dicts[l]) return Promise.resolve(dicts[l]);
+    return fetch("i18n/" + l + ".json")
+      .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+      .then(function (d) { dicts[l] = d; return d; })
+      .catch(function () { return null; });
+  }
+
+  function tt(key, fallback) {
+    var d = dicts[lang];
+    return (d && Object.prototype.hasOwnProperty.call(d, key)) ? d[key] : fallback;
+  }
+
+  function fmtNum(n) {
+    try { return Number(n).toLocaleString("en-US"); } catch (e) { return String(n); }
+  }
+
+  function applyDict(d) {
+    if (!d) return;
+    document.querySelectorAll("[data-i18n]").forEach(function (node) {
+      var k = node.getAttribute("data-i18n");
+      if (Object.prototype.hasOwnProperty.call(d, k)) node.textContent = d[k];
+    });
+    paint();          // dynamic lines follow the language too
+  }
+
+  function setLang(l) {
+    lang = l;
+    try { localStorage.setItem(LANG_KEY, l); } catch (e) { /* ignore */ }
+    document.documentElement.lang = (l === "zh") ? "zh-Hans" : "en";
+    var label = document.getElementById("langLabel");
+    if (label) label.textContent = (l === "en") ? "ZH" : "EN";
+    loadDict(l).then(applyDict);
+  }
+
+  var langBtn = document.getElementById("langBtn");
+  if (langBtn) langBtn.addEventListener("click", function () {
+    setLang(lang === "en" ? "zh" : "en");
+    try {
+      var url = new URL(location.href);
+      url.searchParams.set("lang", lang);
+      history.replaceState(null, "", url.pathname + url.search + url.hash);
+    } catch (e) { /* file:// */ }
+  });
+
+  var burger = document.getElementById("burger");
+  var navLinks = document.getElementById("navLinks");
+  if (burger && navLinks) {
+    burger.addEventListener("click", function () {
+      var open = navLinks.classList.toggle("open");
+      burger.setAttribute("aria-expanded", String(open));
+    });
+    navLinks.addEventListener("click", function (e) {
+      if (e.target.classList.contains("nav-link")) navLinks.classList.remove("open");
+    });
+  }
+
+  /* ---------------------------------------------------------- paint --- */
+  function set(id, text) {
+    var el = document.getElementById(id);
+    if (el) el.textContent = text;
+  }
+
+  function paint() {
+    var msg = document.getElementById("mdChartMsg");
+    if (!stats) return;
+
+    // seven-day bars
+    var frame = document.querySelector(".chart-frame");
+    if (frame) {
+      var bars = frame.querySelectorAll(".chart-bars i");
+      var maxReq = 1;
+      stats.daily.forEach(function (row) {
+        maxReq = Math.max(maxReq, row.requests || 0);
+      });
+      for (var i = 0; i < bars.length; i++) {
+        var row = stats.daily[i] || null;
+        var h = row ? Math.max(3, Math.round(((row.requests || 0) / maxReq) * 100)) : 0;
+        bars[i].style.height = h + "%";
+        bars[i].title = row ? (row.day + ": " + row.requests + " requests") : "";
+      }
+      var hasData = stats.totals.requests > 0 ||
+        Object.keys(stats.by_scenario).some(function (k) { return stats.by_scenario[k] > 0; });
+      if (msg) {
+        msg.textContent = hasData
+          ? tt("models.chartLive",
+               "Updated {ts} UTC · {installs} installs · {requests} requests · {tokens} tokens")
+              .replace("{ts}", String(stats.updated || "–").slice(0, 16).replace("T", " "))
+              .replace("{installs}", fmtNum(stats.installs))
+              .replace("{requests}", fmtNum(stats.totals.requests))
+              .replace("{tokens}", fmtNum(stats.totals.tokens["in"] + stats.totals.tokens.out))
+          : tt("models.chartEmpty", "Pipeline live — waiting for the first install to report.");
+      }
+      var wrap = document.getElementById("mdBreakdown");
+      if (wrap) {
+        if (!hasData) { wrap.hidden = true; }
+        else {
+          var mBox = document.getElementById("mdByModel");
+          if (mBox && stats.by_model.length) {
+            mBox.textContent = "";
+            stats.by_model.slice(0, 8).forEach(function (m) {
+              var line = document.createElement("div");
+              line.textContent = m.model + " — " + Math.round(m.share * 100) + "% · " +
+                fmtNum(m.requests) + " req";
+              mBox.appendChild(line);
+            });
+          }
+          var sBox = document.getElementById("mdByScenario");
+          if (sBox) {
+            sBox.textContent = "";
+            var any = false;
+            ["chat", "coding", "research", "voice", "publishing"].forEach(function (k) {
+              var n = stats.by_scenario[k] || 0;
+              if (!n) return;
+              any = true;
+              var line = document.createElement("div");
+              line.textContent = k + " — " + fmtNum(n);
+              sBox.appendChild(line);
+            });
+            if (!any) {
+              var none = document.createElement("div");
+              none.textContent = "–";
+              sBox.appendChild(none);
+            }
+          }
+          wrap.hidden = false;
+        }
+      }
+    }
+
+    // totals (only overwrite the dashes once real numbers exist)
+    set("mdInstalls", fmtNum(stats.installs));
+    set("mdReports", fmtNum(stats.reports));
+    set("mdRequests", fmtNum(stats.totals.requests));
+    set("mdTokens", fmtNum(stats.totals.tokens["in"] + stats.totals.tokens.out));
+  }
+
+  function markUnreachable() {
+    var msg = document.getElementById("mdChartMsg");
+    if (msg) {
+      msg.textContent = tt("models.unreachable",
+        "The stats endpoint is deployed, but this page could not reach it on this visit.");
+    }
+    set("mdInstalls", "–"); set("mdReports", "–");
+    set("mdRequests", "–"); set("mdTokens", "–");
+  }
+
+  fetch("api/stats", { cache: "no-store" })
+    .then(function (r) { if (!r.ok) throw new Error("http " + r.status); return r.json(); })
+    .then(function (d) {
+      if (!d || typeof d.totals !== "object" || !Array.isArray(d.daily) ||
+          typeof d.by_scenario !== "object") throw new Error("bad shape");
+      stats = d;
+      paint();
+      return loadDict(lang);
+    })
+    .then(function (d) { applyDict(d); })
+    .catch(function () { markUnreachable(); });
+
+  loadDict(lang).then(applyDict);
+  setLang(lang);
+
+  var year = document.getElementById("year");
+  if (year) year.textContent = String(new Date().getFullYear());
+})();
+</script>
+</body>
+</html>

@@ -175,6 +175,80 @@ print(json.dumps({"deployment_configs": dc}))' "$dbid")
     fi
   fi
 
+  # ---- 0) GitHub pulse snapshot (car G #7) ---------------------------------
+  # Writes site/data/gh.json from the GitHub API. Token comes from the
+  # environment ONLY (never argv), zero CF cost: the page reads this static
+  # dated file. If the API is unreachable the previous snapshot is KEPT
+  # (stale-but-honest — it carries its own fetched_at) and nothing fake is
+  # ever produced. The python below never returns non-zero (set -e safe).
+  snapshot_github() {
+    python3 - <<'PYSNAP' || { echo "DEPLOY_SITE: WARN gh snapshot failed — keeping previous site/data/gh.json" >&2; return 0; }
+import datetime, json, os, urllib.error, urllib.request
+
+API = "https://api.github.com"
+OWNER, NAME = "AiDog-im", "AiDog"
+token = os.environ.get("AIDOG_COMMUNITY_PAT") or os.environ.get("AIDOG_GH_PAT") or ""
+
+def req(url, payload=None):
+    headers = {"Accept": "application/vnd.github+json",
+               "User-Agent": "aidog-deploy-site"}
+    if token:
+        headers["Authorization"] = "Bearer " + token
+    data = json.dumps(payload).encode() if payload is not None else None
+    if data is not None:
+        headers["Content-Type"] = "application/json"
+    r = urllib.request.Request(url, data=data, headers=headers)
+    with urllib.request.urlopen(r, timeout=25) as resp:
+        return json.loads(resp.read().decode() or "{}")
+
+# repo totals (required — any failure keeps the previous snapshot)
+repo = req(f"{API}/repos/{OWNER}/{NAME}")
+# latest release (404 = none published yet -> honest null, other errors keep previous)
+version = teaser = None
+try:
+    rel = req(f"{API}/repos/{OWNER}/{NAME}/releases/latest")
+    version = (rel.get("tag_name") or "").lstrip("v") or None
+    body = (rel.get("body") or "").strip()
+    for line in body.splitlines():
+        line = line.strip().lstrip("#").lstrip("*").strip()
+        if line:
+            teaser = line if len(line) <= 181 else line[:180] + "…"
+            break
+except urllib.error.HTTPError as e:
+    if e.code != 404:
+        raise
+# discussions count (best-effort — GraphQL needs the token; null when absent)
+discussions = None
+if token:
+    try:
+        gql = req(f"{API}/graphql",
+                  {"query": f'{{repository(owner:"{OWNER}",name:"{NAME}"){{discussions(first:1){{totalCount}}}}}}'})
+        discussions = gql["data"]["repository"]["discussions"]["totalCount"]
+    except Exception:
+        discussions = None
+
+snap = {
+    "fetched_at": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "repo": f"{OWNER}/{NAME}",
+    "url": f"https://github.com/{OWNER}/{NAME}",
+    "version": version,
+    "notes_teaser": teaser,
+    "stars": int(repo.get("stargazers_count") or 0),
+    "forks": int(repo.get("forks_count") or 0),
+    "watchers": int(repo.get("subscribers_count") or 0),
+    "discussions": discussions,
+}
+os.makedirs("site/data", exist_ok=True)
+with open("site/data/gh.json", "w", encoding="utf-8") as f:
+    json.dump(snap, f, ensure_ascii=False, indent=2)
+    f.write("\n")
+print("DEPLOY_SITE: gh snapshot v%s stars=%d forks=%d watchers=%d discussions=%s"
+      % (snap["version"] or "-", snap["stars"], snap["forks"],
+         snap["watchers"], snap["discussions"]))
+PYSNAP
+  }
+  snapshot_github
+
   # ---- 1) upload site/ -----------------------------------------------------
   command -v wrangler >/dev/null || die "wrangler not installed"
   # Pages Functions are resolved as <cwd>/functions by `wrangler pages deploy`,
@@ -277,7 +351,7 @@ if grep -q "## Product" /tmp/deploy_site_llms.txt \
    && grep -q "nine venues" /tmp/deploy_site_llms.txt \
    && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
    && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
-   && grep -q "2124/2124" /tmp/deploy_site_llms.txt \
+   && grep -q "2150/2150" /tmp/deploy_site_llms.txt \
    && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else
@@ -298,6 +372,34 @@ code=$(pget https://aidog.im/manifest.webmanifest /tmp/deploy_site_manifest.json
 if [ "$code" = "200" ]; then
   python3 -c 'import json,sys; d=json.load(open("/tmp/deploy_site_manifest.json")); assert d["name"] and d["icons"]' \
     || { echo "DEPLOY_SITE: VERIFY FAIL /manifest.webmanifest (invalid JSON)" >&2; fail=1; }
+fi
+
+# --- car G: /models statistics page (200 + markers) ------------------------
+code=$(pget https://aidog.im/models /tmp/deploy_site_models.html)
+if [ "$code" = "200" ] && grep -q 'id="daily"' /tmp/deploy_site_models.html \
+   && grep -q 'data-i18n="md.pageTitle"' /tmp/deploy_site_models.html; then
+  echo "DEPLOY_SITE: VERIFY OK /models (200, statistics markers)"
+else
+  echo "DEPLOY_SITE: VERIFY FAIL /models (http $code or markers missing)" >&2
+  fail=1
+fi
+
+# --- car G: dated GitHub pulse snapshot (must exist after a deploy) --------
+code=$(pget https://aidog.im/data/gh.json /tmp/deploy_site_gh.json)
+if [ "$code" = "200" ] && python3 - /tmp/deploy_site_gh.json <<'PYV'
+import json, sys
+d = json.load(open(sys.argv[1]))
+assert isinstance(d.get("fetched_at"), str) and "T" in d["fetched_at"], d
+assert isinstance(d.get("stars"), int) and isinstance(d.get("forks"), int), d
+assert isinstance(d.get("watchers"), int), d
+assert "discussions" in d, d          # value may be null (honest miss)
+assert "version" in d and "notes_teaser" in d, d
+PYV
+then
+  echo "DEPLOY_SITE: VERIFY OK /data/gh.json (200, dated snapshot)"
+else
+  echo "DEPLOY_SITE: VERIFY FAIL /data/gh.json (http $code or shape)" >&2
+  fail=1
 fi
 
 # --- usage ledger (D2): public aggregates must answer, never fabricate --

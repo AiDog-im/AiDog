@@ -129,3 +129,43 @@ serves the public aggregates and the models-section chart renders them
 (`site/assets/main.js`, honest placeholder until the endpoint answers).
 Full design — schema, privacy whitelist, scenario rules, quota account,
 rollback: `docs/design/usage_ledger_design.md`.
+
+## 6. Site dynamics (car G, 2026-11-02): pulse snapshot, /models, platforms, PWA
+
+- **Dated GitHub pulse** — `deploy/deploy_site.sh` stage 0 writes
+  `site/data/gh.json` (fetch date, release version + first-line teaser,
+  stars/forks/watchers, best-effort discussions count) straight from the
+  GitHub API using the env-only `AIDOG_COMMUNITY_PAT`; **zero CF cost** (the
+  page reads this static file, never KV — the free-tier KV write ceiling
+  stays reserved for the visits counter). API failure keeps the previous
+  snapshot: stale-but-honest, always carrying its own `fetched_at`.
+  The `#pulse` card on the home page hides entirely when no snapshot exists;
+  values render only from the file, so a stale number is visibly dated and
+  nothing is ever fabricated client-side. `site/data/` is gitignored (machine
+  state, not source); the deploy verify step asserts `/data/gh.json` 200 +
+  shape after every upload.
+- **`/models` statistics page** — a self-contained sibling of `skills.html`
+  rendering the FULL `/api/stats` document (all-time totals, last seven UTC
+  days, per-model and per-scenario breakdowns) behind
+  `models.html` + the home-page Models section links to it; listed in
+  `sitemap.xml` (one `<loc>` per `<url>`) and `llms.txt`. Failure states
+  copy the home chart: unreachable says so, zero data waits for the first
+  report.
+- **Platforms matrix** — an honest `#platforms` section on the home page
+  (Linux reference path / Windows via WSL2 / macOS expected-but-untested /
+  iOS-Android via bot + site), mirrored by a `Platforms:` line in
+  `llms.txt` and a paragraph in both READMEs; the nav stays at its nine
+  anchors (the section indices run 01…09 with `platforms`=02, `pulse`=09 —
+  pinned by `tmp/e2e_site_redesign.js` and `tmp/roundc_site_probe.js`).
+- **Console PWA (manifest only)** — `web/static/manifest.webmanifest`
+  (served `application/manifest+json` via the `MIME` map) + manifest link,
+  `theme-color` and apple-touch-icon in the console head, PWA icons in
+  `web/static/`, and an honest LAN note in the Access card
+  (`onb.accessLan`: loopback-only, SSH tunnel, no cloud endpoint; the
+  install chip only appears once the page answers over HTTPS). **No service
+  worker, by owner adjudication** — the console always reflects live local
+  state, so there is deliberately no offline copy of it.
+- **Gates**: `tmp/roundc_site_probe.js` carries the car G legs (34 checks),
+  `tmp/e2e_frontend_ui.js` leg U14 covers the console PWA surface, and
+  `deploy_site.sh` verify gained `/models` + `/data/gh.json`. The E2E suite
+  inventory stays **22** — car G extended existing probes, never added one.
