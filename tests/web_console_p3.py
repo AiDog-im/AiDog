@@ -21,7 +21,23 @@ import urllib.request
 from pathlib import Path
 
 BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:19167"
-SECRETS = Path(__file__).resolve().parent.parent / "secrets.env"
+REPO = Path(__file__).resolve().parent.parent
+SECRETS = REPO / "secrets.env"
+
+
+def store_text() -> str:
+    """The secrets-store text for every test read (E2 wiring).
+
+    An encrypted store decrypts in MEMORY through the one shared reader;
+    forget() first so a leg that changed the store through the console's own
+    writer never serves this process's stale snapshot. A plaintext store
+    returns the exact historical bytes (default-off rule); a locked store
+    returns "" (fail-closed — the leg fails honestly, never fakes)."""
+    if str(REPO) not in sys.path:
+        sys.path.insert(0, str(REPO))
+    from mycore import secrets_store as _ss   # lazy: preflight stays light
+    _ss.forget()
+    return _ss.secrets_text(SECRETS)
 
 PASS: list[str] = []
 FAIL: list[str] = []
@@ -233,7 +249,7 @@ def main() -> int:
         print("SKIP  console smoke requires a provisioned install "
               "(secrets.env not found); skipped")
         return 77
-    tok_m = re.search(r"(?m)^WEB_TOKEN=(\S+)$", SECRETS.read_text())
+    tok_m = re.search(r"(?m)^WEB_TOKEN=(\S+)$", store_text())
     token = tok_m.group(1) if tok_m else None
     check("secrets.WEB_TOKEN present", bool(token))
 
@@ -1154,7 +1170,7 @@ def main() -> int:
         _sec_blob = json.dumps(sec) if isinstance(sec, (dict, list)) \
             else str(sec)
         _leaks = []
-        for _ln in SECRETS.read_text().splitlines():
+        for _ln in store_text().splitlines():
             if "=" in _ln and not _ln.lstrip().startswith("#"):
                 _v = _ln.split("=", 1)[1].strip()
                 if len(_v) >= 6 and any(ch.isalpha() for ch in _v):
@@ -1691,7 +1707,7 @@ def main() -> int:
                            {"channels": {"discord": {"enabled": True}}},
                            token)
         disc_m = re.search(r"(?m)^CHANNEL_DISCORD_TOKEN=(\S+)$",
-                           SECRETS.read_text()) if SECRETS.exists() else None
+                           store_text()) if SECRETS.exists() else None
         s, body = post("/api/channels/send",
                        {"route": "discord", "target": "t", "text": "ping"},
                        token)
@@ -1810,7 +1826,7 @@ def main() -> int:
         slot_vals = []
         if SECRETS.exists():
             for _v in re.findall(r"(?m)^[A-Za-z0-9_]+=(\S[^\r\n]*)$",
-                                 SECRETS.read_text(encoding="utf-8")):
+                                 store_text()):
                 if len(_v.strip()) >= 6:
                     slot_vals.append(_v.strip())
         body_text = json.dumps(body if isinstance(body, dict) else {})
@@ -1823,7 +1839,7 @@ def main() -> int:
     # Missing slot = honest 503 naming the slot; a present slot must refuse
     # a wrong/absent bearer with 401 and leak nothing either way. ---
     wh_m = re.search(r"(?m)^CHANNEL_WEBHOOK_SECRET=(\S+)$",
-                     SECRETS.read_text()) if SECRETS.exists() else None
+                     store_text()) if SECRETS.exists() else None
     wh_val = wh_m.group(1) if wh_m else None
     s, body = post("/api/channels/webhook", {"text": "ping"}, None)
     s2, body2 = post("/api/channels/webhook", {"text": "ping"}, "wrong-bearer")
@@ -1975,7 +1991,7 @@ def main() -> int:
     slot_vals = []
     if SECRETS.exists():
         for _key, _val in re.findall(r"(?m)^([A-Za-z0-9_]+)=(\S[^\r\n]*)$",
-                                     SECRETS.read_text(encoding="utf-8")):
+                                     store_text()):
             if len(_val.strip()) >= 6:
                 slot_vals.append(_val.strip())
     leak_keys = re.findall(r'"[^"]*(?:token|secret|password|api_key|apikey)'
@@ -2065,7 +2081,7 @@ def main() -> int:
     med_slots = []
     if SECRETS.exists():
         for _v in re.findall(r"(?m)^[A-Za-z0-9_]+=(\S[^\r\n]*)$",
-                             SECRETS.read_text(encoding="utf-8")):
+                             store_text()):
             if len(_v.strip()) >= 6:
                 med_slots.append(_v.strip())
     check("GET capabilities media: no URL, no slot value",
@@ -2267,18 +2283,25 @@ def main() -> int:
           f"{v1_doc}")
 
     # --- /v1 auth legs: the dedicated slot is driven through all three
-    # states (snapshot -> strip pre-existing line -> install a random test
-    # token -> byte-for-byte restore). The slot values never print. ---
-    v1_backup = SECRETS.read_bytes() if SECRETS.exists() else None
+    # states (snapshot -> clear -> install a random test token -> restore)
+    # through the CONSOLE'S OWN writer (POST /api/secrets): an E2 encrypted
+    # store must never be overwritten with plaintext by a test, and the
+    # running console only observes writes it made itself (its decrypted
+    # snapshot is per-process). The slot values never print. ---
+    _v1_web_m = re.search(r"(?m)^WEB_TOKEN=(\S+)$", store_text())
+    _v1_web = _v1_web_m.group(1) if _v1_web_m else None
+    _v1_orig = store_text()
+    _v1_orig_m = re.search(r"(?m)^OPENAI_API_TOKEN=(\S[^\r\n]*)$", _v1_orig)
+    _v1_orig_val = _v1_orig_m.group(1) if _v1_orig_m else None
+    test_tok = ""
+
+    def _v1_set(value: str) -> int:
+        st, _b = post("/api/secrets", {"name": "OPENAI_API_TOKEN",
+                                       "value": value}, _v1_web)
+        return st
+
     try:
-        kept_lines = []
-        if v1_backup is not None:
-            for _ln in v1_backup.decode("utf-8", "replace").splitlines():
-                if re.match(r"^OPENAI_API_TOKEN=", _ln):
-                    continue
-                kept_lines.append(_ln)
-            SECRETS.write_text(("\n".join(kept_lines) + "\n") if kept_lines
-                               else "", encoding="utf-8")
+        _v1_set("")                      # clear -> the 503 legs below
 
         s, _ct, body = call_v1("GET", "/v1/models", None, None)
         check("/v1/models missing slot -> 503 names OPENAI_API_TOKEN",
@@ -2292,11 +2315,7 @@ def main() -> int:
               f"got {s} {str(body)[:140]}")
 
         test_tok = "v1-" + os.urandom(16).hex()
-        cur = SECRETS.read_text(encoding="utf-8") if SECRETS.exists() else ""
-        if cur and not cur.endswith("\n"):
-            cur += "\n"
-        SECRETS.write_text(cur + f"OPENAI_API_TOKEN={test_tok}\n",
-                           encoding="utf-8")
+        _v1_set(test_tok)
 
         s, _ct, body = call_v1("GET", "/v1/models", None, "wrong-token")
         check("/v1/models wrong bearer -> 401 OpenAI shape, no token echo",
@@ -2426,17 +2445,23 @@ def main() -> int:
               and bool(chunks) and chunks[-1] == "[DONE]",
               f"got {s} ct={ct} frames={len(chunks)} first={str(first)[:80]}")
     finally:
-        if v1_backup is not None:
-            SECRETS.write_bytes(v1_backup)
-        elif SECRETS.exists():
-            try:
-                SECRETS.unlink()
-            except OSError:
-                pass
-    after = SECRETS.read_bytes() if SECRETS.exists() else None
-    check("secrets.env restored byte-for-byte after /v1 tests",
-          after == v1_backup,
-          f"changed={after != v1_backup}")
+        _v1_set(_v1_orig_val or "")      # restore the original value
+
+    def _v1_strip(t: str) -> str:
+        # the cleared slot may leave an empty `KEY=` line behind (a write
+        # can only empty a line, never un-append one) — everything else must
+        # be byte-identical and the test token must be gone.
+        return re.sub(r"(?m)^OPENAI_API_TOKEN=.*\n?", "", t)
+
+    after = store_text()
+    _v1_after_m = re.search(r"(?m)^OPENAI_API_TOKEN=(\S[^\r\n]*)$", after)
+    _v1_after_val = _v1_after_m.group(1) if _v1_after_m else None
+    check("secrets.env restored after /v1 tests (slot + every other line)",
+          _v1_after_val == _v1_orig_val
+          and _v1_strip(after) == _v1_strip(_v1_orig)
+          and (not test_tok or test_tok not in after),
+          f"slot_ok={_v1_after_val == _v1_orig_val} "
+          f"rest_ok={_v1_strip(after) == _v1_strip(_v1_orig)}")
 
     # --- car 4c: /api/stt live legs — kept for LAST on purpose: the 429
     # test fills the in-process sliding window, so no stt success assertion
@@ -2542,7 +2567,7 @@ def main() -> int:
     _prod_secrets = SECRETS
     _prod_bytes = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
     _prod_map = dict(re.findall(r"(?m)^([A-Za-z0-9_]+)=(\S[^\r\n]*)$",
-                                _prod_bytes.decode("utf-8", "replace")))
+                                store_text()))   # E2: decrypted in memory
     _leak_vals = [v for v in _prod_map.values() if len(v.strip()) >= 6]
     _groups = {"core", "gateway", "web3", "channels", "media", "connectors",
                "connections", "backup"}
