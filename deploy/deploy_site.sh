@@ -405,7 +405,7 @@ else
 fi
 # --- the llms release line must name the release we are deploying (two pins:
 # the evidence line AND the release line — one alone ships a stale fact) ---
-_llms_release="$(grep -m1 'Current release:' /tmp/deploy_site_llms.txt | sed 's/.*Current release: \([0-9.]*\).*/\1/')"
+_llms_release="$(grep -m1 'Current release:' /tmp/deploy_site_llms.txt | sed 's/.*Current release: \([0-9.]*\).*/\1/' | sed 's/\.$//')"
 _tree_version="$(tr -cd '0-9.' < VERSION)"
 if [ -n "$_llms_release" ] && [ "$_llms_release" = "$_tree_version" ]; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt release line matches VERSION ($_tree_version)"
@@ -419,7 +419,7 @@ if grep -q "## Product" /tmp/deploy_site_llms.txt \
    && grep -q "nine venues" /tmp/deploy_site_llms.txt \
    && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
    && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
-   && grep -q "2896/2896" /tmp/deploy_site_llms.txt \
+   && grep -q "2932/2932" /tmp/deploy_site_llms.txt \
    && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else

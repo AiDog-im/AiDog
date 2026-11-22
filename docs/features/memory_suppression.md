@@ -184,3 +184,19 @@ the rule, never the content.
   (48/48, offline browser).
 - Stage 1 is deliberately incomplete on the transcript store; a source that
   exists **only** in a session transcript is not suppressed by this slice.
+
+## Stage 4 — the derived owner profile
+
+- The owner profile derives keywords from session transcripts; each one is a
+  source of its own (channel `profile`, opaque source id) and can be
+  forgotten from the profile view with the same preview-then-confirm gate.
+- A silenced derived item is excluded where the profile is BUILT (so the
+  stored document, the score, the traits, the tiers and the coverage are
+  computed without it, and a re-analysis cannot reintroduce it) and where a
+  stored profile is READ (so the forget takes effect immediately, with no
+  tick and no restart).
+- The session transcript keeps the words: the derived item and its score
+  contribution are silenced, the original text is not deleted, and the
+  session search index still holds the transcript row.
+- Evidence: `tests/profiling_forget_api.py` (50/50) and
+  `tests/profiling_forget_ui.py` (61/61, offline browser).

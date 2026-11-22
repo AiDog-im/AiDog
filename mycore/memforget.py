@@ -25,6 +25,12 @@ The ledger row's `scope` says WHICH surfaces a tombstone silences; the
 `channel` is the axis that is ENFORCED — a tombstone never crosses stores,
 because the channel is part of the source id.
 
+One channel is DERIVED rather than authored: `profile` silences one item of
+the owner profile (a keyword derived from the session transcripts). Its id
+is the usual one — profile scope + channel + content digest — so the
+derived item is addressable with the same opaque id as every other source,
+and the transcript row it came from is never touched (D10).
+
 `describe_entry` is the READ half of the owner-facing forget control: it
 answers what a forget WOULD do (the admission channel, the opaque source
 id, how many sections it would filter) without touching anything and
@@ -69,13 +75,15 @@ CHANNEL_LEARNED = "learned"                 # EVOLUTION_learned.md entries
 CHANNEL_CURATED_MEMORY = "curated:memory"   # MEMORY_curated.md entries
 CHANNEL_CURATED_USER = "curated:user"       # USER_curated.md entries
 CHANNEL_CURATED_OTHER = "curated:other"     # any other curated file
+CHANNEL_PROFILE = "profile"                 # a DERIVED owner-profile item
 
 # Suppression scope — WHICH surfaces the tombstone silences.
 SCOPE_MEMORY = "memory"                # learned memory + the derived stores
 SCOPE_CURATED = "curated-entry"        # one curated entry, everywhere it shows
+SCOPE_PROFILE = "profile"              # one derived profile item
 
 CHANNELS = (CHANNEL_LEARNED, CHANNEL_CURATED_MEMORY, CHANNEL_CURATED_USER,
-            CHANNEL_CURATED_OTHER)
+            CHANNEL_CURATED_OTHER, CHANNEL_PROFILE)
 
 MAX_ROWS = 20000            # hard cap on the ledger (a tombstone is rare)
 LOCK_WAIT = 0.25            # seconds before dropping a contended write
@@ -396,6 +404,7 @@ def forget(channel: str, text: str, *, repo: Path | None = None,
         raise MemforgetError("unknown admission channel")
     if scope is None:
         scope = (SCOPE_MEMORY if channel == CHANNEL_LEARNED
+                 else SCOPE_PROFILE if channel == CHANNEL_PROFILE
                  else SCOPE_CURATED)
     row = {"id": source_id(channel, text, repo=repo),
            "channel": channel, "scope": scope,

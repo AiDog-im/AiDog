@@ -132,3 +132,13 @@ Model-assisted re-ranking (opt-in, metered), a vector store (deferred under
 the standing D8 trigger — the corpus is ~40k chars, which keyword recall
 serves), any actuation beyond the owner's own click, and any analysis of
 sessions that live outside this product's own state directory.
+
+## Forgetting a derived item (v0.5.106)
+
+Every keyword in the owner profile is a derived item with its own source id,
+and the profile view offers a forget action per keyword: the confirmation
+shows a preview first (how many items would be silenced, and whether the
+profile, the score and the coverage are affected) and writes a tombstone
+only. Nothing is deleted — the session transcript keeps the words; the
+derived item and its contribution to the profile are silenced, including
+after the next re-analysis. See [memory suppression](memory_suppression.md).

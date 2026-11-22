@@ -95,6 +95,7 @@ async function loadLang(lang) {
   renderFleet(); renderFleetApprovals();
   if (memBrowseData) renderMemoryBrowse();   // the memory entries + provenance
   if (memForgetState) memForgetRender();     // the open confirmation follows
+  renderProfiling();          // the owner-profile rows + provenance follow too
   renderHelpCmds();            // discoverability: the TG command table repaints too
   chatBadge(chatBusy);            // badge label follows the active language
   renderCtx(lastCtx);             // X14: context line label follows too
@@ -10464,15 +10465,21 @@ if (memSearchEl) memSearchEl.addEventListener("input", () => {
 /* ----------------------------------- owner-facing forget control (UI) ---- *
    The console half of the tombstone ledger (mycore.memforget): a forget
    SILENCES one source, it never deletes text. The contract is the
-   server's, not ours — this UI invents no endpoint and guesses no slot:
-     GET  /api/memory                    the read face; every entry carries
-                                         its admission channel + opaque id
+   server's, not ours — this UI invents no endpoint and guesses no address:
+     GET  /api/memory                    the memory read face; every entry
+                                         carries its admission channel + id
      GET  /api/memory/forget/preview     READ-ONLY: what a forget WOULD do
      POST /api/memory/forget             Bearer-gated: records the tombstone
-   The preview is fetched and shown BEFORE any write, and the write only
-   happens on an explicit confirm. Cancelling writes nothing. No credential
-   is ever rendered: the token is read from localStorage at call time and
-   stays inside the request header. */
+     GET  /api/profiling                 the owner-profile read face; every
+                                         keyword carries its channel + id
+     GET  /api/profiling/forget/preview  READ-ONLY: what a forget WOULD do
+     POST /api/profiling/forget          Bearer-gated: records the tombstone
+   ONE dialog and ONE preview gate serve both surfaces: the preview is
+   fetched and shown BEFORE any write, the confirm button ships disabled
+   and is enabled only once the server's preview painted, and the write
+   only happens on an explicit confirm. Cancelling writes nothing. No
+   credential is ever rendered: the token is read from localStorage at call
+   time and stays inside the request header. */
 const MEM_FORGET_SLOTS = ["memory", "user", "learned"];
 const MEM_FORGET_SLOT_BY_CHANNEL = {
   "curated:memory": "memory",
@@ -10480,8 +10487,15 @@ const MEM_FORGET_SLOT_BY_CHANNEL = {
   "learned": "learned",
 };
 
-let memForgetState = null;    // the entry the confirmation is about
+let memForgetState = null;    // the item the confirmation is about
 let memForgetBusy = false;     // a write is in flight
+
+/* Which surface the open confirmation is about. The memory entries forget
+   by slot+title, the owner profile forgets by source id. The KIND decides
+   the endpoint, the payload and the copy — one gate, one honest path. */
+function forgetKind(st) {
+  return st && st.kind === "profile" ? "profile" : "memory";
+}
 
 /* The slot the forget API addresses. The channel is the authority (it is
    the store the entry lives in); the group slot is only the fallback. */
@@ -10508,6 +10522,15 @@ function memForgetChannelText(channel) {
   return t("memory.forget.chanOther", "Curated file");
 }
 
+/* The owner profile's channel in plain words — never the raw id alone. */
+function profForgetChannelText(channel) {
+  const key = String(channel || "");
+  if (key === "profile") {
+    return t("prof.forget.chanProfile", "Owner profile");
+  }
+  return t("prof.forget.chanOther", "Derived item");
+}
+
 /* The opaque id, shortened for the eye. The full id stays in the title
    attribute — it identifies a source, it does not reveal one. */
 function memForgetShortId(id) {
@@ -10526,37 +10549,69 @@ function memForgetProvHtml(entry) {
     escapeHtml(short) + "</code>";
 }
 
-/* The status line under the memory list — honest in both directions. */
-function memForgetStatus(text, kind) {
-  const el = document.getElementById("memForgetStatus");
+/* A keyword's provenance: the channel in plain words + the short opaque
+   source id a forget would address. Same language as the memory view. */
+function profForgetProvHtml(entry) {
+  const chan = profForgetChannelText(entry && entry.channel);
+  const id = String((entry && entry.source_id) || "");
+  const short = memForgetShortId(id);
+  if (!short) return escapeHtml(chan);
+  return escapeHtml(chan) +
+    " · <code class=\"mem-src-id\" title=\"" + escapeHtml(id) + "\">" +
+    escapeHtml(short) + "</code>";
+}
+
+/* A keyword row's own FORGET action. It is rendered only when the server
+   handed out an address (the opaque source id) — the UI never invents
+   one, so a keyword without an id stays listed and inert. */
+function profForgetActionHtml(row) {
+  const srcId = String((row && row.source_id) || "");
+  if (!srcId) return "";
+  const token = String((row && row.token) || "");
+  return `<span class="prof-forget-acts">` +
+    `<button class="btn tiny prof-forget-btn" type="button" ` +
+    `title="${escapeHtml(t("prof.forget.btnTitle",
+      "Forget this item — it is silenced, never deleted"))}" ` +
+    `data-prof-forget="${escapeHtml(srcId)}" ` +
+    `data-prof-token="${escapeHtml(token)}">${escapeHtml(
+      t("prof.forget.btn", "FORGET"))}</button>` +
+    `<span class="stat-note prof-forget-hint">${escapeHtml(
+      t("prof.forget.hint",
+        "silences this item — nothing is deleted"))}</span></span>`;
+}
+
+/* The status line under a list — honest in both directions. */
+function forgetStatus(elId, text, kind) {
+  const el = document.getElementById(elId);
   if (!el) return;
   el.textContent = text || "";
   el.className = "stat-note mem-status" + (kind === "err" ? " is-err" : "");
 }
-
-function memForgetAffectRow(key, fallback, value) {
-  return `<li class="mem-pv-item"><span class="mem-pv-flag ` +
-    (value ? "is-on" : "is-off") + `">${escapeHtml(value
-      ? t("memory.forget.yes", "affected")
-      : t("memory.forget.no", "not affected"))}</span>` +
-    `<span class="mem-pv-what">${escapeHtml(t(key, fallback))}</span></li>`;
+function memForgetStatus(text, kind) {
+  forgetStatus("memForgetStatus", text, kind);
+}
+function profForgetStatus(text, kind) {
+  forgetStatus("profForgetStatus", text, kind);
 }
 
-/* Paint the confirmation from the server's preview. Until the preview has
-   arrived the confirm button stays disabled: the owner always sees WHAT
-   would change before anything is written. */
-function memForgetRender() {
-  const st = memForgetState;
-  const body = document.getElementById("memForgetPreview");
-  const err = document.getElementById("memForgetError");
-  const confirmBtn = document.getElementById("memForgetConfirm");
-  if (!body) return;
-  if (!st) {
-    body.innerHTML = "";
-    if (err) { err.textContent = ""; err.hidden = true; }
-    if (confirmBtn) confirmBtn.disabled = true;
-    return;
-  }
+/* One affected-surface row: an on/off flag plus WHAT is affected. The
+   pack decides the wording; the server decides the truth. */
+function forgetAffectRow(pack, key, fallback, value) {
+  return `<li class="mem-pv-item"><span class="mem-pv-flag ` +
+    (value ? "is-on" : "is-off") + `">${escapeHtml(value
+      ? t(pack + "yes", "affected")
+      : t(pack + "no", "not affected"))}</span>` +
+    `<span class="mem-pv-what">${escapeHtml(t(key, fallback))}</span></li>`;
+}
+function memForgetAffectRow(key, fallback, value) {
+  return forgetAffectRow("memory.forget.", key, fallback, value);
+}
+function profForgetAffectRow(key, fallback, value) {
+  return forgetAffectRow("prof.forget.", key, fallback, value);
+}
+
+/* The memory half of the preview body: what a forget WOULD silence. */
+function memForgetPreviewRows(st) {
   const rows = [];
   rows.push(`<div class="mem-pv-title">${escapeHtml(st.title || "")}</div>`);
   const p = st.preview;
@@ -10604,16 +10659,109 @@ function memForgetRender() {
       t("memory.forget.previewLoading",
         "reading what this would change…"))}</div>`);
   }
+  return rows;
+}
+
+/* The owner-profile half of the preview body: how many derived items
+   would be silenced and which surfaces that touches. */
+function profForgetPreviewRows(st) {
+  const rows = [];
+  rows.push(`<div class="mem-pv-title">${escapeHtml(st.token || "")}</div>`);
+  const p = st.preview;
+  if (p) {
+    const n = Number(p.items);
+    const counted = Number.isFinite(n) ? n : 0;
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      counted === 1
+        ? t("prof.forget.itemsOne", "1 item would be silenced.")
+        : t("prof.forget.items", "{n} items would be silenced.")
+          .replace("{n}", String(counted)))}</div>`);
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      t("prof.forget.source", "source"))}: ` +
+      `${escapeHtml(profForgetChannelText(p.channel))} · ` +
+      `<code class="mem-src-id">${escapeHtml(
+        memForgetShortId(p.source_id))}</code></div>`);
+    rows.push(`<div class="mem-pv-head">${escapeHtml(
+      t("prof.forget.affects", "Affected surfaces"))}</div>`);
+    const affects = p.affects || {};
+    rows.push(`<ul class="mem-pv-list">` +
+      profForgetAffectRow("prof.forget.affectProfile",
+        "the owner profile (this keyword)", affects.profile) +
+      profForgetAffectRow("prof.forget.affectScore",
+        "the owner score", affects.score) +
+      profForgetAffectRow("prof.forget.affectCoverage",
+        "the profile coverage", affects.coverage) +
+      `</ul>`);
+    rows.push(`<div class="mem-pv-head">${escapeHtml(
+      t("prof.forget.limitsLabel", "What this does not do"))}</div>`);
+    rows.push(`<div class="mem-pv-limits">${escapeHtml(
+      t("prof.forget.limitsSummary",
+        "Nothing is deleted — the session text stays where it is; only "
+        + "this derived item is silenced."))}</div>`);
+    const limits = String(p.limits || "").trim();
+    rows.push(`<div class="mem-pv-limits-detail">${escapeHtml(limits
+      ? limits
+      : t("prof.forget.limitsFallback",
+        "The derived item is silenced in the profile only; the original "
+        + "session transcript keeps the text."))}</div>`);
+  } else if (!st.error) {
+    rows.push(`<div class="mem-pv-line">${escapeHtml(
+      t("prof.forget.previewLoading",
+        "reading what this would change…"))}</div>`);
+  }
+  return rows;
+}
+
+/* Paint the confirmation from the server's preview. Until the preview has
+   arrived the confirm button stays disabled: the owner always sees WHAT
+   would change before anything is written. */
+function memForgetRender() {
+  const st = memForgetState;
+  const body = document.getElementById("memForgetPreview");
+  if (!body) return;
+  const err = document.getElementById("memForgetError");
+  const confirmBtn = document.getElementById("memForgetConfirm");
+  const cancelBtn = document.getElementById("memForgetCancel");
+  const titleEl = document.getElementById("memForgetTitle");
+  const subEl = document.querySelector("#memForgetDialog .mem-dialog-sub");
+  if (!st) {
+    body.innerHTML = "";
+    if (err) { err.textContent = ""; err.hidden = true; }
+    if (confirmBtn) confirmBtn.disabled = true;
+    return;
+  }
+  const isProf = forgetKind(st) === "profile";
+  // the dialog's own chrome follows the surface it is about
+  if (titleEl) {
+    titleEl.textContent = isProf
+      ? t("prof.forget.title", "Forget this profile item?")
+      : t("memory.forget.title", "Forget this memory?");
+  }
+  if (subEl) {
+    subEl.textContent = isProf
+      ? t("prof.forget.subtitle", "Nothing is written until you confirm.")
+      : t("memory.forget.subtitle", "Nothing is written until you confirm.");
+  }
+  if (cancelBtn) {
+    cancelBtn.textContent = isProf
+      ? t("prof.forget.cancel", "CANCEL")
+      : t("memory.forget.cancel", "CANCEL");
+  }
+  const rows = isProf ? profForgetPreviewRows(st) : memForgetPreviewRows(st);
   body.innerHTML = rows.join("");
   if (err) {
     err.textContent = st.error || "";
     err.hidden = !st.error;
   }
   if (confirmBtn) {
-    confirmBtn.disabled = !p || memForgetBusy;
+    confirmBtn.disabled = !st.preview || memForgetBusy;
     confirmBtn.textContent = memForgetBusy
-      ? t("memory.forget.working", "working…")
-      : t("memory.forget.confirm", "CONFIRM FORGET");
+      ? (isProf
+          ? t("prof.forget.working", "working…")
+          : t("memory.forget.working", "working…"))
+      : (isProf
+          ? t("prof.forget.confirm", "CONFIRM FORGET")
+          : t("memory.forget.confirm", "CONFIRM FORGET"));
   }
 }
 
@@ -10622,21 +10770,17 @@ async function memForgetLoadPreview() {
   const st = memForgetState;
   if (!st) return;
   try {
-    const url = "/api/memory/forget/preview?slot=" +
-      encodeURIComponent(st.slot) + "&title=" + encodeURIComponent(st.title);
+    const url = forgetKind(st) === "profile"
+      ? "/api/profiling/forget/preview?source=" +
+        encodeURIComponent(st.sourceId)
+      : "/api/memory/forget/preview?slot=" +
+        encodeURIComponent(st.slot) + "&title=" + encodeURIComponent(st.title);
     const res = await fetch(url);
     const body = await res.json().catch(() => null);
     if (memForgetState !== st) return;      // the owner moved on
     if (!res.ok || !body || typeof body !== "object") {
       st.preview = null;
-      st.error = res.status === 404
-        ? t("memory.forget.previewMissing",
-          "that entry is no longer there — nothing was written")
-        : res.status === 400
-          ? t("memory.forget.previewBadSlot",
-            "that memory slot cannot be forgotten from here")
-          : t("memory.forget.previewFailed",
-            "the preview could not be loaded — nothing was written");
+      st.error = forgetPreviewError(st, res.status);
       memForgetRender();
       return;
     }
@@ -10646,10 +10790,39 @@ async function memForgetLoadPreview() {
   } catch (e) {
     if (memForgetState !== st) return;
     st.preview = null;
-    st.error = t("memory.forget.network",
-      "the console could not be reached — nothing was written");
+    st.error = forgetKind(st) === "profile"
+      ? t("prof.forget.network",
+        "the console could not be reached — nothing was written")
+      : t("memory.forget.network",
+        "the console could not be reached — nothing was written");
     memForgetRender();
   }
+}
+
+/* A refused preview says WHAT happened — never a fake success. */
+function forgetPreviewError(st, status) {
+  if (forgetKind(st) === "profile") {
+    if (status === 404) {
+      return t("prof.forget.previewMissing",
+        "that item is no longer there — nothing was written");
+    }
+    if (status === 400) {
+      return t("prof.forget.previewBadSource",
+        "that source cannot be forgotten from here");
+    }
+    return t("prof.forget.previewFailed",
+      "the preview could not be loaded — nothing was written");
+  }
+  if (status === 404) {
+    return t("memory.forget.previewMissing",
+      "that entry is no longer there — nothing was written");
+  }
+  if (status === 400) {
+    return t("memory.forget.previewBadSlot",
+      "that memory slot cannot be forgotten from here");
+  }
+  return t("memory.forget.previewFailed",
+    "the preview could not be loaded — nothing was written");
 }
 
 /* One Bearer-gated write, in the product's own shape (the Access card's
@@ -10681,8 +10854,28 @@ function memForgetOpen(slot, title) {
   if (!slot || !title) return;
   const dlg = document.getElementById("memForgetDialog");
   if (!dlg) return;
-  memForgetState = { slot: slot, title: title, preview: null, error: "" };
+  memForgetState = { kind: "memory", slot: slot, title: title,
+                     preview: null, error: "" };
   memForgetStatus("", null);
+  memForgetRender();
+  if (typeof dlg.showModal === "function") {
+    if (!dlg.open) dlg.showModal();
+  } else {
+    dlg.setAttribute("open", "");
+  }
+  memForgetLoadPreview();
+}
+
+/* The owner profile's own FORGET action: the SAME dialog and the SAME
+   preview gate, addressed by the opaque source id the server handed out.
+   The UI never invents an address — without one there is no action. */
+function profForgetOpen(sourceId, token) {
+  if (!sourceId) return;
+  const dlg = document.getElementById("memForgetDialog");
+  if (!dlg) return;
+  memForgetState = { kind: "profile", sourceId: sourceId, token: token || "",
+                     preview: null, error: "" };
+  profForgetStatus("", null);
   memForgetRender();
   if (typeof dlg.showModal === "function") {
     if (!dlg.open) dlg.showModal();
@@ -10710,26 +10903,25 @@ async function memForgetConfirm() {
   if (!st || !st.preview || memForgetBusy) return;
   memForgetBusy = true;
   memForgetRender();
-  const res = await memForgetPost("/api/memory/forget",
-    { slot: st.slot, title: st.title });
+  const res = forgetKind(st) === "profile"
+    ? await memForgetPost("/api/profiling/forget", { source_id: st.sourceId })
+    : await memForgetPost("/api/memory/forget",
+      { slot: st.slot, title: st.title });
   memForgetBusy = false;
   if (!res.ok) {
-    st.error = res.reason === "need_token"
-      ? t("memory.forget.needToken",
-        "sign in required — set the access token in Settings → Access")
-      : res.reason === "unauthorized"
-        ? t("memory.forget.unauthorized",
-          "sign in required (401) — the access token was rejected")
-        : res.reason === "network"
-          ? t("memory.forget.network",
-            "the console could not be reached — nothing was written")
-          : t("memory.forget.failed",
-            "the forget was refused — nothing was written");
+    st.error = forgetWriteError(st, res.reason);
     memForgetRender();
     return;                       // no fake success: the dialog stays open
   }
   const body = res.body || {};
   const already = body.already === true;
+  if (forgetKind(st) === "profile") {
+    memForgetClose();
+    memForgetState = null;
+    memForgetRender();
+    await profForgetDone(st, already);
+    return;
+  }
   memForgetClose();
   memForgetState = null;
   memForgetRender();
@@ -10745,6 +10937,76 @@ async function memForgetConfirm() {
   await refreshMemoryBrowse(search ? search.value.trim() : "");
 }
 
+/* A refused write says WHAT happened — a missing token, a rejected token,
+   a dead network or a plain refusal. Never a fake success. */
+function forgetWriteError(st, reason) {
+  const prof = forgetKind(st) === "profile";
+  if (reason === "need_token") {
+    return prof
+      ? t("prof.forget.needToken",
+        "sign in required — set the access token in Settings → Access")
+      : t("memory.forget.needToken",
+        "sign in required — set the access token in Settings → Access");
+  }
+  if (reason === "unauthorized") {
+    return prof
+      ? t("prof.forget.unauthorized",
+        "sign in required (401) — the access token was rejected")
+      : t("memory.forget.unauthorized",
+        "sign in required (401) — the access token was rejected");
+  }
+  if (reason === "network") {
+    return prof
+      ? t("prof.forget.network",
+        "the console could not be reached — nothing was written")
+      : t("memory.forget.network",
+        "the console could not be reached — nothing was written");
+  }
+  return prof
+    ? t("prof.forget.failed",
+      "the forget was refused — nothing was written")
+    : t("memory.forget.failed",
+      "the forget was refused — nothing was written");
+}
+
+/* The profile half of a confirmed forget: the view is RE-READ from the
+   API (the row list is the server's, never a local guess) and the owner
+   gets an honest sentence — nothing was deleted, the session text is
+   untouched, only the derived item was silenced. If the re-read fails or
+   the item is still listed, the message says THAT instead. */
+async function profForgetDone(st, already) {
+  const reread = await refreshProfiling();
+  if (!reread) {
+    profForgetStatus(t("prof.forget.rereadFailed",
+      "forgotten — but the profile could not be re-read: press ANALYZE NOW "
+      + "to refresh. Nothing was deleted."), null);
+    return;
+  }
+  if (profKeywordListed(st.sourceId)) {
+    profForgetStatus(t("prof.forget.stillListed",
+      "forgotten — but it is still listed: press ANALYZE NOW to rebuild the "
+      + "profile. Nothing was deleted."), null);
+    return;
+  }
+  profForgetStatus(already
+    ? t("prof.forget.already",
+      "already forgotten — it was already silenced. Nothing was deleted.")
+    : t("prof.forget.done",
+      "Forgotten: {token}. Nothing was deleted — the session text is "
+      + "untouched; only this derived item is silenced.")
+      .replace("{token}", st.token || ""), null);
+}
+
+/* Is this source still listed by the server? The answer is the server's
+   own, never a local guess. */
+function profKeywordListed(sourceId) {
+  const id = String(sourceId || "");
+  if (!id) return false;
+  const rows = (ownProfileData && Array.isArray(ownProfileData.keywords))
+    ? ownProfileData.keywords : [];
+  return rows.some(r => String((r && r.source_id) || "") === id);
+}
+
 const memBrowseListEl = document.getElementById("memBrowseList");
 if (memBrowseListEl) memBrowseListEl.addEventListener("click", (ev) => {
   const btn = ev.target && ev.target.closest
@@ -10754,6 +11016,20 @@ if (memBrowseListEl) memBrowseListEl.addEventListener("click", (ev) => {
   ev.stopPropagation();
   memForgetOpen(btn.getAttribute("data-mem-slot") || "",
                 btn.getAttribute("data-mem-title") || "");
+});
+
+/* The owner profile's keyword rows carry their own FORGET action. It
+   opens the SAME confirmation (one dialog, one preview gate) addressed by
+   the opaque source id the server handed out with the row. */
+const profKeywordsEl = document.getElementById("profKeywords");
+if (profKeywordsEl) profKeywordsEl.addEventListener("click", (ev) => {
+  const btn = ev.target && ev.target.closest
+    ? ev.target.closest(".prof-forget-btn") : null;
+  if (!btn) return;
+  ev.preventDefault();
+  ev.stopPropagation();
+  profForgetOpen(btn.getAttribute("data-prof-forget") || "",
+                  btn.getAttribute("data-prof-token") || "");
 });
 
 const memForgetDialogEl = document.getElementById("memForgetDialog");
@@ -11506,6 +11782,7 @@ function renderProfiling() {
             String(e.text || ""))}</li>`).join("")}</ul></details>` : "";
         return `<div class="prof-row">
           <span class="prof-token">${escapeHtml(String(r.token || ""))}</span>
+          <span class="prof-prov">${profForgetProvHtml(r)}</span>
           <span class="prof-badge ${escapeHtml(trait)}">${escapeHtml(
             profTraitLabel(trait))}</span>
           <span class="prof-badge">${escapeHtml(topic || "-")}</span>
@@ -11513,6 +11790,7 @@ function renderProfiling() {
           <span class="prof-badge">${escapeHtml(profCoverLabel(cover))}</span>
           ${weak ? `<span class="prof-badge weak">${escapeHtml(
               t("prof.weak", "weak"))}</span>` : ""}
+          ${profForgetActionHtml(r)}
           ${evidence}</div>`;
       }).join("");
     }
@@ -11605,9 +11883,13 @@ function renderProfiling() {
 
 async function refreshProfiling() {
   try {
-    ownProfileData = await fetch("/api/profiling").then(r => r.json());
-  } catch (e) { /* keep the last render */ }
+    const res = await fetch("/api/profiling");
+    const d = res.ok ? await res.json() : null;
+    if (!d || typeof d !== "object") return false;   // keep the last render
+    ownProfileData = d;
+  } catch (e) { return false; }     // keep the last render
   renderProfiling();
+  return true;
 }
 
 /* every config write sends the WHOLE partition (the settings merge

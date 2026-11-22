@@ -27,6 +27,13 @@ Contracts enforced here (and asserted by mycore/tests/run.py):
   never silent.
 * BOUNDED. Message/char caps per run, a top-K cap, an excerpt cap and a
   per-excerpt char cap. A huge corpus degrades in a stated way.
+* HONOURED SUPPRESSIONS. A derived item is a source like any other: the
+  tombstone ledger (mycore.memforget) silences it in the `profile` channel.
+  A silenced token is excluded when the profile is BUILT (so the stored
+  document, the score, the tallies and the keyword list are computed
+  without it) and when a stored profile is READ (so a suppression takes
+  effect at the next read, with no re-analysis and no restart). The
+  transcript rows it was derived from are never touched (D10).
 * ENGLISH SOURCE (repo i18n policy). Chinese lexicons are unicode escapes,
   exactly as `mycore.mission` does for its reporter copy.
 
@@ -403,6 +410,83 @@ def tokenize(text: str) -> list[str]:
     return _ascii_terms(text) + _cjk_terms(text)
 
 
+# ---------------------------------------------------------- suppression ---
+# A derived profile item is a SOURCE like any other (D2/D5/D7): its opaque
+# id is the usual one over (profile scope, channel, content digest), where
+# the content is the token text. The ledger never holds the token itself —
+# only its digest — so the match is by digest.
+#
+# Two rules make the suppression honest:
+#   * BUILD time — a silenced token never enters the profile, so the stored
+#     document, the score, the tallies and the keyword list are computed
+#     WITHOUT it (a re-analysis cannot reintroduce it);
+#   * READ time — a stored profile is filtered on the way out, so the
+#     suppression takes effect at the next read, with no tick and no
+#     restart.
+#
+# The transcript rows the token was derived from are never touched (D10).
+def profile_source_id(token: str, *, repo: Path | None = None) -> str:
+    """The opaque, deterministic id of a derived profile item (D2).
+
+    `memforget.source_id(CHANNEL_PROFILE, token)` — the same derivation as
+    every other source, so a derived item is addressable with the same
+    opaque id. The id carries no path, no excerpt and no credential."""
+    return memforget.source_id(memforget.CHANNEL_PROFILE, token or "",
+                                repo=repo)
+
+
+class _Suppression:
+    """Which derived tokens the ledger silences (D5/D7).
+
+    The ledger holds digests, not tokens, so a token is matched by its own
+    content digest. The digest is computed ONCE per distinct token — a run
+    sees the same token in thousands of messages — and the whole check is
+    skipped while the profile channel holds no tombstone at all (the normal
+    state: nothing is forgotten)."""
+    __slots__ = ("_digests", "_ids", "_cache", "_possible")
+
+    def __init__(self, snapshot: memforget.TombstoneSet | None = None):
+        self._digests: set[str] = set()
+        self._ids: frozenset = frozenset()
+        self._cache: dict[str, bool] = {}
+        self._possible = False
+        if snapshot is None:
+            return
+        for channel, digest in (snapshot.pairs or ()):
+            if channel == memforget.CHANNEL_PROFILE:
+                self._digests.add(digest)
+        self._ids = frozenset(snapshot.ids or ())
+        rows = list(snapshot.rows or ())
+        if rows:
+            # The rows carry the channel: a tombstone in ANOTHER store can
+            # never silence a derived item (D11), so the whole check can be
+            # skipped while no profile-channel row exists.
+            self._possible = any(r.get("channel") == memforget.CHANNEL_PROFILE
+                                 for r in rows)
+        else:
+            # A merged set carries no rows (the channels are unknown then):
+            # assume the worst and check.
+            self._possible = bool(self._digests or self._ids)
+
+    @property
+    def empty(self) -> bool:
+        """Can this set silence a derived item at all? (The normal state:
+        nothing is forgotten — the check costs nothing then.)"""
+        return not self._possible
+
+    def suppresses(self, token: str) -> bool:
+        """Is this derived token silenced right now?"""
+        if not token or self.empty:
+            return False
+        hit = self._cache.get(token)
+        if hit is None:
+            hit = (memforget.digest_of(token) in self._digests
+                   or memforget.source_id(memforget.CHANNEL_PROFILE, token)
+                   in self._ids)
+            self._cache[token] = hit
+        return hit
+
+
 def _has_term(text_low: str, term: str) -> bool:
     """Substring test for CJK terms, word-boundary test for latin ones (so
     `watch` never matches inside `watcher` by accident... except that it is
@@ -676,9 +760,15 @@ def analyze(now: float | None = None, *, block: dict | None = None,
             root: Path | None = None, repo: Path | None = None,
             curated: str | None = None,
             source_terms: tuple[str, ...] | None = None,
-            pinned: tuple[str, ...] | None = None) -> dict:
+            pinned: tuple[str, ...] | None = None,
+            tombstones: memforget.TombstoneSet | None = None) -> dict:
     """One analysis run. Pure over its inputs (every seam is injectable), so
     the suite runs hermetically and production passes nothing.
+
+    `tombstones` is the suppression set (mycore.memforget.TombstoneSet);
+    without it the ledger of the state root this run reads decides which
+    derived items are silenced. A hermetic run passes an empty set (or a
+    temp state root) so it never reads the production ledger.
 
     Returns the report the caller persists:
       {ok, at, config, corpus, truncated, reason, keywords[], rhythm}
@@ -716,6 +806,14 @@ def analyze(now: float | None = None, *, block: dict | None = None,
         topics[slug] = list(terms)
 
     # ---- accumulate evidence per token -----------------------------------
+    # The ledger of the state root this run reads (the profile's own state
+    # root in production) decides which DERIVED items are silenced: a
+    # silenced token never enters the profile, so the stored document, the
+    # score, the tallies and the keyword list are computed WITHOUT it and a
+    # re-analysis cannot reintroduce it (D7).
+    suppression = _Suppression(
+        tombstones if tombstones is not None
+        else memforget.load_set(repo, state=state_root))
     docs = {day: set() for day in corpus["days"]}
     per_token: dict[str, dict] = {}
     for ts, day, text, urg, pro in messages:
@@ -724,6 +822,8 @@ def analyze(now: float | None = None, *, block: dict | None = None,
         seen_here: set[str] = set()
         for token in tokens:
             if token in _SCORING_TERMS:      # urgency/proactive words: flags only
+                continue
+            if suppression.suppresses(token):   # a forgotten derived item
                 continue
             row = per_token.get(token)
             if row is None:
@@ -840,13 +940,58 @@ def profile_path() -> Path:
     return state_dir() / PROFILE_FILE
 
 
-def load_profile(path: Path | None = None) -> dict:
-    """Last stored profile. Absent/corrupt -> {} (an honest empty board)."""
+def load_profile(path: Path | None = None, *,
+                 tombstones: memforget.TombstoneSet | None = None,
+                 repo: Path | None = None,
+                 state: Path | str | None = None) -> dict:
+    """Last stored profile. Absent/corrupt -> {} (an honest empty board).
+
+    A DERIVED item that a tombstone silences is FILTERED OUT here (D7):
+    the suppression takes effect at the next read — no re-analysis, no
+    tick, no restart — and the tallies are recomputed over the rows that
+    are actually visible, so a forgotten item never lingers in a count.
+
+    `tombstones` is the suppression set; without it the ledger of the
+    active profile's state root decides."""
     try:
         doc = json.loads((path or profile_path()).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return doc if isinstance(doc, dict) else {}
+    if not isinstance(doc, dict):
+        return {}
+    return filter_profile(doc, tombstones=tombstones, repo=repo, state=state)
+
+
+def filter_profile(doc: dict, *,
+                   tombstones: memforget.TombstoneSet | None = None,
+                   repo: Path | None = None,
+                   state: Path | str | None = None) -> dict:
+    """Drop every silenced derived item from a stored profile document.
+
+    The document is returned UNCHANGED (byte for byte, same object) while
+    nothing is silenced — the normal state before anything is forgotten.
+    Otherwise the silenced rows are dropped and the counts are recomputed
+    over the visible rows, so the tallies always describe what the reader
+    actually sees."""
+    if not isinstance(doc, dict):
+        return {}
+    rows = doc.get("keywords")
+    if not isinstance(rows, list) or not rows:
+        return doc
+    snapshot = (tombstones if tombstones is not None
+                else memforget.load_set(repo, state))
+    suppression = _Suppression(snapshot)
+    if suppression.empty:
+        return doc
+    kept = [r for r in rows
+            if not (isinstance(r, dict)
+                    and suppression.suppresses(str(r.get("token") or "")))]
+    if len(kept) == len(rows):
+        return doc
+    out = dict(doc)
+    out["keywords"] = kept
+    out["counts"] = _counts([r for r in kept if isinstance(r, dict)])
+    return out
 
 
 def save_profile(doc: dict, path: Path | None = None) -> None:

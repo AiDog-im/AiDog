@@ -2439,7 +2439,7 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
    segment switch is a pure local toggle; every row expands to its own
    evidence (never a claim without a source). */
 .sniff-seg {
-  display: flex; gap: 6px; margin: 10px 0 4px;
+  display: flex; gap: 6px; margin: 10px 0 4px; flex-wrap: wrap;
 }
 .sniff-seg-btn {
   font: inherit; font-size: 11px; letter-spacing: .08em;
@@ -2479,6 +2479,17 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 .prof-badge.gap { color: var(--amber); border-color: rgba(160, 90, 4, .4); }
 .prof-badge.growth { color: var(--ok); border-color: rgba(10, 122, 82, .4); }
 .prof-badge.weak { color: var(--muted); border-style: dashed; }
+/* the keyword row's provenance + its own FORGET action (same language as
+   the memory view: mono provenance, hairline chip, the quiet action) */
+.prof-prov {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .05em;
+  color: var(--muted); overflow-wrap: anywhere;
+}
+.prof-forget-acts {
+  display: inline-flex; flex-wrap: wrap; gap: 8px; align-items: baseline;
+  margin-inline-start: auto;
+}
+.prof-forget-hint { font-size: 11px; margin: 0; }
 .prof-dim-cols {
   display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
   gap: 12px; padding-top: 8px;

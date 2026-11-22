@@ -22782,6 +22782,307 @@ def test_memory_forget_api() -> None:
                 os.environ[k] = saved[k]
 
 
+def test_profiling_forget() -> None:
+    """The DERIVED owner-profile item — the forget control (stage 3).
+
+    Design authority: docs/design/memory_suppression_design.md — D1 (a
+    tombstone, never a deletion), D2 (opaque deterministic ids), D5/D7
+    (the read paths filter the set), D10 (honest limits), D11 (a
+    suppression never crosses stores).
+
+    Covered: a derived item is a source like any other — the `profile`
+    admission channel and the usual opaque id (profile scope + channel +
+    content digest); a tombstone removes it from the profile at BUILD time
+    (the stored document, the score and the tallies are computed without
+    it) and at READ time (the next read already reflects it — no tick, no
+    restart); a re-analysis cannot reintroduce it; an unrelated item keeps
+    its score; the read face carries the provenance (channel + source id)
+    of every keyword; the preview is read-only and honest; a repeat is a
+    no-op that reports already=true; the ledger row and every answer hold
+    no excerpt, no path and no credential; the transcript rows are never
+    touched; profiles stay isolated; the repository's own state is never
+    written."""
+    import json as _json
+    import os
+    import tempfile
+    from pathlib import Path as _Path
+    from mycore import memforget as mf
+    from mycore import profiling as pf
+    from web import server as ws
+
+    keys = ("AIDOG_PROFILE", "AIDOG_PROFILES_DIR", "AIDOG_MC_STATE")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _env(state=None, profile=None, profiles=None) -> None:
+        for k in keys:
+            os.environ.pop(k, None)
+        if state is not None:
+            os.environ["AIDOG_MC_STATE"] = str(state)
+        if profiles is not None:
+            os.environ["AIDOG_PROFILES_DIR"] = str(profiles)
+        if profile is not None:
+            os.environ["AIDOG_PROFILE"] = profile
+
+    now = 1_800_000_000.0
+    day = 86400.0
+    messages = [
+        {"role": "user", "content": "public chain wallet contract",
+         "ts": now - 2 * day},
+        {"role": "user", "content": "public chain wallet contract deadline",
+         "ts": now - 2 * day},
+        {"role": "user", "content": "release version bump console",
+         "ts": now - 5 * day},
+    ]
+    prod_profile = (REPO / "data" / "mycore_service" / "profiling"
+                    / "profile.json")
+    prod_before = prod_profile.read_bytes() if prod_profile.exists() else b""
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            profiles = _Path(td) / "profiles"
+            alpha = profiles / "alpha"
+            beta = profiles / "beta"
+            state = alpha / "state"
+            beta_state = beta / "state"
+            (state / "sessions").mkdir(parents=True)
+            (beta_state / "sessions").mkdir(parents=True)
+            (alpha / "body" / "memory").mkdir(parents=True)
+            (beta / "body" / "memory").mkdir(parents=True)
+            transcript = state / "sessions" / "a.jsonl"
+            body = "\n".join(_json.dumps(m) for m in messages) + "\n"
+            transcript.write_text(body, encoding="utf-8")
+            beta_transcript = beta_state / "sessions" / "a.jsonl"
+            beta_transcript.write_text(body, encoding="utf-8")
+            transcript_before = transcript.read_bytes()
+            _env(state=state, profiles=profiles, profile="alpha")
+
+            # ---------------------------------------- 1. the derived items --
+            report = pf.analyze(now, block={"top_k": 40, "exclude": []},
+                                root=state, curated="", source_terms=())
+            rows = {r["token"]: r for r in report["keywords"]}
+            check("profile-forget: the analysis derives the items",
+                  "chain" in rows and "wallet" in rows
+                  and "release" in rows, str(sorted(rows)))
+            check("profile-forget: every derived item carries its evidence",
+                  all({"token", "score", "tf", "tier", "coverage", "trait",
+                       "excerpts"} <= set(r) for r in report["keywords"]),
+                  str(sorted(rows))[:160])
+
+            # ------------------------------------------ 2. the tombstone ----
+            result = mf.forget(mf.CHANNEL_PROFILE, "chain",
+                                scope=mf.SCOPE_PROFILE)
+            check("profile-forget: the tombstone names the profile channel "
+                  "and the opaque id",
+                  result["channel"] == mf.CHANNEL_PROFILE
+                  and result["id"] == mf.source_id(mf.CHANNEL_PROFILE, "chain")
+                  and result["already"] is False, str(result)[:160])
+            check("profile-forget: the report carries the honest D10 limits",
+                  "NOT deleted" in result["limits"]
+                  and "transcript" in result["limits"], result["limits"][:120])
+
+            # ------------------------------------ 3. the rebuild is honest --
+            rebuilt = pf.analyze(now, block={"top_k": 40, "exclude": []},
+                                 root=state, curated="", source_terms=())
+            rows2 = {r["token"]: r for r in rebuilt["keywords"]}
+            check("profile-forget: a re-analysis cannot reintroduce a "
+                  "forgotten item",
+                  "chain" not in rows2 and "wallet" in rows2
+                  and "release" in rows2, str(sorted(rows2)))
+            check("profile-forget: an unrelated item keeps its own score",
+                  rows2["wallet"]["score"] == rows["wallet"]["score"]
+                  and rows2["release"]["score"] == rows["release"]["score"],
+                  f'wallet {rows["wallet"]["score"]} -> '
+                  f'{rows2["wallet"]["score"]}')
+            check("profile-forget: the tallies are recomputed without the "
+                  "forgotten item",
+                  sum(rebuilt["counts"]["coverage"].values())
+                  == len(rebuilt["keywords"])
+                  and sum(rebuilt["counts"]["tiers"].values())
+                  == len(rebuilt["keywords"])
+                  and sum(rebuilt["counts"]["coverage"].values())
+                  < sum(report["counts"]["coverage"].values()),
+                  str(rebuilt["counts"]))
+
+            # --------------------------------------- 4. the read path -------
+            pf.save_profile(report, state / "profiling" / "profile.json")
+            stored = _json.loads(
+                (state / "profiling" / "profile.json")
+                .read_text(encoding="utf-8"))
+            check("profile-forget: nothing was deleted — the stored document "
+                  "still holds the item",
+                  any(r["token"] == "chain" for r in stored["keywords"]),
+                  str(sorted(r["token"] for r in stored["keywords"]))[:160])
+            loaded = pf.load_profile(state / "profiling" / "profile.json")
+            tokens = {r["token"] for r in loaded["keywords"]}
+            check("profile-forget: a stored profile is filtered at the next "
+                  "read (no tick, no restart)",
+                  "chain" not in tokens and "wallet" in tokens,
+                  str(sorted(tokens)))
+            check("profile-forget: the read tallies exclude the forgotten "
+                  "item",
+                  sum(loaded["counts"]["coverage"].values())
+                  == len(loaded["keywords"]), str(loaded["counts"]))
+            check("profile-forget: the transcript rows are never touched",
+                  transcript.read_bytes() == transcript_before,
+                  "the session transcript changed")
+
+            # ------------------------------------- 5. the console read face --
+            face = ws.collect_profiling()
+            face_tokens = {k["token"] for k in face["keywords"]}
+            check("profile-forget: the read face gives every keyword its "
+                  "provenance (channel + source id)",
+                  bool(face["keywords"])
+                  and all(k.get("channel") == mf.CHANNEL_PROFILE
+                          and str(k.get("source_id") or "").startswith("src_")
+                          for k in face["keywords"]),
+                  str(face["keywords"][:1])[:200])
+            check("profile-forget: the source id of a keyword is the "
+                  "deterministic id of its token",
+                  all(k["source_id"] == mf.source_id(mf.CHANNEL_PROFILE,
+                                                     k["token"])
+                      for k in face["keywords"]),
+                  str(face["keywords"][:1])[:200])
+            check("profile-forget: the forgotten item left the read face at "
+                  "once",
+                  "chain" not in face_tokens and "wallet" in face_tokens,
+                  str(sorted(face_tokens)))
+            check("profile-forget: the read face adds no other field to a "
+                  "keyword row",
+                  all(set(k) - {"channel", "source_id"}
+                      <= set(rows[k["token"]]) for k in face["keywords"]),
+                  str(sorted(set(face["keywords"][0])
+                             - set(rows["wallet"]))[:160]))
+
+            # ---------------------------------------- 6. the honest preview --
+            wallet_id = mf.source_id(mf.CHANNEL_PROFILE, "wallet")
+            payload, code = ws.collect_profiling_forget_preview(wallet_id)
+            check("profile-forget: the preview answers 200 with exactly the "
+                  "contracted keys",
+                  code == 200
+                  and set(payload) == {"source_id", "channel", "items",
+                                       "affects", "limits"},
+                  str(sorted(payload)))
+            check("profile-forget: the preview names the channel, the id and "
+                  "the surfaces it silences",
+                  payload.get("source_id") == wallet_id
+                  and payload.get("channel") == mf.CHANNEL_PROFILE
+                  and payload.get("items") == 1
+                  and payload.get("affects") == {"profile": True, "score": True,
+                                                 "coverage": True},
+                  str(payload)[:200])
+            check("profile-forget: the preview carries the honest D10 limits",
+                  "NOT deleted" in str(payload.get("limits"))
+                  and "transcript" in str(payload.get("limits")),
+                  str(payload.get("limits"))[:120])
+            blob = _json.dumps(payload, ensure_ascii=False)
+            check("profile-forget: the preview carries no excerpt, no path "
+                  "and no credential",
+                  "wallet" not in blob and "public chain wallet contract"
+                  not in blob and str(state) not in blob
+                  and "sessions" not in blob and "WEB_TOKEN" not in blob,
+                  blob[:160])
+            unknown, ucode = ws.collect_profiling_forget_preview(
+                "src_" + "0" * 32)
+            check("profile-forget: an unknown source id answers an honest "
+                  "error, never a silent empty",
+                  ucode == 404 and unknown.get("error"), f"{ucode} {unknown}")
+            malformed, mcode = ws.collect_profiling_forget_preview("nope")
+            check("profile-forget: a malformed source id answers 400",
+                  mcode == 400 and malformed.get("error"), f"{mcode} {malformed}")
+            check("profile-forget: the preview wrote nothing",
+                  len(mf.load_rows()) == 1, str(mf.load_rows())[:160])
+
+            # ------------------------------------------- 7. the write -------
+            payload, code = ws.apply_profiling_forget(wallet_id)
+            check("profile-forget: the write answers ok with the id, the "
+                  "channel and the already flag",
+                  code == 200 and payload.get("ok") is True
+                  and payload.get("id") == wallet_id
+                  and payload.get("channel") == mf.CHANNEL_PROFILE
+                  and payload.get("already") is False, str(payload)[:160])
+            check("profile-forget: the answer carries exactly the contracted "
+                  "keys",
+                  set(payload) == {"ok", "id", "channel", "already", "limits"},
+                  str(sorted(payload)))
+            answer = _json.dumps(payload, ensure_ascii=False)
+            check("profile-forget: the answer holds no excerpt, no path and "
+                  "no credential",
+                  "wallet" not in answer and str(state) not in answer
+                  and "sessions" not in answer, answer[:160])
+            repeat, rcode = ws.apply_profiling_forget(wallet_id)
+            check("profile-forget: repeating the write is a no-op that "
+                  "reports already",
+                  rcode == 200 and repeat.get("already") is True
+                  and repeat.get("id") == wallet_id
+                  and len(mf.load_rows()) == 2, str(repeat)[:160])
+
+            # ------------------------------------------------- 8. the ledger --
+            ledger_rows = mf.load_rows()
+            raw = mf.ledger_path().read_text(encoding="utf-8")
+            check("profile-forget: the ledger holds one row per forgotten "
+                  "item, in the profile channel",
+                  len(ledger_rows) == 2
+                  and all(r["channel"] == mf.CHANNEL_PROFILE for r in ledger_rows)
+                  and all(r["scope"] == mf.SCOPE_PROFILE for r in ledger_rows),
+                  str(ledger_rows)[:200])
+            check("profile-forget: the ledger row holds no excerpt, no path "
+                  "and no credential",
+                  "wallet" not in raw and "chain" not in raw
+                  and str(state) not in raw and "sessions" not in raw,
+                  raw[:200])
+
+            # ------------------------------------------ 9. the read faces ----
+            face2 = ws.collect_profiling()
+            tokens2 = {k["token"] for k in face2["keywords"]}
+            check("profile-forget: both forgotten items left the read face",
+                  "chain" not in tokens2 and "wallet" not in tokens2
+                  and "release" in tokens2, str(sorted(tokens2)))
+            check("profile-forget: the surviving item kept its score",
+                  [k["score"] for k in face2["keywords"]
+                   if k["token"] == "release"] == [rows["release"]["score"]],
+                  str(face2["keywords"][:1])[:160])
+            check("profile-forget: the read face tallies exclude both "
+                  "forgotten items",
+                  sum(face2["counts"]["coverage"].values())
+                  == len(face2["keywords"]), str(face2["counts"]))
+
+            # ------------------------------------------ 10. the isolation ---
+            _env(state=beta_state, profiles=profiles, profile="beta")
+            beta_report = pf.analyze(now, block={"top_k": 40, "exclude": []},
+                                     root=beta_state, curated="",
+                                     source_terms=())
+            beta_tokens = {r["token"] for r in beta_report["keywords"]}
+            check("profile-forget: a suppression stays inside its profile",
+                  "chain" in beta_tokens and "wallet" in beta_tokens,
+                  str(sorted(beta_tokens)))
+            beta_id = mf.source_id(mf.CHANNEL_PROFILE, "chain")
+            _env(state=state, profiles=profiles, profile="alpha")
+            alpha_id = mf.source_id(mf.CHANNEL_PROFILE, "chain")
+            check("profile-forget: another profile's items have their own "
+                  "source ids",
+                  beta_id != alpha_id, f"{beta_id} == {alpha_id}")
+            beta_face = ws.collect_profiling()
+            check("profile-forget: another profile's read face is unaffected",
+                  all(k["token"] in beta_tokens for k in beta_face["keywords"]),
+                  str([k["token"] for k in beta_face["keywords"]])[:160])
+
+            # ------------------------------------------ 11. the hygiene -----
+            check("profile-forget: the transcript rows are still untouched",
+                  transcript.read_bytes() == transcript_before
+                  and beta_transcript.read_bytes() == transcript_before,
+                  "a session transcript changed")
+            prod_after = (prod_profile.read_bytes()
+                          if prod_profile.exists() else b"")
+            check("profile-forget: the repository's own profile was never "
+                  "written",
+                  prod_after == prod_before, "the production profile changed")
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -22882,6 +23183,7 @@ def main() -> int:
         test_pipeline_brain,
         test_memforget,
         test_memory_forget_api,
+        test_profiling_forget,
     ]
     rows = []
     for fn in suites:

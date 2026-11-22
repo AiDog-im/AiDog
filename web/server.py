@@ -399,6 +399,27 @@ Routes:
                                    restart). A repeat is a no-op that reports
                                    already=true. 400 bad shape | 404 unknown
                                    slot or title
+  GET  /api/profiling/forget/preview
+                               -> READ-ONLY (no auth, like the other read
+                                   faces): ?source=<src_…> -> {source_id,
+                                   channel, items, affects{profile, score,
+                                   coverage}, limits} — what a forget of one
+                                   DERIVED profile item WOULD do and nothing
+                                   more: the opaque id, the channel, the
+                                   counts, the honest D10 limits. Never the
+                                   token text, never an excerpt, never a file
+                                   path, never a credential. 400 missing or
+                                   malformed id | 404 unknown id
+  POST /api/profiling/forget  -> Bearer WEB_TOKEN; {source_id} -> {ok, id,
+                                   channel, already, limits}. Records a
+                                   TOMBSTONE for one derived owner-profile
+                                   item: NOTHING is deleted (the transcript
+                                   row stays in the session file), the item
+                                   leaves the derived profile at once and a
+                                   re-analysis cannot reintroduce it. A
+                                   repeat is a no-op that reports already=
+                                   true. 400 bad shape | 404 unknown id |
+                                   409 the ledger refused the write
   GET  /static/i18n/<lang>.json -> locale packs served from the SSOT
                                    overlay/locales/ (en default, zh switchable)
 """
@@ -6430,7 +6451,13 @@ def collect_profiling() -> dict:
     Config comes from settings (a hand-edited bad partition fails closed to an
     honest `config_error`), the analysis rows come from the stored profile
     document. Nothing here analyzes: this is a read of what the last run
-    found, so opening the view never spends CPU or tokens."""
+    found, so opening the view never spends CPU or tokens.
+
+    Every keyword carries its PROVENANCE: the admission channel
+    (`profile` — a derived item) and the opaque, deterministic source id
+    (mycore.memforget.source_id) of the text it owns. That is the same
+    pair the forget control needs, so a row can be silenced without the
+    console ever handling the token text."""
     try:
         cfg = profiling.parse_config(profiling.settings_block())
         config_error = ""
@@ -6438,8 +6465,17 @@ def collect_profiling() -> dict:
         cfg = profiling.parse_config({})
         config_error = str(e)[:160]
     doc = profiling.load_profile()
-    keywords = doc.get("keywords") if isinstance(doc.get("keywords"), list) \
-        else []
+    keywords: list[dict] = []
+    for row in doc.get("keywords") if isinstance(doc.get("keywords"), list) \
+            else []:
+        if not isinstance(row, dict):
+            continue
+        token = str(row.get("token") or "")
+        item = dict(row)
+        item["channel"] = memforget.CHANNEL_PROFILE
+        item["source_id"] = (profiling.profile_source_id(token)
+                             if token else "")
+        keywords.append(item)
     corpus = doc.get("corpus") if isinstance(doc.get("corpus"), dict) else {}
     stored_cfg = doc.get("config") if isinstance(doc.get("config"), dict) else {}
     analyzed_since = str(stored_cfg.get("since") or "")
@@ -6640,6 +6676,115 @@ def apply_memory_forget(slot: str, title: str) -> tuple[dict, int]:
         "ok": True,
         "id": result["id"],
         "channel": result["channel"],
+        "already": bool(result["already"]),
+        "limits": result["limits"],
+    }, 200
+
+
+# -------------------------- the owner-facing forget: a derived profile item --
+# The owner profile is a memory-shaped store too: every keyword is DERIVED
+# from the owner's own session transcripts, and the profile is injected into
+# the prompt. A tombstone in the `profile` channel silences ONE derived
+# item: the token leaves the profile, its score contribution and its
+# tallies leave with it, and a re-analysis cannot reintroduce it.
+#
+# The honest limit (D10) stands and is the whole point: the TRANSCRIPT row
+# is never touched. The words stay in the session file; only the derived
+# profile stops showing and using them. The ledger row holds the opaque id
+# and a content digest — never the token, never a path, never a credential.
+PROFILE_FORGET_CHANNEL = memforget.CHANNEL_PROFILE
+_PROFILE_SOURCE_RE = re.compile(r"^src_[0-9a-f]{32}$")
+
+
+def _profiling_row_for_source(source_id: str) -> dict | None:
+    """The stored profile row that owns this opaque source id.
+
+    The id is opaque by construction (D2), so the only way back to the item
+    is to recompute the id of every visible row and compare. A row that a
+    tombstone already silenced is not visible any more — that case is
+    answered from the ledger instead."""
+    doc = profiling.load_profile()
+    for row in doc.get("keywords") if isinstance(doc.get("keywords"), list) \
+            else []:
+        if not isinstance(row, dict):
+            continue
+        token = str(row.get("token") or "")
+        if token and profiling.profile_source_id(token) == source_id:
+            return row
+    return None
+
+
+def collect_profiling_forget_preview(source_id: str) -> tuple[dict, int]:
+    """GET /api/profiling/forget/preview?source=<id> — READ-ONLY, no auth
+    (like the other read faces).
+
+    What a forget of this derived item WOULD do, and nothing more: the
+    admission channel, the opaque source id, how many profile items the
+    forget would silence, the surfaces it silences and the honest D10
+    limits.
+
+    It carries NO excerpt, NO file path and NO credential — the source id
+    is opaque by construction (D2) and the counts are numbers."""
+    sid = str(source_id or "").strip()
+    if not sid:
+        return {"error": "a source id is required"}, 400
+    if not _PROFILE_SOURCE_RE.match(sid):
+        return {"error": "malformed source id"}, 400
+    if sid in memforget.load_set().ids:
+        # Already silenced: a forget would change nothing, and the answer
+        # says so instead of pretending there is work to do.
+        return {"source_id": sid, "channel": PROFILE_FORGET_CHANNEL,
+                "items": 0,
+                "affects": {"profile": False, "score": False,
+                            "coverage": False},
+                "limits": memforget.LIMITS_NOTE}, 200
+    row = _profiling_row_for_source(sid)
+    if row is None:
+        return {"error": "unknown profile source id"}, 404
+    coverage = str(row.get("coverage") or "")
+    return {
+        "source_id": sid,
+        "channel": PROFILE_FORGET_CHANNEL,
+        "items": 1,
+        "affects": {
+            "profile": True,
+            "score": float(row.get("score") or 0.0) > 0.0,
+            "coverage": coverage in ("gap", "partial", "covered"),
+        },
+        "limits": memforget.LIMITS_NOTE,
+    }, 200
+
+
+def apply_profiling_forget(source_id: str) -> tuple[dict, int]:
+    """POST /api/profiling/forget — record the tombstone for one derived item.
+
+    Nothing is deleted: the transcript row stays in the session file and the
+    ledger records that the derived item must not be shown, injected, pushed
+    or re-derived again (D1/D7). Repeating the same forget is a NO-OP that
+    reports already=True, so the control is idempotent."""
+    sid = str(source_id or "").strip()
+    if not sid:
+        return {"error": "a source id is required"}, 400
+    if not _PROFILE_SOURCE_RE.match(sid):
+        return {"error": "malformed source id"}, 400
+    if sid in memforget.load_set().ids:
+        return {"ok": True, "id": sid, "channel": PROFILE_FORGET_CHANNEL,
+                "already": True, "limits": memforget.LIMITS_NOTE}, 200
+    row = _profiling_row_for_source(sid)
+    if row is None:
+        return {"error": "unknown profile source id"}, 404
+    token = str(row.get("token") or "")
+    if not token:
+        return {"error": "unknown profile source id"}, 404
+    try:
+        result = memforget.forget(PROFILE_FORGET_CHANNEL, token,
+                                   scope=memforget.SCOPE_PROFILE)
+    except memforget.MemforgetError as exc:
+        return {"error": str(exc)}, 409
+    return {
+        "ok": True,
+        "id": result["id"],
+        "channel": PROFILE_FORGET_CHANNEL,
         "already": bool(result["already"]),
         "limits": result["limits"],
     }, 200
@@ -8051,6 +8196,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_sniff())
         if path == "/api/profiling":
             return self._json(collect_profiling())
+        if path == "/api/profiling/forget/preview":
+            params = {}
+            if "?" in self.path:
+                params = urllib.parse.parse_qs(self.path.split("?", 1)[1])
+            payload, code = collect_profiling_forget_preview(
+                (params.get("source") or [""])[0])
+            return self._json(payload, code)
         if path == "/api/pipeline":
             return self._json(collect_pipeline())
         if path == "/api/bridge/status":
@@ -8150,6 +8302,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_sniff_post()
         if path == "/api/profiling":
             return self._handle_profiling_post()
+        if path == "/api/profiling/forget":
+            return self._handle_profiling_forget()
         if path == "/api/pipeline":
             return self._handle_pipeline_post()
         if path == "/api/service/restart":
@@ -9651,6 +9805,34 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"error": "validation failed",
                            "details": ["action must be one of: "
                                        "analyze|search|push|propose"]}, 400)
+
+    def _handle_profiling_forget(self) -> None:
+        """POST /api/profiling/forget — Bearer WEB_TOKEN; {source_id}.
+
+        The owner-facing forget control for a DERIVED profile item. It
+        records a TOMBSTONE (D1): NOTHING is deleted — the transcript row
+        stays in the session file, and the derived profile stops showing,
+        injecting and re-deriving the item from the next read on (no
+        restart, no tick).
+
+        The write is gated like every other write route, and the answer
+        carries the opaque id, the channel, the already flag and the honest
+        D10 limits — never the token text, never a path, never a
+        credential."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        source_id = doc.get("source_id")
+        if not isinstance(source_id, str) or not source_id.strip():
+            return self._json({"error": "validation failed",
+                               "details": ["source_id is required"]}, 400)
+        payload, code = apply_profiling_forget(source_id)
+        if code == 200:
+            sys.stderr.write("profiling forget source=%s already=%s\n"
+                             % (payload.get("id"), payload.get("already")))
+        return self._json(payload, code)
 
     def _handle_pipeline_post(self) -> None:
         """POST /api/pipeline {action, ...} — Bearer gate (the settings write's
