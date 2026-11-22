@@ -65,7 +65,7 @@ BROWSER_TOOLS = frozenset({
     "browser_type", "browser_screenshot", "browser_close"})
 
 
-def expected_tool_names() -> frozenset[str]:
+def expected_tool_names(deliver_files: bool = False) -> frozenset[str]:
     """The 11 pre-car-8 tools + backup_run (car 8, always — every gate
     resolves at call time) + generate_image (always, car 4c) +
     community_post (always,
@@ -80,7 +80,9 @@ def expected_tool_names() -> frozenset[str]:
     exchange_portfolio / exchange_orders / exchange_prepare_order /
     exchange_execute_order / exchange_plans IFF at least one CEX credential
     slot is present (W1 account reads + W2 approval gate, the same gate).
-    The suite must be green both on hosts with a browser and without —
+    `deliver_files=True` adds send_file (file transfer car — the same
+    capability-honest gate build_registry uses: only the service registers
+    it). The suite must be green both on hosts with a browser and without —
     with or without connector slots — and with AIDOG_BROWSER_BIN overridden
     to a dead path — so every count assertion derives from this, never a
     literal."""
@@ -88,6 +90,8 @@ def expected_tool_names() -> frozenset[str]:
                              "chain_read",
                              "community_post", "backup_run",
                              "settings"}   # car C: propose-only settings tool
+    if deliver_files:
+        out.add("send_file")               # file car: service-only registrant
     try:
         from mycore import browser as _br
         if _br.available():
@@ -220,9 +224,13 @@ def test_model() -> None:
 
 def test_registry_and_tools() -> None:
     with tempfile.TemporaryDirectory() as td:
-        reg = build_registry(allowed_roots=[td])
+        # deliver_files=True + an explicit temp state dir: send_file
+        # (file car) registers here AND staging never touches real state
+        state = Path(td) / "state"
+        reg = build_registry(allowed_roots=[td], state_dir=state,
+                             deliver_files=True)
         names = reg.names()
-        exp = expected_tool_names()
+        exp = expected_tool_names(deliver_files=True)
         check("tools: count = core 11 (+browser 6 when discovered)",
               len(names) == len(exp), str(names))
         check("tools: expected set", set(names) == set(exp), str(names))
@@ -231,10 +239,20 @@ def test_registry_and_tools() -> None:
               all(t["type"] == "function" and "parameters" in t["function"]
                   for t in schema))
 
-        # happy path: write -> read -> edit
+        # happy path: write -> read -> edit (+ send_file stages the file)
+        from mycore import filebox
+        filebox.drain_outbox()              # never inherit leftovers
         p = str(Path(td) / "f.txt")
         r = reg.dispatch("write_file", {"path": p, "content": "alpha\nbeta\n"})
-        check("tools: write ok", r.startswith("wrote "), r[:60])
+        sf = reg.dispatch("send_file", {"path": p})
+        staged = filebox.drain_outbox()
+        check("tools: write ok + send_file stages into the outbox",
+              r.startswith("wrote ")
+              and sf.startswith("staged ")
+              and len(staged) == 1 and staged[0][0].is_file()
+              and staged[0][1] == "f.txt"
+              and Path(staged[0][0]).parent == state / "outbox",
+              r[:60] + " | " + sf[:90])
         r = reg.dispatch("read_file", {"path": p})
         check("tools: read numbered", "1\talpha" in r, r[:60])
         r = reg.dispatch("edit_file", {"path": p, "old_text": "beta", "new_text": "BETA"})
@@ -255,9 +273,13 @@ def test_registry_and_tools() -> None:
         r = reg.dispatch("edit_file", {"path": p, "old_text": "alpha", "new_text": "ALPHA"})
         check("tools: edit unique ok", "edited" in r, r[:60])
 
-        # path safety
+        # path safety (+ send_file roots: the source is a READ, same wall)
         r = reg.dispatch("read_file", {"path": "/etc/passwd"})
-        check("tools: outside roots refused", r.startswith("ERROR: outside allowed roots"), r[:80])
+        rf = reg.dispatch("send_file", {"path": "/etc/passwd"})
+        check("tools: outside roots refused",
+              r.startswith("ERROR: outside allowed roots")
+              and rf.startswith("ERROR: outside allowed roots"),
+              r[:80] + " | " + rf[:80])
         r = reg.dispatch("write_file", {"path": str(Path(td) / ".." / "escape.txt"),
                                         "content": "x"})
         check("tools: traversal refused", r.startswith("ERROR:"), r[:80])
@@ -5390,8 +5412,24 @@ def test_channels() -> None:
               call["headers"].get("Authorization") == f"Bot {tok_d}"
               and tok_d not in call["url"]
               and call["headers"].get("Content-Type") == "application/json")
-        check("channels discord: send body is content json",
-              json.loads(call["payload"]) == {"content": "hello world"})
+        # file car: a non-native route degrades to an honest text note
+        # (never a silent drop, never a raise, never a credential)
+        tr_fb = FakeTransport([json.dumps({"id": "11"})])
+        d_fb = channels.load_channels(repo, settings, transport=tr_fb)["discord"]
+        fb_dir = Path(tempfile.mkdtemp(prefix="chan_fb_"))
+        fb_path = fb_dir / "note.txt"
+        fb_path.write_text("hello", encoding="utf-8")
+        fb_ok = d_fb.send_file("C1", fb_path)
+        fb_content = (json.loads(tr_fb.calls[0]["payload"]).get("content", "")
+                      if tr_fb.calls else "")
+        check("channels discord: send body is content json + file fallback note",
+              json.loads(call["payload"]) == {"content": "hello world"}
+              and fb_ok is True
+              and fb_content.startswith("[file] note.txt (5 bytes)")
+              and "cannot deliver files natively" in fb_content
+              and str(fb_path) in fb_content
+              and d_fb.send_files is False,
+              fb_content[:140])
         check("channels: repr never contains token", tok_d not in repr(d_chan))
         tr2 = FakeTransport([json.dumps({"id": "10"})])
         d_long = channels.load_channels(repo, settings, transport=tr2)["discord"]
@@ -5992,6 +6030,7 @@ def test_channels_service() -> None:
     import io
     import os
     from mycore import channels as ch
+    from mycore import filebox
     from mycore import scheduler as sch
     from mycore.service import CHANNEL_POLL_SEC, ChatService
     from mycore.session import Session
@@ -6011,6 +6050,7 @@ def test_channels_service() -> None:
             self.fail_poll = fail_poll
             self.send_ok = send_ok
             self.sent = []                 # [(target, text)] in call order
+            self.sent_files = []           # [(target, name)] (file car)
             self.polls = 0
 
         def poll(self):
@@ -6022,6 +6062,11 @@ def test_channels_service() -> None:
 
         def send(self, target, text):
             self.sent.append((target, text))
+            return self.send_ok
+
+        def send_file(self, target, path, name="", caption=""):
+            """Native file leg (file car): recorded like a send."""
+            self.sent_files.append((target, name or Path(path).name))
             return self.send_ok
 
     def ib(sender, text, route="discord", target="C1"):
@@ -6052,9 +6097,17 @@ def test_channels_service() -> None:
             svc = ChatService(tdp / "st1", frozenset({111}), transport=tg1,
                               chat=ok_chat, repo=repo, now=nowf,
                               channels={"discord": chan})
+            # file car: a staged file rides out on the SAME route, after the
+            # reply (what send_file + _drain_channel_files do in production)
+            fsrc1 = tdp / "turn.txt"
+            fsrc1.write_text("filecar", encoding="utf-8")
+            filebox.drain_outbox()
+            filebox.stage(fsrc1, svc.state)
             svc._maybe_poll_channels()
             check("channels svc: allowed inbound answered on the same route",
-                  chan.sent == [("C1", "pong")], str(chan.sent))
+                  chan.sent == [("C1", "pong")]
+                  and chan.sent_files == [("C1", "turn.txt")],
+                  str(chan.sent) + " | " + str(chan.sent_files))
             check("channels svc: channel reply never touches the TG transport",
                   tg1.sends == [], str(tg1.sends))
             sess = svc.sessions / f"discord:{me}.jsonl"
@@ -6141,9 +6194,15 @@ def test_channels_service() -> None:
                            origin="discord:C9", now=clock[0] - 120)
             sch.save_jobs(reg4, jl)
             svc4._cron_check = 0.0
+            # file car: _origin_deliver's channel branch drains too (what
+            # the job's own turn would have staged)
+            filebox.drain_outbox()
+            filebox.stage(fsrc1, svc4.state)
             svc4._maybe_fire_cron()
             check("channels svc: cron str origin delivers on the channel",
-                  chan4.sent == [("C9", "channel cron")], str(chan4.sent))
+                  chan4.sent == [("C9", "channel cron")]
+                  and chan4.sent_files == [("C9", "turn.txt")],
+                  str(chan4.sent) + " | " + str(chan4.sent_files))
             check("channels svc: cron delivery label names the route",
                   "delivered=channel:discord" in svc4.log.read_text())
 
@@ -6200,10 +6259,15 @@ def test_channels_service() -> None:
                                repo=repo, now=nowf, dry_run=True,
                                channels={"discord": chan7})
             out_buf = io.StringIO()
+            # file car: dry-run stages but previews — never reaches the route
+            filebox.drain_outbox()
+            filebox.stage(fsrc1, svc7.state)
             with contextlib.redirect_stdout(out_buf):
                 svc7._maybe_poll_channels()
             check("channels svc: dry-run never transmits a channel reply",
-                  chan7.sent == [], str(chan7.sent))
+                  chan7.sent == [] and chan7.sent_files == []
+                  and "DRYRUN_SEND_FILE" in svc7.log.read_text(),
+                  str(chan7.sent))
             check("channels svc: dry-run previews the channel reply",
                   "DRYRUN_SEND" in svc7.log.read_text()
                   and "[dry-run] would send" in out_buf.getvalue()
@@ -6472,10 +6536,40 @@ def test_channels_domestic() -> None:
               and send_body["receive_id"] == "oc_chat9"
               and send_body["msg_type"] == "text"
               and json.loads(send_body["content"]) == {"text": "one"})
-        check("dom feishu: tenant token cached across sends (no refetch)",
-              len(tr_f.calls) == 3
+        # file car: native upload (multipart) -> file_key -> file message;
+        # both calls ride the SAME cached token (no refetch — that is what
+        # this check proves, now across five calls instead of three)
+        tr_f.replies.extend([
+            json.dumps({"code": 0, "data": {"file_key": "fk_up1"}}),
+            json.dumps({"code": 0, "data": {"message_id": "om3"}})])
+        up_dir = Path(tempfile.mkdtemp(prefix="feishu_up_"))
+        up_path = up_dir / "\u62a5\u544a v2.pdf"
+        up_path.write_bytes(b"%PDF-up")
+        f_up = f.send_file("oc_chat9", up_path)
+        up_call = tr_f.calls[3]
+        fmsg_call = tr_f.calls[4]
+        up_ct = up_call["headers"].get("Content-Type", "")
+        fmsg_body = json.loads(fmsg_call["payload"])
+        check("dom feishu: token cached across sends + file leg rides it",
+              len(tr_f.calls) == 5
               and tr_f.calls[2]["headers"].get("Authorization")
-              == "Bearer ftok-111")
+              == "Bearer ftok-111"
+              and tr_f.calls[3]["headers"].get("Authorization")
+              == "Bearer ftok-111"
+              and tr_f.calls[4]["headers"].get("Authorization")
+              == "Bearer ftok-111"
+              and f_up is True
+              and up_call["url"].endswith("/im/v1/files")
+              and up_ct.startswith("multipart/form-data; boundary=")
+              and b"%PDF-up" in up_call["payload"]
+              and 'filename="\u62a5\u544a v2.pdf"'.encode("utf-8") in up_call["payload"]
+              and fmsg_call["url"].endswith(
+                  "/im/v1/messages?receive_id_type=chat_id")
+              and fmsg_body["msg_type"] == "file"
+              and fmsg_body["receive_id"] == "oc_chat9"
+              and json.loads(fmsg_body["content"]) == {"file_key": "fk_up1"},
+              str(len(tr_f.calls)) + " | " + up_ct[:40] + " | "
+              + str(fmsg_body))
 
         # --- feishu: failure codes + retry-once ----------------------------
         channels._TOKEN_CACHE.clear()
@@ -6591,8 +6685,42 @@ def test_channels_domestic() -> None:
                                      cfg={"enabled": True,
                                           "chat_ids": ["oc_notext"]})
         got = f_n.poll()
-        check("dom feishu: non-text message types skipped, text delivered",
-              [i.text for i in got] == ["only text"])
+        # file car: a file message downloads through the BYTES seam into
+        # <state>/inbox/ and arrives as an honest note on the SAME inbound
+        # path (zero change to the service's channel-inbound contract)
+        channels._TOKEN_CACHE.clear()
+        f_msg = {"message_id": "ff1", "msg_type": "file",
+                 "create_time": "1730000000960",
+                 "sender": {"id": "ou_sender4"},
+                 "body": {"content": json.dumps({"file_key": "fk_abc",
+                                                 "file_name": "../\u62a5\u544a.pdf"})}}
+        tr_fi = FakeTransport([tok("ftok-fi"), page([f_msg])])
+        bin_seen = []
+
+        def bin_ok(url, headers, timeout):
+            bin_seen.append((url, dict(headers)))
+            return b"%PDF-inbound"
+
+        f_fi = channels.FeishuChannel(repo=repo, state=state, transport=tr_fi,
+                                      bin_transport=bin_ok,
+                                      cfg={"enabled": True,
+                                           "chat_ids": ["oc_file"]})
+        got_f = f_fi.poll()
+        inbox_p = state / "inbox" / "\u62a5\u544a.pdf"
+        file_ok = (len(got_f) == 1
+                   and got_f[0].text.startswith("[file] \u62a5\u544a.pdf (12 bytes)")
+                   and str(state / "inbox") in got_f[0].text
+                   and inbox_p.is_file()
+                   and inbox_p.read_bytes() == b"%PDF-inbound"
+                   and len(bin_seen) == 1
+                   and "type=file" in bin_seen[0][0]
+                   and "fk_abc" in bin_seen[0][0]
+                   and bin_seen[0][1].get("Authorization", "")
+                   .startswith("Bearer "))
+        check("dom feishu: non-text skipped, text + file-note delivered",
+              [i.text for i in got] == ["only text"] and file_ok,
+              str([i.text for i in got]) + " | "
+              + (got_f[0].text if got_f else "none"))
 
         # --- feishu: poll retry-once + quota + sanitization ----------------
         channels._TOKEN_CACHE.clear()
@@ -8783,14 +8911,47 @@ def test_tg_media() -> None:
         cap = body[i + len(marker):j].decode("utf-8")
     check("tg media: caption UTF-8 hard-cut at 1000 chars",
           len(cap) == 1000 and cap == caption[:1000], str(len(cap)))
-    check("tg media: sendPhoto url ends with the method",
-          mp_seen["url"].endswith("/sendPhoto"))
+    photo_url_ok = mp_seen["url"].endswith("/sendPhoto")
+
+    # --- send_document: the SAME multipart contract with a caller-named
+    # file part (file car) — "../\u62a5\u544a v2.pdf" proves basename sanitizing
+    # and the utf-8 filename header in one leg.
+    mp_seen.clear()
+    doc_blob = b"%PDF-1.4 filecar"
+    cli3.send_document(42, doc_blob, filename="../\u62a5\u544a v2.pdf",
+                       caption=caption, thread_id=7)
+    d_ct, d_body = mp_seen["ct"], mp_seen["body"]
+    d_bnd = d_ct.partition("boundary=")[2]
+    d_marker = b'name="caption"\r\n\r\n'
+    di = d_body.find(d_marker)
+    d_cap = ""
+    if di >= 0:
+        dj = d_body.find(b"\r\n--" + d_bnd.encode(), di)
+        d_cap = d_body[di + len(d_marker):dj].decode("utf-8")
+    check("tg media: sendPhoto url + sendDocument body shape",
+          photo_url_ok
+          and mp_seen["url"].endswith("/sendDocument")
+          and d_ct.startswith("multipart/form-data; boundary=")
+          and d_body.endswith(("--" + d_bnd + "--\r\n").encode())
+          and b'name="chat_id"\r\n\r\n42' in d_body
+          and b'name="message_thread_id"\r\n\r\n7' in d_body
+          and b'name="document"' in d_body
+          and 'filename="\u62a5\u544a v2.pdf"'.encode("utf-8") in d_body
+          and doc_blob in d_body
+          and len(d_cap) == 1000 and d_cap == caption[:1000],
+          mp_seen["url"][-40:] + " | " + d_ct[:46])
 
     mp_seen.clear()
     cli3.send_photo(42, PNG_1PX)
+    p_absent = (b'name="message_thread_id"' not in mp_seen["body"]
+                and b'name="caption"' not in mp_seen["body"])
+    mp_seen.clear()
+    cli3.send_document(42, doc_blob)
+    d_absent = (b'name="message_thread_id"' not in mp_seen["body"]
+                and b'name="caption"' not in mp_seen["body"]
+                and b'filename="file.bin"' in mp_seen["body"])  # empty-name fallback
     check("tg media: no thread_id/caption -> fields absent",
-          b'name="message_thread_id"' not in mp_seen["body"]
-          and b'name="caption"' not in mp_seen["body"])
+          p_absent and d_absent, "photo-absent + document-absent")
 
     # Path leg (what the service actually passes)
     with tempfile.TemporaryDirectory() as td:
@@ -8798,48 +8959,74 @@ def test_tg_media() -> None:
         p.write_bytes(PNG_1PX)
         mp_seen.clear()
         cli3.send_photo(42, p, caption="from disk")
+        p_disk = (PNG_1PX in mp_seen["body"]
+                  and b'name="caption"\r\n\r\nfrom disk' in mp_seen["body"])
+        mp_seen.clear()
+        cli3.send_document(42, p, filename="gen.png")
+        d_disk = PNG_1PX in mp_seen["body"]
         check("tg media: Path photo read from disk into the body",
-              PNG_1PX in mp_seen["body"]
-              and b'name="caption"\r\n\r\nfrom disk' in mp_seen["body"])
-        try:
-            cli3.send_photo(42, Path(td) / "missing.png")
-            check("tg media: missing photo file -> TgError", False)
-        except TgError as e:
-            check("tg media: missing photo file -> TgError",
-                  "photo read failed" in str(e), str(e))
+              p_disk and d_disk, "photo + document from disk")
+        miss_errs = []
+        for fn in (cli3.send_photo, cli3.send_document):
+            try:
+                fn(42, Path(td) / "missing.png")
+                miss_errs.append("")
+            except TgError as e:
+                miss_errs.append(str(e))
+        check("tg media: missing photo file -> TgError",
+              len(miss_errs) == 2
+              and "photo read failed" in miss_errs[0]
+              and "document read failed" in miss_errs[1], str(miss_errs))
 
-    # --- send_photo error paths ---
+    # --- send_photo / send_document error paths ---
     def mp_err(url, body, content_type, timeout):
         return json.dumps({"ok": False,
                            "description": "Bad Request: chat not found"})
 
     cli4 = TgClient(token=TOKEN, mp_transport=mp_err)
-    try:
-        cli4.send_photo(42, PNG_1PX)
-        check("tg media: ok:false -> TgError", False)
-    except TgError as e:
-        check("tg media: ok:false -> TgError with description",
-              str(e).startswith("sendPhoto: api error")
-              and "chat not found" in str(e), str(e))
-    for label, args in (("empty photo", (42, b"")),
-                        ("oversize photo", (42, b"x" * (MAX_FILE_BYTES + 1))),
-                        ("missing chat_id", ("", PNG_1PX))):
+    api_errs = []
+    for fn in (cli4.send_photo, cli4.send_document):
         try:
-            cli4.send_photo(*args)
-            check(f"tg media: {label} -> TgError", False)
-        except TgError:
-            check(f"tg media: {label} -> TgError", True)
+            fn(42, PNG_1PX)
+            api_errs.append("")
+        except TgError as e:
+            api_errs.append(str(e))
+    check("tg media: ok:false -> TgError with description",
+          len(api_errs) == 2
+          and api_errs[0].startswith("sendPhoto: api error")
+          and "chat not found" in api_errs[0]
+          and api_errs[1].startswith("sendDocument: api error")
+          and "chat not found" in api_errs[1], str(api_errs))
+    for label, args in (("empty photo/document", (42, b"")),
+                        ("oversize photo/document",
+                         (42, b"x" * (MAX_FILE_BYTES + 1))),
+                        ("missing chat_id photo/document", ("", PNG_1PX))):
+        refused = []
+        for fn in (cli4.send_photo, cli4.send_document):
+            try:
+                fn(*args)
+                refused.append(False)
+            except TgError:
+                refused.append(True)
+        check(f"tg media: {label} -> TgError",
+              refused == [True, True], str(refused))
 
     def mp_boom(url, body, content_type, timeout):
         raise RuntimeError("leak attempt " + TOKEN)
 
-    try:
-        TgClient(token=TOKEN, mp_transport=mp_boom).send_photo(42, PNG_1PX)
-        check("tg media: sendPhoto transport failure sanitized", False)
-    except TgError as e:
-        check("tg media: sendPhoto transport failure sanitized",
-              TOKEN not in str(e)
-              and str(e) == "sendPhoto failed: RuntimeError", str(e))
+    boom_errs = []
+    for fn in (TgClient(token=TOKEN, mp_transport=mp_boom).send_photo,
+               TgClient(token=TOKEN, mp_transport=mp_boom).send_document):
+        try:
+            fn(42, PNG_1PX)
+            boom_errs.append("")
+        except TgError as e:
+            boom_errs.append(str(e))
+    check("tg media: sendPhoto transport failure sanitized",
+          len(boom_errs) == 2
+          and boom_errs[0] == "sendPhoto failed: RuntimeError"
+          and boom_errs[1] == "sendDocument failed: RuntimeError"
+          and all(TOKEN not in e for e in boom_errs), str(boom_errs))
 
 
 def test_service_media() -> None:
@@ -8849,6 +9036,7 @@ def test_service_media() -> None:
     TG send stays offline through the fake transports."""
     import contextlib
     import io
+    from mycore import filebox
     from mycore import imagegen
     from mycore import stt as stt_mod
     from mycore.service import ChatService
@@ -8858,7 +9046,9 @@ def test_service_media() -> None:
     os.environ[POLL_BOT_ENV] = "second-bot-TEST-token"
     saved_transcribe = stt_mod.transcribe
     saved_drain = imagegen.drain_outbox
+    saved_fb_drain = filebox.drain_outbox
     imagegen.drain_outbox()              # never inherit leftovers
+    filebox.drain_outbox()
 
     ok_chat = lambda messages=None, tools=None, **kw: fake_response(text="pong")  # noqa: E731
     clock = [1000.0]
@@ -8871,6 +9061,17 @@ def test_service_media() -> None:
                "from": {"id": uid, "is_bot": False, "first_name": "x"},
                "chat": {"id": chat_id, "type": "private"},
                "date": 0, "voice": voice}
+        if thread_id is not None:
+            msg["message_thread_id"] = thread_id
+        return {"update_id": update_id, "message": msg}
+
+    def mk_doc(update_id, uid, chat_id, doc, thread_id=None):
+        """file car: a document update (same shape, `document` instead of
+        `voice`) — the media chain must treat it identically."""
+        msg = {"message_id": 1,
+               "from": {"id": uid, "is_bot": False, "first_name": "x"},
+               "chat": {"id": chat_id, "type": "private"},
+               "date": 0, "document": doc}
         if thread_id is not None:
             msg["message_thread_id"] = thread_id
         return {"update_id": update_id, "message": msg}
@@ -8992,7 +9193,12 @@ def test_service_media() -> None:
             reached = []
             s.tg.get_file = never_get
             s.handle_update(mk_voice(8, 999, 107, note))
-            check("svc media: unauthorized voice -> silent, no getFile",
+            # file car: the allowlist gate sits BEFORE the media chain —
+            # a document from the same stranger is equally silent
+            s.handle_update(mk_doc(40, 999, 134,
+                                   {"file_id": "DOCX",
+                                    "file_name": "x.pdf"}))
+            check("svc media: unauthorized voice/document -> silent, no getFile",
                   fake.sends == [] and reached == [])
 
             # --- C2 B-2 (0.5.86): a round VIDEO note rides the same path ---
@@ -9018,10 +9224,39 @@ def test_service_media() -> None:
                                          "file_path": "video/x.mp4"}
             s.tg.download_file = lambda p: pulled.append(p) or b"RIFF-fake"
             s.handle_update(mk_video(20, 111, 120, vnote))
-            check("svc media: video note -> STT -> the typed-text path",
-                  bool(pulled) and fake.sends == [("120", "pong")]
-                  and "STT_OK" in s.log.read_text()
-                  and "round hello" not in s.log.read_text(), str(fake.sends))
+            video_ok = (bool(pulled) and fake.sends == [("120", "pong")]
+                        and "STT_OK" in s.log.read_text()
+                        and "round hello" not in s.log.read_text())
+
+            # file car: a DOCUMENT rides the same chain — getFile ->
+            # download -> <state>/inbox/ (sanitized name) -> the note
+            # through the SAME typed-text path (topic session key included)
+            s, fake = svc_for("doc_happy")
+            pulled = []
+            s.tg.get_file = lambda fid: {"file_id": fid,
+                                         "file_path": "documents/r.pdf",
+                                         "file_size": 12}
+            s.tg.download_file = lambda p: pulled.append(p) or b"%PDF-filecar"
+            s.handle_update(mk_doc(30, 111, 130,
+                                   {"file_id": "DOC1",
+                                    "file_name": "../\u62a5\u544a v2.pdf"},
+                                   thread_id=7))
+            inbox = tdp / "doc_happy" / "inbox"
+            saved_names = ([p.name for p in inbox.iterdir()]
+                           if inbox.is_dir() else [])
+            doc_sess = tdp / "doc_happy" / "sessions" / "130:7.jsonl"
+            doc_sess_text = (doc_sess.read_text(encoding="utf-8")
+                             if doc_sess.is_file() else "")
+            doc_ok = (bool(pulled) and fake.sends == [("130", "pong")]
+                      and saved_names == ["\u62a5\u544a v2.pdf"]
+                      and (inbox / "\u62a5\u544a v2.pdf").read_bytes()
+                      == b"%PDF-filecar"
+                      and "FILE_OK" in s.log.read_text()
+                      and "\u62a5\u544a v2.pdf" in doc_sess_text
+                      and "%PDF" not in doc_sess_text)
+            check("svc media: video note + document -> the typed-text path",
+                  video_ok and doc_ok,
+                  str(fake.sends) + " | " + str(saved_names))
 
             # byte_size is the ONLY size here: it must trip the same cap
             s, fake = svc_for("video_big")
@@ -9031,19 +9266,41 @@ def test_service_media() -> None:
             s.tg.download_file = lambda p: pulled.append(p) or b"RIFF"
             s.handle_update(mk_video(21, 111, 121,
                                      dict(vnote, byte_size=6_000_000)))
-            check("svc media: video note byte_size trips the 5MB cap pre-download",
-                  pulled == [] and bool(fake.sends)
-                  and "file too large" in fake.sends[-1][1], str(fake.sends))
+            cap_ok = (pulled == [] and bool(fake.sends)
+                      and "file too large" in fake.sends[-1][1])
+            # file car: the document cap is the same wall, still pre-download
+            s, fake = svc_for("doc_big")
+            pulled = []
+            s.tg.get_file = lambda fid: {"file_id": fid,
+                                         "file_path": "documents/big.bin",
+                                         "file_size": 6_000_000}
+            s.tg.download_file = lambda p: pulled.append(p) or b"x"
+            s.handle_update(mk_doc(31, 111, 131,
+                                   {"file_id": "DOC2",
+                                    "file_name": "big.bin"}))
+            doc_cap = (pulled == [] and bool(fake.sends)
+                       and "file too large" in fake.sends[-1][1]
+                       and "FILE_FAIL" in s.log.read_text())
+            check("svc media: video/document byte_size trips the 5MB cap pre-download",
+                  cap_ok and doc_cap, str(fake.sends))
 
             # no file_id anywhere -> honest failure, getFile never reached
             s, fake = svc_for("video_nofile")
             s.tg.get_file = never_get
             s.handle_update(mk_video(22, 111, 122,
                                      {"duration": 1, "byte_size": 100}))
-            check("svc media: video note without file_id fails honestly",
-                  bool(fake.sends)
-                  and "could not be transcribed" in fake.sends[-1][1]
-                  and "missing file_id" in fake.sends[-1][1], str(fake.sends))
+            nv_ok = (bool(fake.sends)
+                     and "could not be transcribed" in fake.sends[-1][1]
+                     and "missing file_id" in fake.sends[-1][1])
+            # file car: same honest line on the document chain
+            s, fake = svc_for("doc_nofile")
+            s.tg.get_file = never_get
+            s.handle_update(mk_doc(32, 111, 132, {"file_name": "x.pdf"}))
+            nd_ok = (bool(fake.sends)
+                     and "could not be received" in fake.sends[-1][1]
+                     and "missing file_id" in fake.sends[-1][1])
+            check("svc media: video/document without file_id fails honestly",
+                  nv_ok and nd_ok, str(fake.sends))
 
             # the 60s cap applies to video notes too (same honest line)
             s, fake = svc_for("video_long")
@@ -9057,9 +9314,13 @@ def test_service_media() -> None:
             # --- image drain: text first, photo after, multipart really sent ---
             png = tdp / "gen.png"
             png.write_bytes(PNG_1PX)
+            fsrc = tdp / "report.pdf"        # file car: the staged source
+            fsrc.write_bytes(b"%PDF-filecar")
             long_prompt = "a cat picture " + "x" * 1100
             imagegen.drain_outbox = lambda: [(png, long_prompt)]
             s, fake = svc_for("photo_ok")
+            filebox.drain_outbox()           # never inherit leftovers
+            filebox.stage(fsrc, s.state)     # what send_file does after roots
             mp_seen: list = []
 
             def mp(url, body, content_type, timeout):
@@ -9069,6 +9330,7 @@ def test_service_media() -> None:
             s.tg.mp_transport = mp
             events: list = []
             orig_send, orig_photo = s._send, s.tg.send_photo
+            orig_doc = s.tg.send_document
 
             def rec_send(chat_id, text, thread_id=None):
                 events.append(("text", text))
@@ -9079,17 +9341,28 @@ def test_service_media() -> None:
                 return orig_photo(chat_id, photo, caption=caption,
                                   thread_id=thread_id)
 
-            s._send, s.tg.send_photo = rec_send, rec_photo
+            def rec_doc(chat_id, document, filename="", caption="",
+                        thread_id=None):
+                events.append(("file", filename))
+                return orig_doc(chat_id, document, filename=filename,
+                                caption=caption, thread_id=thread_id)
+
+            s._send, s.tg.send_photo, s.tg.send_document = \
+                rec_send, rec_photo, rec_doc
             s.handle_update(mk_update(9, 111, 108, "hi there"))
-            check("svc media: drain order = text then photo",
-                  events == [("text", "pong"), ("photo", long_prompt[:1000])],
-                  str(events)[:120])
-            check("svc media: photo really went out multipart",
-                  len(mp_seen) == 1 and PNG_1PX in mp_seen[0][1]
+            check("svc media: drain order = text then photo then file",
+                  events == [("text", "pong"), ("photo", long_prompt[:1000]),
+                             ("file", "report.pdf")], str(events)[:160])
+            check("svc media: photo really went out multipart (+ file leg)",
+                  len(mp_seen) == 2 and PNG_1PX in mp_seen[0][1]
                   and b'name="chat_id"\r\n\r\n108' in mp_seen[0][1]
-                  and mp_seen[0][2].startswith("multipart/form-data; boundary="))
-            check("svc media: SEND_PHOTO_OK logged",
-                  "SEND_PHOTO_OK" in s.log.read_text())
+                  and mp_seen[0][2].startswith("multipart/form-data; boundary=")
+                  and mp_seen[1][0].endswith("/sendDocument")
+                  and b"%PDF-filecar" in mp_seen[1][1]
+                  and b'name="chat_id"\r\n\r\n108' in mp_seen[1][1])
+            check("svc media: SEND_PHOTO_OK + SEND_FILE_OK logged",
+                  "SEND_PHOTO_OK" in s.log.read_text()
+                  and "SEND_FILE_OK" in s.log.read_text())
 
             # --- photo failure never touches the delivered text ---
             imagegen.drain_outbox = lambda: [(png, "p")]
@@ -9099,10 +9372,13 @@ def test_service_media() -> None:
                 raise TgError("boom")
 
             s.tg.mp_transport = mp_boom
+            filebox.drain_outbox()
+            filebox.stage(fsrc, s.state)
             s.handle_update(mk_update(10, 111, 109, "hi again"))
-            check("svc media: photo failure keeps the text reply",
+            check("svc media: photo/file failure keeps the text reply",
                   fake.sends == [("109", "pong")]
-                  and "SEND_PHOTO_FAIL" in s.log.read_text(), str(fake.sends))
+                  and "SEND_PHOTO_FAIL" in s.log.read_text()
+                  and "FILE_DRAIN_FAIL" in s.log.read_text(), str(fake.sends))
 
             # --- dry-run: zero outbound, action logged ---
             fake_d = FakeTgTransport()
@@ -9112,31 +9388,40 @@ def test_service_media() -> None:
             mp_out: list = []
             s.tg.mp_transport = lambda *a: mp_out.append(a)
             imagegen.drain_outbox = lambda: [(png, "p")]
+            filebox.drain_outbox()
+            filebox.stage(fsrc, s.state)
             with contextlib.redirect_stdout(io.StringIO()):
                 s.handle_update(mk_update(11, 111, 110, "dry hi"))
-            check("svc media: dry-run photo -> zero outbound, DRYRUN logged",
+            check("svc media: dry-run photo/file -> zero outbound, DRYRUN logged",
                   mp_out == [] and fake_d.sends == []
-                  and "DRYRUN_SEND_PHOTO" in s.log.read_text())
+                  and "DRYRUN_SEND_PHOTO" in s.log.read_text()
+                  and "DRYRUN_SEND_FILE" in s.log.read_text())
 
             # --- drain itself failing/malformed: never bubbles up ---
             def drain_boom():
                 raise RuntimeError("drain boom")
 
             imagegen.drain_outbox = drain_boom
+            filebox.drain_outbox = drain_boom
             s, fake = svc_for("photo_drain_err")
             s.handle_update(mk_update(12, 111, 111, "still alive"))
-            check("svc media: drain exception -> PHOTO_DRAIN_FAIL, text kept",
+            check("svc media: drain exception -> PHOTO/FILE_DRAIN_FAIL, text kept",
                   fake.sends == [("111", "pong")]
-                  and "PHOTO_DRAIN_FAIL" in s.log.read_text(), str(fake.sends))
+                  and "PHOTO_DRAIN_FAIL" in s.log.read_text()
+                  and "FILE_DRAIN_FAIL" in s.log.read_text(), str(fake.sends))
             imagegen.drain_outbox = lambda: [(None,)]
+            filebox.drain_outbox = lambda: [(None,)]
             s, fake = svc_for("photo_drain_bad")
             s.handle_update(mk_update(13, 111, 112, "still alive 2"))
             check("svc media: malformed outbox entry skipped, turn survives",
                   fake.sends == [("112", "pong")], str(fake.sends))
+            filebox.drain_outbox = saved_fb_drain
     finally:
         stt_mod.transcribe = saved_transcribe
         imagegen.drain_outbox = saved_drain
         imagegen.drain_outbox()
+        filebox.drain_outbox = saved_fb_drain
+        filebox.drain_outbox()
         for k, v in env_saved.items():
             if v is None:
                 os.environ.pop(k, None)
@@ -9755,9 +10040,16 @@ def test_settings_models_budget() -> None:
     prof_root = Path(tempfile.mkdtemp(prefix="models_budget_"))
     root = prof_root / "slots"
     root.mkdir(parents=True)
+    # file car: an extra allowed root OUTSIDE both default roots (repo +
+    # system temp — prof_root lives IN /tmp, so it cannot prove the merge).
+    # Home is writable for the runner and never inside the default pair;
+    # removed in finally.
+    extra = Path.home() / f".aidog_roots_test_{os.getpid()}"
+    extra.mkdir(parents=True, exist_ok=True)
     settings = root / "settings.json"
     settings.write_text(json.dumps({"mycore": {
-        "models": ["mimo-v2.6-flash", "model-b"], "budget": 40000}}),
+        "models": ["mimo-v2.6-flash", "model-b"], "budget": 40000,
+        "allowed_roots": [str(extra)]}}),
         encoding="utf-8")
     keys = ("AIDOG_PROFILES_DIR", "AIDOG_PROFILE")
     saved = {k: os.environ.get(k) for k in keys}
@@ -9779,8 +10071,21 @@ def test_settings_models_budget() -> None:
         check("settings models: subagent whitelist sees the same list",
               _sub._allowed_models() == ["mimo-v2.6-flash", "model-b"],
               str(_sub._allowed_models()))
-        check("settings budget: service consumer sees the console budget",
-              fake._budget() == 40000, str(fake._budget()))
+        # file car: build_registry's DEFAULT path merges this same
+        # document's mycore.allowed_roots (an explicit allowed_roots
+        # argument never merges, so every other registry test stays
+        # hermetic) — the extra root opens, the default wall still holds.
+        reg = build_registry()
+        rw = reg.dispatch("write_file", {"path": str(extra / "x.txt"),
+                                         "content": "y"})
+        rr = reg.dispatch("write_file",
+                          {"path": "/etc/aidog_filecar_denied.txt",
+                           "content": "y"})
+        check("settings budget + allowed_roots: extra root opens, wall holds",
+              fake._budget() == 40000
+              and rw.startswith("wrote ") and (extra / "x.txt").is_file()
+              and rr.startswith("ERROR: outside allowed roots"),
+              str(fake._budget()) + " | " + rw[:70] + " | " + rr[:70])
         settings.write_text("{}", encoding="utf-8")
         check("settings budget: absent -> cli default (absent = default)",
               fake._budget() == cli.DEFAULT_BUDGET_CHARS, str(fake._budget()))
@@ -9795,6 +10100,7 @@ def test_settings_models_budget() -> None:
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = v
+        shutil.rmtree(extra, ignore_errors=True)
         shutil.rmtree(prof_root, ignore_errors=True)
 
 
@@ -10203,6 +10509,7 @@ def test_tools_toggle() -> None:
         # catalog sanity: 11 core + backup_run (car 8) + generate_image
         # + connector_search + 6 browser + 3 exchange_* (W1) + 3 exchange_*
         # (W2) + settings (car C, propose-only) + chain_read (Phase 1)
+        # + send_file (file transfer car — deliver_files registrant)
         check("tools_off: KNOWN_TOOL_NAMES covers core + conditional",
               {"read_file", "run_bash", "cron", "delegate", "execute_code",
                "backup_run",
@@ -10211,8 +10518,8 @@ def test_tools_toggle() -> None:
                "exchange_orders", "exchange_prepare_order",
                "exchange_execute_order", "exchange_plans",
                "chain_read",
-               "settings"} <= KNOWN_TOOL_NAMES
-              and len(KNOWN_TOOL_NAMES) == 29,
+               "settings", "send_file"} <= KNOWN_TOOL_NAMES
+              and len(KNOWN_TOOL_NAMES) == 30,
               str(sorted(KNOWN_TOOL_NAMES)))
 
         # 1) settings dict path disables a core tool
@@ -13743,15 +14050,30 @@ def test_delta2() -> None:
 
     # ---------------- backlog: model timeout (owner 2026-11-02) -----------
     clean, errs = ws.validate_settings_patch({"mycore": {"timeout": 45}})
+    # file car rides the same schema leg: a legal allowed_roots list is
+    # accepted and normalized (absolute paths survive verbatim)
+    clean_r, errs_r = ws.validate_settings_patch(
+        {"mycore": {"allowed_roots": ["/srv/aidog-data"]}})
     check("timeout schema: 45 accepted",
-          errs == [] and clean["mycore"]["timeout"] == 45, str(errs))
+          errs == [] and clean["mycore"]["timeout"] == 45
+          and errs_r == []
+          and clean_r["mycore"]["allowed_roots"] == ["/srv/aidog-data"]
+          and os.path.isabs(clean_r["mycore"]["allowed_roots"][0]),
+          str(errs) + " | " + str(errs_r))
     for bad in (4, 601, 0, -1, "30", True, 3.5, None):
         _, errs = ws.validate_settings_patch({"mycore": {"timeout": bad}})
         check(f"timeout schema: {bad!r} refused",
               bool(errs) and "timeout" in errs[0], str(errs))
     _, errs = ws.validate_settings_patch({"mycore": {"model": "m"}})
+    # file car: wrong-shape allowed_roots refuses next to the absent key
+    # (empty list / bare string / non-string entry / empty entry / not a list)
+    bad_roots = ([], "x", [1], ["/a", ""], 5)
+    root_errs = [ws.validate_settings_patch(
+        {"mycore": {"allowed_roots": b}})[1] for b in bad_roots]
     check("timeout schema: absent key legal (default keeps working)",
-          errs == [], str(errs))
+          errs == []
+          and all(e and "allowed_roots" in e[0] for e in root_errs),
+          str(errs) + " | " + str(root_errs))
 
     # ---------------- discoverability car: botmenu partition ---------------
     clean, errs = ws.validate_settings_patch(

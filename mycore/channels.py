@@ -87,6 +87,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from email.header import decode_header, make_header
 from email.message import EmailMessage
@@ -96,6 +97,13 @@ from typing import Callable
 
 from lib import profile_paths as pp  # noqa: E402  (car F §13.1: profile seams)
 from . import envslots  # noqa: E402  (E2: the one store reader)
+# File car (0.5.90): the multipart builder + filename/header sanitizer are
+# shared with mycore.tg (tg imports nothing from this module — no cycle).
+from .tg import (  # noqa: E402
+    MAX_FILE_BYTES as TG_MAX_FILE_BYTES,
+    _multipart_body as tg_multipart_body,
+    _safe_filename as tg_safe_filename,
+)
 
 CHANNELS = ("discord", "slack", "email", "webhook",
             "dingtalk", "feishu", "wechat", "whatsapp", "signal")
@@ -160,6 +168,26 @@ class ChannelError(RuntimeError):
 # transport: (url, payload_bytes_or_None, headers, timeout) -> response text
 #   payload None = GET, bytes = POST (JSON body — every route here POSTs JSON)
 Transport = Callable[[str, bytes | None, dict, float], str]
+
+# BINARY transport: (url, headers, timeout) -> raw bytes. The text seam
+# decodes utf-8 with "replace" and therefore cannot carry a received file
+# (file car) — this seam is bounded at MAX_FILE_BYTES + 1 so an oversized
+# response never balloons memory.
+BinTransport = Callable[[str, dict, float], bytes]
+
+
+def _urllib_bin_transport(url: str, headers: dict, timeout: float) -> bytes:
+    req = urllib.request.Request(url, method="GET")
+    for key, value in (headers or {}).items():
+        req.add_header(key, value)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read(TG_MAX_FILE_BYTES + 1)
+    except urllib.error.HTTPError as e:
+        # Status/reason only: request headers must never surface.
+        raise ChannelError(f"HTTP {e.code} {e.reason}") from None
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        raise ChannelError(f"transport failure: {type(e).__name__}") from None
 
 
 def _urllib_transport(url: str, payload: bytes | None, headers: dict,
@@ -303,17 +331,23 @@ class Channel:
 
     name = ""
     inbound = True        # route accepts inbound messages (poll or endpoint)
+    # File transfer car (0.5.90): native file delivery capability. False =
+    # send_file() degrades to an honest text note (never a silent drop);
+    # a route with True must implement _send_file().
+    send_files = False
     # Ready-row honesty: non-empty = appended as the status() note when the
     # route is enabled AND configured (structural/best-effort inbound limits).
     inbound_note = ""
 
     def __init__(self, repo, cfg=None, state=None, transport=None,
-                 timeout: float = REQUEST_TIMEOUT) -> None:
+                 timeout: float = REQUEST_TIMEOUT,
+                 bin_transport: BinTransport | None = None) -> None:
         self.repo = Path(repo)
         self.cfg = cfg if isinstance(cfg, dict) else {}
         self.state = Path(state) if state is not None \
             else Path(repo) / "data" / "mycore_service"
         self.transport = transport or _urllib_transport
+        self.bin_transport = bin_transport or _urllib_bin_transport
         self.timeout = timeout
 
     # ------------------------------------------------------------ gates ----
@@ -346,6 +380,19 @@ class Channel:
                  headers: dict | None = None) -> str:
         try:
             return self.transport(url, payload, dict(headers or {}), self.timeout)
+        except ChannelError:
+            raise                       # already sanitized
+        except Exception as e:          # noqa: BLE001 — sanitize unknowns too
+            raise ChannelError(
+                f"{method} failed: {type(e).__name__}") from None
+
+    def _request_bytes(self, method: str, url: str,
+                       headers: dict | None = None) -> bytes:
+        """Binary GET through the bytes seam (file car): the text seam
+        decodes utf-8 with "replace" and would corrupt a received file.
+        Same sanitizing contract as _request — method + type only."""
+        try:
+            return self.bin_transport(url, dict(headers or {}), self.timeout)
         except ChannelError:
             raise                       # already sanitized
         except Exception as e:          # noqa: BLE001 — sanitize unknowns too
@@ -518,6 +565,58 @@ class Channel:
 
     def _send(self, target: str, text: str) -> None:
         raise ChannelError("send not implemented")
+
+    def send_file(self, target: str, path, name: str = "",
+                  caption: str = "") -> bool:
+        """Outbound file (file transfer car, 0.5.90). Returns True on an
+        accepted delivery, False on an honest failure — the SAME contract
+        as send(): never raises, never echoes a credential.
+
+        `name` is the clean name to present (the staged outbox path carries
+        a collision stamp; empty = derive it from the path). Routes with
+        `send_files = True` take their native leg (_send_file). Every other
+        route degrades to a TEXT note naming the file and where it sits on
+        the host — honest degradation, so a queued file is never silently
+        dropped on a route that cannot carry it."""
+        try:
+            if not self.enabled:
+                raise ChannelError("route disabled in settings")
+            ok, reason = self.configured()
+            if not ok:
+                raise ChannelError(f"not configured: {reason}")
+            tgt = target.strip() if isinstance(target, str) else ""
+            if not tgt:
+                raise ChannelError("target is required")
+            p = Path(path)
+            if not p.is_file():
+                raise ChannelError("file not found")
+            disp = str(name or "") or p.name
+            if self.send_files:
+                self._send_file(tgt, p, disp,
+                                caption if isinstance(caption, str) else "")
+                return True
+            # Honest text fallback (never a silent drop): name + size +
+            # where the owner can pick the file up on this host.
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            self._send(tgt, f"[file] {disp} ({size} bytes) — this route "
+                            "cannot deliver files natively; the file is saved "
+                            f"on the host at {p}")
+            return True
+        except ChannelError as e:
+            self._log("SEND_FAIL", str(e))
+            return False
+        except Exception as e:          # noqa: BLE001 — sanitize unknowns too
+            self._log("SEND_FAIL", f"unexpected: {type(e).__name__}")
+            return False
+
+    def _send_file(self, target: str, path: Path, name: str,
+                   caption: str) -> None:
+        # Only reachable when send_files = True — a subclass that flips the
+        # flag without implementing this fails honestly, not silently.
+        raise ChannelError("send_file not implemented")
 
     def _poll(self) -> list[Inbound]:
         raise ChannelError("poll not implemented")
@@ -872,6 +971,7 @@ class FeishuChannel(Channel):
     chat_id; allow-listing of sender open_ids is the service layer's job."""
 
     name = "feishu"
+    send_files = True      # file car: native im/v1/files upload + file msg
 
     @property
     def inbound_note(self) -> str:
@@ -969,6 +1069,117 @@ class FeishuChannel(Channel):
 
         self._with_token("feishu.send", op)
 
+    def _send_file(self, target: str, path: Path, name: str,
+                   caption: str) -> None:
+        """Native file leg (file car): POST im/v1/files (multipart) ->
+        file_key -> a msg_type:"file" message. `name` is the clean
+        presentation name (the staged path carries a collision stamp). A
+        non-empty caption goes out FIRST as a text message (feishu file
+        messages carry no caption). Token rides through _with_token (same
+        invalid-code retry-once as text); the file bytes never reach a log
+        or an error message."""
+        try:
+            data = path.read_bytes()
+        except OSError as e:
+            raise ChannelError(
+                f"feishu.upload: read failed: {type(e).__name__}") from None
+        if not data:
+            raise ChannelError("feishu.upload: empty file")
+        if len(data) > TG_MAX_FILE_BYTES:
+            raise ChannelError("feishu.upload: file too large (5MB limit)")
+        name = tg_safe_filename(name or path.name)
+        boundary = "mycore" + uuid.uuid4().hex
+        body = tg_multipart_body(boundary,
+                                 [("file_type", "stream"),
+                                  ("file_name", name)],
+                                 "file", name, data)
+        up_url = f"{FEISHU_API}/im/v1/files"
+
+        def up(token: str):
+            doc = _json(self._request(
+                "feishu.upload", up_url, body,
+                {"Authorization": f"Bearer {token}",
+                 "Content-Type": f"multipart/form-data; boundary={boundary}"}),
+                "feishu.upload")
+            return self._check_code("feishu.upload", doc)
+
+        doc = self._with_token("feishu.upload", up)
+        data_blk = doc.get("data") if isinstance(doc, dict) else None
+        file_key = data_blk.get("file_key") if isinstance(data_blk, dict) else None
+        if not isinstance(file_key, str) or not file_key:
+            raise ChannelError("feishu.upload: missing file_key")
+        if caption:
+            self._send(target, caption)   # caption first, then the file
+        payload = json.dumps({"receive_id": target, "msg_type": "file",
+                              "content": json.dumps(
+                                  {"file_key": file_key})}).encode("utf-8")
+        url = f"{FEISHU_API}/im/v1/messages?receive_id_type=chat_id"
+
+        def op(token: str):
+            mdoc = _json(self._request(
+                "feishu.send", url, payload,
+                {"Authorization": f"Bearer {token}",
+                 "Content-Type": "application/json"}), "feishu.send")
+            return self._check_code("feishu.send", mdoc)
+
+        self._with_token("feishu.send", op)
+
+    def _ingest_files(self, doc: dict, token: str) -> None:
+        """File car inbound: every msg_type:"file" item on this page is
+        downloaded through the BYTES seam into <state>/inbox/ and gets an
+        honest note attached (item["_note"]) — the row builder delivers
+        that note as a normal inbound text, so ZERO of the service's
+        channel-inbound contract changes.
+
+        Failures never raise out of poll: the note itself carries the
+        reason (sanitized method/type text only), so the model can tell the
+        user the file did not arrive instead of the message vanishing."""
+        data = doc.get("data") if isinstance(doc, dict) else None
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("msg_type") or "") != "file":
+                continue
+            mid = str(item.get("message_id") or "")
+            body = item.get("body") if isinstance(item.get("body"), dict) else {}
+            content = body.get("content")
+            meta: dict = {}
+            if isinstance(content, str) and content:
+                try:
+                    parsed = json.loads(content)
+                    if isinstance(parsed, dict):
+                        meta = parsed
+                except ValueError:
+                    meta = {}
+            file_key = str(meta.get("file_key") or "")
+            raw_name = str(meta.get("file_name") or "")
+            if not mid or not file_key:
+                item["_note"] = ("[file] message carried no file_key "
+                                 "— nothing was saved")
+                continue
+            try:
+                url = (f"{FEISHU_API}/im/v1/messages/{mid}/resources/{file_key}"
+                       f"?type=file")
+                blob = self._request_bytes(
+                    "feishu.file", url,
+                    {"Authorization": f"Bearer {token}"})
+                if not blob:
+                    raise ChannelError("empty body")
+                if len(blob) > TG_MAX_FILE_BYTES:
+                    raise ChannelError("file too large (5MB limit)")
+                from . import filebox  # local import: keeps the graph acyclic
+                saved = filebox.save_inbox(self.state,
+                                           raw_name or file_key, blob)
+                item["_note"] = (f"[file] {saved.name} ({len(blob)} bytes) "
+                                 f"saved to {saved}")
+            except ChannelError as e:
+                item["_note"] = f"[file] download failed ({str(e)[:120]})"
+            except Exception as e:  # noqa: BLE001 — never break the poll loop
+                item["_note"] = f"[file] download failed ({type(e).__name__})"
+
     def _poll(self) -> list[Inbound]:
         chat_ids = _id_list(self.cfg.get("chat_ids"))
         if not chat_ids:
@@ -994,7 +1205,11 @@ class FeishuChannel(Channel):
                 doc = _json(self._request("feishu.poll", url, None,
                                           {"Authorization": f"Bearer {token}"}),
                             "feishu.poll")
-                return self._check_code("feishu.poll", doc)
+                checked = self._check_code("feishu.poll", doc)
+                # file car: download every file item inside THIS token
+                # context and attach its note to the item
+                self._ingest_files(checked, token)
+                return checked
 
             doc = self._with_token("feishu.poll", op)
             data = doc.get("data")
@@ -1014,7 +1229,12 @@ class FeishuChannel(Channel):
                 sender_doc = item.get("sender") \
                     if isinstance(item.get("sender"), dict) else {}
                 sender = str(sender_doc.get("id") or "")
-                rows.append((raw, mid, sender, _feishu_text(item)))
+                # file car: _ingest_files attached a note for file items
+                # (download result); everything else keeps _feishu_text.
+                note = item.get("_note")
+                text = str(note) if isinstance(note, str) and note \
+                    else _feishu_text(item)
+                rows.append((raw, mid, sender, text))
             if not rows:
                 continue
             max_raw = max(r[0] for r in rows)
@@ -1322,16 +1542,18 @@ def _parse_email(raw: bytes) -> Inbound | None:
 
 
 # -------------------------------------------------------------- factory -----
-def load_channels(repo, settings, transport=None) -> dict[str, Channel]:
+def load_channels(repo, settings, transport=None,
+                  bin_transport=None) -> dict[str, Channel]:
     """Build every route adapter in CHANNELS. `settings` is the
     web/settings.json document (or the bare channels block). `transport`
-    injects the HTTP callable for offline tests; email leaves use stdlib —
-    inject per-instance factories when testing them directly."""
+    injects the HTTP callable for offline tests; `bin_transport` injects
+    the bytes seam (file car — received-file downloads); email leaves use
+    stdlib — inject per-instance factories when testing them directly."""
     block = _channels_block(settings)
     state = state_root(repo, settings)
     def build(cls):
         return cls(repo=repo, cfg=block.get(cls.name) or {}, state=state,
-                   transport=transport)
+                   transport=transport, bin_transport=bin_transport)
     return {cls.name: build(cls) for cls in
             (DiscordChannel, SlackChannel, EmailChannel, WebhookChannel,
              DingTalkChannel, FeishuChannel, WeChatChannel,

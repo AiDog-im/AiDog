@@ -51,9 +51,11 @@ own my business lines end-to-end.
    no external sharing, no third-party disclosure. Public-release timing is Owner's call.
 2. **Credentials**: zero echo — never print secret values; report location + length>0 only.
    Credential store: `secrets.env` (0600) only.
-3. **File write scope**: only project paths authorized by Owner (currently
-   `imaidog/` + agreed runtime dirs). Outside writes require explicit approval;
-   irreversible/destructive actions require the three-class request rule.
+3. **File write scope**: only paths inside the configured allowed roots —
+   the repo + system temp plus any `mycore.allowed_roots` the owner
+   configured in settings. Outside writes require explicit approval from
+   Owner; irreversible/destructive actions require the three-class request
+   rule.
 4. **Free-first**: no paid services, API quotas, or subscriptions without reporting
    budget and getting Owner's approval first.
 5. **Chain writes (Phase 2)**: transactions/contract calls go through the official SDK

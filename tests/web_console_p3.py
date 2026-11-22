@@ -3259,9 +3259,9 @@ def main() -> int:
     _kt = (caps2.get("mycore") or {}).get("known_tools") \
         if isinstance(caps2, dict) else None
     from mycore.tools import KNOWN_TOOL_NAMES as _KTN
-    check("GET capabilities mycore.known_tools == 29 sorted names",
-          isinstance(_kt, list) and len(_kt) == 29
-          and _kt == sorted(_KTN) and len(set(_kt)) == 29,
+    check("GET capabilities mycore.known_tools == 30 sorted names",
+          isinstance(_kt, list) and len(_kt) == 30
+          and _kt == sorted(_KTN) and len(set(_kt)) == 30,
           f"n={len(_kt) if isinstance(_kt, list) else _kt}")
 
     # --- 1.4 GET /api/cron: read-only sanitized job list ---

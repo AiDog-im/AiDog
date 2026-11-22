@@ -116,13 +116,26 @@ def _multipart_body(boundary: str, fields: list[tuple[str, str]],
         out += value.encode("utf-8")
         out += b"\r\n"
     out += f"--{boundary}\r\n".encode("ascii")
+    # utf-8 (byte-identical for ASCII names): a CJK filename must survive the
+    # header; callers sanitize CR/LF/quotes before this point.
     out += (f'Content-Disposition: form-data; name="{file_field}"; '
-            f'filename="{filename}"\r\n').encode("ascii")
+            f'filename="{filename}"\r\n').encode("utf-8")
     out += b"Content-Type: application/octet-stream\r\n\r\n"
     out += blob
     out += b"\r\n"
     out += f"--{boundary}--\r\n".encode("ascii")
     return bytes(out)
+
+
+def _safe_filename(raw: str) -> str:
+    """A header-safe file name for the multipart part: basename only (no
+    path separators), printable characters only, quotes/CR/LF stripped
+    (header injection), 100 chars max, `file.bin` when nothing survives."""
+    name = str(raw or "").replace("\\", "/").split("/")[-1]
+    name = "".join(ch for ch in name
+                   if ch.isprintable() and ch not in "\"'\r\n")
+    name = name.strip().lstrip(".")[:100].strip()
+    return name or "file.bin"
 
 
 class TgClient:
@@ -373,6 +386,51 @@ class TgClient:
         except Exception as e:          # noqa: BLE001 — sanitize unknowns too
             raise TgError(f"sendPhoto failed: {type(e).__name__}") from None
         return self._parse("sendPhoto", text)
+
+    def send_document(self, chat_id: str | int, document: bytes | Path,
+                      filename: str = "", caption: str = "",
+                      thread_id: int | None = None) -> dict:
+        """multipart/form-data sendDocument (file transfer car, 0.5.90) —
+        the sendPhoto template with a caller-named file part. `filename` is
+        sanitized to a printable basename (path separators, quotes, CR/LF
+        and control characters can never reach the multipart header); an
+        empty result falls back to `file.bin`. caption follows sendPhoto's
+        1000-char hard cut. Error paths carry the method name only — _url()
+        embeds the token and must never surface."""
+        self._require()
+        if not chat_id:
+            raise TgError("chat_id is required")
+        if isinstance(document, (str, Path)):
+            try:
+                document = Path(document).read_bytes()
+            except OSError as e:
+                raise TgError(f"document read failed: {type(e).__name__}") from None
+        if not isinstance(document, (bytes, bytearray)) or not document:
+            raise TgError("document must be non-empty bytes or a Path")
+        document = bytes(document)
+        if len(document) > MAX_FILE_BYTES:
+            raise TgError("file too large")
+        if not isinstance(caption, str):
+            caption = ""
+        caption = caption[:1000]
+        name = _safe_filename(filename)
+        fields: list[tuple[str, str]] = [("chat_id", str(chat_id))]
+        if thread_id is not None:
+            fields.append(("message_thread_id", str(thread_id)))
+        if caption:
+            fields.append(("caption", caption))
+        boundary = "mycore" + uuid.uuid4().hex
+        body = _multipart_body(boundary, fields, "document", name, document)
+        content_type = f"multipart/form-data; boundary={boundary}"
+        try:
+            # Method name only in error paths: _url() embeds the token.
+            text = self.mp_transport(self._url("sendDocument"), body,
+                                     content_type, self.timeout)
+        except TgError:
+            raise                       # already sanitized (no URL inside)
+        except Exception as e:          # noqa: BLE001 — sanitize unknowns too
+            raise TgError(f"sendDocument failed: {type(e).__name__}") from None
+        return self._parse("sendDocument", text)
 
     def get_updates(self, offset: int | None = None, timeout: int = 30) -> list[dict]:
         """Long-poll getUpdates. Caller must have obtained the token through

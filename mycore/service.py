@@ -180,6 +180,8 @@ TYPING_FAIL_MAX = 5                     # consecutive failed beats before the be
 CHANNEL_POLL_SEC = 30                   # channel inbound leg cadence (seconds)
 VOICE_MAX_SECONDS = 60                  # TG voice/audio cap before STT (car 4c)
 VOICE_MAX_BYTES = 5_000_000             # download cap before STT (5MB, car 4c)
+INBOX_MAX_BYTES = 5_000_000             # document download cap before save
+                                        # (file car; mirrors tg.MAX_FILE_BYTES)
 
 # The 11 commands the TG bot answers — the single source of truth for
 #   * the `_command` dispatcher below (locked by tests: the branches must
@@ -666,7 +668,8 @@ class ChatService:
                                token_env=POLL_BOT_ENV, transport=transport)
         self.registry = build_registry(
             state_dir=self.state,
-            disabled=resolve_disabled_tools(self._settings_doc()))
+            disabled=resolve_disabled_tools(self._settings_doc()),
+            deliver_files=True)   # file car: THIS surface can deliver files
         # Car 2-D5: surface MCP startup notes (success counts / honest skip
         # reasons) in the service log — the model never sees a silent miss.
         for note in getattr(self.registry, "mcp_notes", []):
@@ -919,6 +922,13 @@ class ChatService:
                 med = msg.get("video_note")
             if isinstance(med, dict):
                 self._handle_voice(cid, med, tid)
+                return
+            # File transfer car (0.5.90): a document with no usable text is
+            # the same story as a voice note — save it, then run the note
+            # through the VERY same command/pipeline path below.
+            doc = msg.get("document")
+            if isinstance(doc, dict):
+                self._handle_document(cid, doc, tid)
             return
         text = text.strip()
         # car C1 (A-2): a REPLY carries the target message's text — /rewind
@@ -953,6 +963,7 @@ class ChatService:
         else:
             self._tw = None          # nothing to deliver — drop any preview
         self._drain_photos(cid, tid)      # text first, photos after (car 4c)
+        self._drain_files(cid, tid)       # then queued files (file car)
 
     def _handle_voice(self, chat_id: int, med: dict,
                       tid: int | None) -> None:
@@ -1045,6 +1056,93 @@ class ChatService:
         else:
             self._tw = None          # nothing to deliver — drop any preview
         self._drain_photos(chat_id, tid)
+        self._drain_files(chat_id, tid)
+
+    def _handle_document(self, chat_id: int, med: dict,
+                         tid: int | None) -> None:
+        """A received document -> getFile -> size cap -> download -> save
+        into <state>/inbox/ -> a short note through the SAME text path as a
+        typed message (file transfer car, 0.5.90).
+
+        Fail-soft by contract: every failure replies with an honest locale
+        line (file.inbound.*) and NEVER raises into the poll loop. Logs
+        carry chat/name/bytes only — never content, never a URL (getFile
+        and download URLs embed the token; TgError already sanitizes)."""
+        try:
+            file_id = med.get("file_id")
+            if not isinstance(file_id, str) or not file_id:
+                raise TgError("missing file_id")
+            meta = self.tg.get_file(file_id)
+            # Same dual-source size walk as _handle_voice: getFile reports
+            # `file_size`, an update blob may carry `byte_size` — walk both
+            # so the cap cannot be bypassed by a field rename; skip the
+            # check when NEITHER reports a size (never a false reject).
+            size = None
+            for src in (meta, med):
+                if not isinstance(src, dict):
+                    continue
+                for key in ("file_size", "byte_size"):
+                    val = src.get(key)
+                    if isinstance(val, int) and not isinstance(val, bool):
+                        size = val
+                        break
+                if size is not None:
+                    break
+            if (isinstance(size, int) and not isinstance(size, bool)
+                    and size > INBOX_MAX_BYTES):
+                # Oversize BEFORE downloading: honest failure, no wasted pull.
+                reason = "file too large (5MB limit)"
+                self.log.write("FILE_FAIL", f"chat={redact_chat(chat_id)}",
+                               f"err={reason}")
+                self._send(chat_id,
+                           self._t("file.inbound.failed", reason=reason),
+                           thread_id=tid)
+                return
+            file_path = meta.get("file_path") if isinstance(meta, dict) else None
+            if not isinstance(file_path, str) or not file_path:
+                raise TgError("missing file_path")
+            data = self.tg.download_file(file_path)
+            raw_name = med.get("file_name")
+            if not isinstance(raw_name, str) or not raw_name.strip():
+                raw_name = file_path.rsplit("/", 1)[-1]
+            saved = self._save_inbox(raw_name, data)
+        except Exception as e:  # noqa: BLE001 — one bad document must not kill the loop
+            reason = _scrub_paths(str(e)).strip()[:120] or type(e).__name__
+            self.log.write("FILE_FAIL", f"chat={redact_chat(chat_id)}",
+                           f"err={type(e).__name__}:{reason[:80]}")
+            self._send(chat_id,
+                       self._t("file.inbound.failed", reason=reason),
+                       thread_id=tid)
+            return
+        name = saved.name
+        self.log.write("FILE_OK", f"chat={redact_chat(chat_id)}",
+                       f"name={name}", f"bytes={len(data)}")
+        # From here: the EXACT typed-text path (session key rule, single
+        # reply) — the note tells the model what arrived and where it sits,
+        # so it can read the file with read_file and answer about it.
+        note = self._t("file.inbound.received", name=name,
+                       size=len(data), path=str(saved))
+        try:
+            skey = f"{chat_id}:{tid}" if tid is not None else chat_id
+            out_text = self._pipeline(chat_id, note, session_key=skey,
+                                      thread_id=tid, stream=True)
+        except Exception as e:  # noqa: BLE001 — one bad turn must not kill the loop
+            self.log.write("UPDATE_ERR", f"chat={redact_chat(chat_id)}",
+                           f"err={type(e).__name__}")
+            out_text = self._t("err.internal")
+        if out_text:
+            self._finish_reply(chat_id, out_text, thread_id=tid)
+        else:
+            self._tw = None          # nothing to deliver — drop any preview
+        self._drain_photos(chat_id, tid)
+        self._drain_files(chat_id, tid)
+
+    def _save_inbox(self, raw_name: str, data: bytes) -> Path:
+        """Persist a received file under <state>/inbox/ (file car) — the
+        shared filebox helper owns the name sanitizing and collision rule;
+        any OSError surfaces to the caller as one honest locale line."""
+        from . import filebox  # local import: keeps the module graph acyclic
+        return filebox.save_inbox(self.state, raw_name, data)
 
     def _drain_photos(self, chat_id: int, tid: int | None) -> None:
         """Send images generated during this turn (car 4c): text reply
@@ -1083,6 +1181,44 @@ class ChatService:
             except Exception as e:  # noqa: BLE001 — photo failure never harms text
                 self.log.write("SEND_PHOTO_FAIL", f"chat={redact_chat(chat_id)}",
                                f"name={name}",
+                               f"err={type(e).__name__}:"
+                               f"{_scrub_paths(str(e))[:80]}")
+
+    def _drain_files(self, chat_id: int, tid: int | None) -> None:
+        """Send files staged by the send_file tool during this turn (file
+        transfer car, 0.5.90): text reply FIRST, files after; a file
+        failure only logs — it can never touch the delivered text. dry-run
+        stages but previews instead of transmitting (same contract as
+        _drain_photos)."""
+        try:
+            from . import filebox
+        except Exception:  # noqa: BLE001 — module absent = no-op
+            return
+        try:
+            items = filebox.drain_outbox()
+        except Exception as e:  # noqa: BLE001 — drain must never bubble up
+            self.log.write("FILE_DRAIN_FAIL", f"chat={redact_chat(chat_id)}",
+                           f"err={type(e).__name__}")
+            return
+        if not items:
+            return
+        for item in items:
+            try:
+                path, name = Path(item[0]), str(item[1])
+            except Exception:  # noqa: BLE001 — malformed entry: skip, keep going
+                continue
+            if self.dry_run:
+                self.log.write("DRYRUN_SEND_FILE",
+                               f"chat={redact_chat(chat_id)}", f"name={name}")
+                continue
+            try:
+                self.tg.send_document(chat_id, path, filename=name,
+                                      thread_id=tid)
+                self.log.write("SEND_FILE_OK", f"chat={redact_chat(chat_id)}",
+                               f"name={name}")
+            except Exception as e:  # noqa: BLE001 — file failure never harms text
+                self.log.write("FILE_DRAIN_FAIL",
+                               f"chat={redact_chat(chat_id)}", f"name={name}",
                                f"err={type(e).__name__}:"
                                f"{_scrub_paths(str(e))[:80]}")
 
@@ -1903,11 +2039,22 @@ class ChatService:
                     chan = None
                 if chan is not None and \
                         self._channel_send(chan, route, dest, text):
+                    self._drain_channel_files(chan, route, dest)
                     return f"channel:{route}"
         target = origin if isinstance(origin, int) else self._wd_chat_target()
         if not isinstance(target, int):
+            # Log-only delivery: staged files must not linger for someone
+            # else's turn to send — take them and say so (file stays put).
+            try:
+                from . import filebox
+                orphaned = filebox.drain_outbox()
+            except Exception:  # noqa: BLE001 — drain must never bubble up
+                orphaned = []
+            for _p, _n in orphaned:
+                self.log.write("SEND_FILE_SKIP", "target=none", f"name={_n}")
             return "none"
         self._send(target, text)
+        self._drain_files(target, None)
         return "origin" if target == origin else "wd"
 
     def _cron_deliver(self, job: dict, text: str) -> str:
@@ -2438,6 +2585,43 @@ class ChatService:
             self.log.write("CHANNEL_SEND_FAIL", who)
         return ok
 
+    def _drain_channel_files(self, chan, route: str, target: str) -> None:
+        """The channel twin of _drain_files (file car): staged files leave
+        over the SAME route that just answered — native file delivery when
+        the adapter advertises send_files, else the base class's honest
+        text fallback. Failure only logs; the delivered text is untouched."""
+        try:
+            from . import filebox
+        except Exception:  # noqa: BLE001 — module absent = no-op
+            return
+        try:
+            items = filebox.drain_outbox()
+        except Exception as e:  # noqa: BLE001 — drain must never bubble up
+            self.log.write("FILE_DRAIN_FAIL", f"route={route}",
+                           f"err={type(e).__name__}")
+            return
+        if not items:
+            return
+        who = f"route={route} chat={redact_chat(target)}"
+        for item in items:
+            try:
+                path, name = Path(item[0]), str(item[1])
+            except Exception:  # noqa: BLE001 — malformed entry: skip, keep going
+                continue
+            if self.dry_run:
+                self.log.write("DRYRUN_SEND_FILE", who, f"name={name}")
+                continue
+            try:
+                ok = bool(chan.send_file(target, path, name=name))
+            except Exception as e:  # noqa: BLE001 — adapters promise never to raise
+                self.log.write("FILE_DRAIN_FAIL", who, f"name={name}",
+                               f"err={type(e).__name__}")
+                continue
+            if ok:
+                self.log.write("SEND_FILE_OK", who, f"name={name}")
+            else:
+                self.log.write("FILE_DRAIN_FAIL", who, f"name={name}")
+
     def _handle_channel_inbound(self, route: str, chan, inbound,
                                 allow: frozenset[str]) -> None:
         """One inbound message -> allowlist gate -> the SAME command/pipeline
@@ -2472,6 +2656,9 @@ class ChatService:
             reply = self._t("err.internal")
         if reply:
             self._channel_send(chan, route, target, reply)
+        # File car: whatever send_file staged during this turn leaves on
+        # the SAME route (even when the reply itself was empty).
+        self._drain_channel_files(chan, route, target)
 
     def _maybe_poll_channels(self) -> None:
         """Channel inbound leg: throttled to CHANNEL_POLL_SEC; poll every
