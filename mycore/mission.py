@@ -173,6 +173,7 @@ REPORTABLE: dict[str, frozenset[str]] = {
     "blocker": frozenset({"all", "milestones"}),
     "error": frozenset({"all", "milestones"}),   # slice model failure = anomaly
     "decision": frozenset({"all", "milestones", "final"}),
+    "fleet": frozenset({"all", "milestones", "final"}),
     "final": frozenset({"all", "milestones", "final"}),
 }
 THROTTLE_BYPASS = frozenset({"decision", "final"})

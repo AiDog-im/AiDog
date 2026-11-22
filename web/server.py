@@ -120,6 +120,8 @@ Routes:
                                    (or null) + events (tail 20, scrubbed) +
                                    budget + budget_used}; 404 unknown id;
                                    WITHOUT id the list shape is unchanged
+  GET  /api/fleet               -> local-only read model: recent clone fleets,
+                                   bounded rows, no auth, fail-soft empty
   POST /api/mission             -> Bearer; {action: start|stop|pause|resume,
                                    goal?, id?, reporting?, budget?, deadline?,
                                    redlines?, deliverable?} -> mission
@@ -367,6 +369,7 @@ import importlib.util
 import json
 import os
 import re
+import secrets
 import shutil
 import socket
 import subprocess
@@ -556,7 +559,8 @@ MYCORE_WD_PROC = r"python3 -m mycore\.watchdog"
 MYCORE_WD_FRESH_SEC = 300          # state file must be younger than 5 min
 SERVICE_LINE_RE = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ)\s+([A-Za-z]+)\b")
 SERVICE_EVENT_LEVEL = {"ABORT": "urgent", "ERROR": "urgent", "CRITICAL": "urgent",
-                       "WARN": "warn", "WARNING": "warn"}
+                       "WARN": "warn", "WARNING": "warn",
+                       "FLEET": "info"}
 
 # Console defaults are deployment-neutral on purpose: personal data-source paths
 # live in web/settings.json (gitignored) and are edited through POST /api/settings.
@@ -2754,6 +2758,28 @@ def collect_status() -> dict:
 # turns are reported from its own log, honestly labeled).
 _active_lock = threading.Lock()
 _active_turns = [0]
+_console_turn_lock = threading.Lock()
+_console_turns: dict[str, threading.Event] = {}
+
+
+def register_console_turn(turn_id: str, cancel: threading.Event) -> None:
+    with _console_turn_lock:
+        _console_turns[turn_id] = cancel
+
+
+def finish_console_turn(turn_id: str) -> None:
+    with _console_turn_lock:
+        _console_turns.pop(turn_id, None)
+
+
+def stop_console_turn() -> bool:
+    with _console_turn_lock:
+        active = list(_console_turns.values())
+    if not active:
+        return False
+    for cancel in active:
+        cancel.set()
+    return True
 
 
 def _bump_active_turn(delta: int) -> None:
@@ -6170,6 +6196,18 @@ def collect_profiling() -> dict:
     }
 
 
+def collect_fleet() -> dict:
+    """GET /api/fleet — local-only, read-only fleet board. Fail-soft to an
+    honest empty structure when the ledger is inactive or unavailable."""
+    try:
+        from mycore import fleet as fleet_module
+        return fleet_module.summary()
+    except Exception as e:  # noqa: BLE001 — a reporting view must not 500
+        return {"fleets": [], "count": 0, "clones": 0, "failed": 0,
+                "clone_tokens": None, "local_only": True,
+                "note": f"fleet ledger unavailable ({type(e).__name__})"}
+
+
 def collect_sniff() -> dict:
     """GET /api/sniff — the SENSE board read model (loopback, no auth, same
     contract as GET /api/mission). Config comes from settings (a hand-edited
@@ -7494,6 +7532,8 @@ class Handler(BaseHTTPRequestHandler):
                 payload, code = collect_mission_detail(mid)
                 return self._json(payload, code)
             return self._json(collect_mission())
+        if path == "/api/fleet":
+            return self._json(collect_fleet())
         if path == "/api/sniff":
             return self._json(collect_sniff())
         if path == "/api/profiling":
@@ -9355,6 +9395,22 @@ class Handler(BaseHTTPRequestHandler):
                                          .get("count")}})
 
     # ---------------------------------------------------------- console chat -
+    def _console_fleet_report(self, fleets: list) -> None:
+        """Write the Stream-visible fleet log row and fire its opt-in hook.
+        A reporting failure never changes the streamed model reply."""
+        try:
+            clones = sum(len(f.get("clones") or []) for f in fleets)
+            stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            with MYCORE_SERVICE_LOG.open("a", encoding="utf-8") as fh:
+                fh.write(f"{stamp} FLEET fleets={len(fleets)} clones={clones} "
+                         "origin=console\n")
+        except OSError:
+            pass
+        try:
+            hooks.fire("fleet", repo=REPO, log=lambda *_: None)
+        except Exception:  # noqa: BLE001 — reporting never breaks the reply
+            pass
+
     def _sse_start(self) -> None:
         """Switch the response into an SSE stream (HTTP/1.0 handler: no
         Content-Length, so the browser reader runs until close_connection).
@@ -9499,6 +9555,8 @@ class Handler(BaseHTTPRequestHandler):
         keeps a textified '[image]' marker (no base64 persists, nothing gets
         resent next turn), and a 4xx refusal gets vision_rejection_note's
         honest sentence in the final `done.text`."""
+        from mycore import fleet as fleet_module
+        fleet_module.begin_turn()
         cfg = cli.resolve_model_config()
         if model:
             cfg.model = model
@@ -9536,10 +9594,11 @@ class Handler(BaseHTTPRequestHandler):
                        {"type": "image_url", "image_url": {"url": image}}]
         messages.append({"role": "user", "content": content})
 
-        # Car 7 (D11): STOP baseline captured BEFORE the turn — only a later
-        # POST /api/control {action:stop} can abort THIS turn, and the
-        # active-turn counter feeds the Overview tail row.
-        stop_base = leash.stop_baseline()
+        # Console STOP is per-request and process-local; it never shares the
+        # persisted leash.stop_seq watched by the independent TG service.
+        cancel = threading.Event()
+        turn_id = secrets.token_hex(8)
+        register_console_turn(turn_id, cancel)
         _bump_active_turn(1)
         alive = [True]
         try:
@@ -9548,28 +9607,35 @@ class Handler(BaseHTTPRequestHandler):
 
             return self._drive_chat_turn(
                 messages, pre_ids, cfg, image, content, sess, alive,
-                stop_base, base_len)
+                cancel, turn_id, base_len)
         finally:
+            finish_console_turn(turn_id)
             _bump_active_turn(-1)
 
     def _drive_chat_turn(self, messages, pre_ids, cfg, image, content, sess,
-                         alive, stop_base, base_len=0) -> bool:
+                         alive, cancel, turn_id, base_len=0) -> bool:
         """The model/observer half of _run_chat_turn (split so the
         active-turn counter in the caller covers the whole turn in a
         finally — a crash must not leave the tail stuck at "working")."""
 
+        def send_frame(event: str, data: dict) -> bool:
+            ok = self._sse(event, data)
+            if not ok:
+                cancel.set()
+            return ok
+
         def on_event(kind: str, data: dict) -> None:
             # Names only — tool ARGUMENTS may carry machine paths, never sent.
             if kind == "tool_call":
-                alive[0] = self._sse("tool", {"name": data.get("name", "?"),
-                                              "ok": None})
+                alive[0] = send_frame("tool", {"name": data.get("name", "?"),
+                                                "ok": None})
             elif kind == "tool_result":
-                alive[0] = self._sse("tool", {"name": data.get("name", "?"),
-                                              "ok": bool(data.get("ok"))})
+                alive[0] = send_frame("tool", {"name": data.get("name", "?"),
+                                                "ok": bool(data.get("ok"))})
 
         def on_delta(piece: str) -> None:
             if alive[0]:
-                alive[0] = self._sse("delta", {"text": piece})
+                alive[0] = send_frame("delta", {"text": piece})
 
         def on_mcp_progress(payload: dict) -> None:
             """MCP progress -> one bounded SSE frame (car 4a-M3). Truncate
@@ -9577,7 +9643,7 @@ class Handler(BaseHTTPRequestHandler):
             if not alive[0]:
                 return
             prog = payload.get("progress")
-            alive[0] = self._sse("progress", {
+            alive[0] = send_frame("progress", {
                 "server": str(payload.get("server") or "")[:64],
                 "tool": str(payload.get("tool") or "")[:64],
                 "message": str(payload.get("message") or "")[:200],
@@ -9618,7 +9684,7 @@ class Handler(BaseHTTPRequestHandler):
                 silent = time.monotonic() - last_act[0]
                 if silent >= 20 and alive[0]:
                     with turn_lock:
-                        if alive[0] and not self._sse(
+                        if alive[0] and not send_frame(
                                 "progress",
                                 {"server": "", "tool": "model",
                                  "message": f"model thinking ({int(silent)}s)",
@@ -9632,7 +9698,7 @@ class Handler(BaseHTTPRequestHandler):
             res = run_turn(messages, chat_fn, registry,
                            on_event=_busy_event if alive[0] else None,
                            budget_chars=chat_budget(), on_delta=_busy_delta,
-                           should_stop=lambda: leash.stop_requested(stop_base))
+                           should_stop=cancel.is_set)
         finally:
             hb_stop.set()
             hb.join(timeout=2.0)
@@ -9667,9 +9733,17 @@ class Handler(BaseHTTPRequestHandler):
                 elif role == "assistant":
                     found["assistant"] = base_len + i   # keep the LAST one
             ids = found or None
+        from mycore import fleet as fleet_module
+        receipt = fleet_module.attach_receipt(
+            res.text, "console",
+            lambda key, **kw: i18n.fmt(
+                load_settings().get("language", "en"), key, **kw),
+            on_fleets=lambda fs: self._console_fleet_report(fs),
+            parent_usage={"in_tok": res.in_tok, "out_tok": res.out_tok,
+                          "usage_complete": res.usage_complete})
         if not alive[0]:
             return False
-        return self._sse("done", {"text": res.text, "stop": res.stop,
+        return self._sse("done", {"text": receipt, "stop": res.stop,
                                   "iterations": res.iterations,
                                   "tool_calls": res.tool_calls,
                                   "ids": ids})
@@ -10493,16 +10567,9 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, data, mime)
 
     def _handle_control(self) -> None:
-        """POST /api/control {action: stop|pause|resume[, reason]} — Bearer
-        gate (it changes runtime state). Car 7 / D11 restraint:
-        * stop   — moves the STOP counter: the CURRENT turn aborts at its
-                   next checkpoint (iteration top / delta / pre-dispatch);
-                   turns started later are untouched.
-        * pause  — the pause switch ON: new turns and the service's
-                   automatic legs are held with an honest line until a human
-                   resumes (fail-closed, no process killed).
-        * resume — the one human click that clears a pause (and rewrites a
-                   corrupt control file back to a valid one)."""
+        """POST /api/control {action: stop|pause|resume[, reason]} — Bearer.
+        STOP cancels active Console Chat requests in this web process only;
+        PAUSE/RESUME remain persisted cross-surface turn gates."""
         if not self._require_token():
             return
         doc = self._read_json_body()
@@ -10522,10 +10589,13 @@ class Handler(BaseHTTPRequestHandler):
                 "error": "validation failed",
                 "details": ["reason must be a single line of at most 200 chars"]},
                 400)
+        if action == "stop":
+            if not stop_console_turn():
+                return self._json({"error": "no active console chat turn"}, 409)
+            return self._json({"ok": True, "action": action,
+                               "scope": "console_chat"})
         try:
-            if action == "stop":
-                state = leash.request_stop()
-            elif action == "pause":
+            if action == "pause":
                 state = leash.pause(str(reason or "manual"))
             else:
                 state = leash.resume()
@@ -10806,6 +10876,8 @@ def main() -> None:
     # v0.5.55: console-run chat legs meter into the same state-dir log the
     # service writes (per-day files, O_APPEND-safe across both processes).
     model_meter.activate()
+    from mycore import fleet as fleet_module
+    fleet_module.activate()
     srv = ThreadingHTTPServer((HOST, PORT), Handler)
     # car E (#6): the startup security self-check — six read-only probes,
     # ONE sanitized line (states + ids only, never a value), and a daemon

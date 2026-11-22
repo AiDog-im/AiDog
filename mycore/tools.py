@@ -157,6 +157,8 @@ class ToolRegistry:
         # turn entry (service turns run sequentially), read during dispatch.
         self._turn_chat: Callable[..., dict] | None = None
         self._turn_budget: int | None = None
+        self._turn_should_stop: Callable[[], bool] | None = None
+        self._turn_deadline_remaining: Callable[[], float | None] | None = None
         # Progress sink (car 4a-M3): web binds an SSE emitter per turn;
         # MCP tool handlers read it during their own call window only.
         self._progress_sink: Callable[[dict], None] | None = None
@@ -184,14 +186,33 @@ class ToolRegistry:
         return out
 
     def bind_turn(self, chat: Callable[..., dict] | None,
-                  budget: int | None = None) -> None:
+                  budget: int | None = None,
+                  should_stop: Callable[[], bool] | None = None,
+                  deadline_remaining: Callable[[], float | None] | None = None,
+                  usage_snapshot: Callable[[], dict] | None = None) -> None:
         """Called by loop.run_turn at turn entry (see class comment)."""
         self._turn_chat = chat
         self._turn_budget = budget
+        self._turn_should_stop = should_stop
+        self._turn_deadline_remaining = deadline_remaining
+        self._turn_usage_snapshot = usage_snapshot
 
     def turn_binding(self) -> tuple[Callable[..., dict] | None, int | None]:
         """(chat, budget) of the active turn — None/None outside run_turn."""
         return self._turn_chat, self._turn_budget
+
+    def turn_usage(self) -> dict:
+        """Usage accumulated by the parent model calls up to this dispatch."""
+        fn = getattr(self, "_turn_usage_snapshot", None)
+        try:
+            return fn() if callable(fn) else {"usage_complete": False}
+        except Exception:  # noqa: BLE001 — accounting failure stays unknown
+            return {"usage_complete": False}
+
+    def turn_control(self) -> tuple[Callable[[], bool] | None,
+                                    Callable[[], float | None] | None]:
+        """The active turn's cooperative STOP and remaining deadline."""
+        return self._turn_should_stop, self._turn_deadline_remaining
 
     def bind_progress(self, fn: Callable[[dict], None] | None) -> None:
         """Bind the progress sink for MCP tool calls (car 4a-M3, mirrors
@@ -1152,7 +1173,11 @@ def _delegate(tasks: list, extra_tools: list | None,
     dispatch outside run_turn fails honestly instead of inventing a model."""
     from . import subagent  # local import: keeps the module graph acyclic
     chat, budget = registry.turn_binding()
-    return subagent.run_tasks(tasks, registry, extra_tools, chat, budget)
+    should_stop, remaining = registry.turn_control()
+    run_deadline = remaining() if remaining is not None else None
+    return subagent.run_tasks(tasks, registry, extra_tools, chat, budget,
+                              should_stop=should_stop,
+                              run_deadline=run_deadline)
 
 
 def _execute_code(steps: list | None, code: str | None, timeout: int,

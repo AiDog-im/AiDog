@@ -4808,11 +4808,11 @@ async function saveSettings() {
      - only blocks the operator actually edited join the save payload;
        the legacy 16-key payload above is built exactly as before. */
 /* Server event ids: data, never translated. Kept in lockstep with
-   mycore/hooks.py::EVENTS (7 events — mission_tick landed in the server in
-   car 3; the editor array only ever held six, so the 7th event was API-only
-   until Wave 3 lane α / X1). */
+   mycore/hooks.py::EVENTS (8 events — mission_tick landed in the server in
+   car 3; fleet landed in need-B P0, fired once per turn that dispatched
+   sub-agent clones and the split receipt was delivered). */
 const HOOK_EVENTS = ["turn_start", "turn_end", "tool_call", "compact",
-                     "cron_fire", "error", "mission_tick"];
+                     "cron_fire", "error", "mission_tick", "fleet"];
 /* JS mirror of web/server.py::_CHANNEL_SCHEMA (9 routes): [field, kind]
    kinds: bool = checkbox · list = comma-separated strings ·
           port = integer 1..65535 · str = single-line string */
@@ -6914,11 +6914,14 @@ async function postControl(action) {
     });
     const body = await res.json().catch(() => ({}));
     if (!res.ok) {
+      const detail = body.details?.[0] || body.error || "error";
       say("err", res.status === 401 ? badTokenText()
-        : ((body.details || [body.error || "error"])[0] + ""));
+        : (res.status === 409 ? t("ctl.stopNoChat",
+            "No active console chat reply; Telegram replies are not affected.")
+          : String(detail)));
       return;
     }
-    say("", action === "stop" ? "✓ " + t("ctl.stop", "STOP")
+    say("", action === "stop" ? "✓ " + t("ctl.stop", "STOP CHAT")
       : action === "pause" ? "✓ " + t("ctl.pause", "PAUSE")
       : "✓ " + t("ctl.resume", "RESUME"));
     refreshControl(); refreshStatus();
@@ -10082,6 +10085,53 @@ function renderArtifacts() {
       `(newest first)</div>` : "");
 }
 
+/* ----------------------------------------------------- fleet board -------- */
+let fleetData = null;
+async function refreshFleet() {
+  try {
+    const r = await fetch("/api/fleet");
+    const d = r.ok ? await r.json() : null;
+    fleetData = (d && Array.isArray(d.fleets)) ? d : null;
+  } catch (e) { fleetData = null; }
+  renderFleet();
+}
+
+function renderFleet() {
+  const box = document.getElementById("fleetList");
+  const badge = document.getElementById("fleetBadge");
+  if (!box) return;
+  if (!fleetData) {
+    box.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("fleet.unavailable", "fleet ledger unavailable"))}</div>`;
+    if (badge) badge.textContent = "–";
+    return;
+  }
+  const fleets = fleetData.fleets || [];
+  if (badge) badge.textContent = String(fleetData.count ?? fleets.length);
+  if (!fleets.length) {
+    box.innerHTML = `<div class="stat-note">${escapeHtml(
+      t("fleet.empty", "no delegated tasks yet"))}</div>`;
+    return;
+  }
+  box.innerHTML = fleets.map(f => {
+    const clones = (f.clones || []).map(c => {
+      const status = c.failed ? t("fleet.failed", "failed") :
+        t("fleet.done", "completed");
+      const excerpt = c.task_digest ? `${t("fleet.task", "task")} ${c.task_digest}` : "";
+      const tokens = c.usage_complete && Number.isInteger(c.in_tok) && Number.isInteger(c.out_tok)
+        ? `${c.in_tok}/${c.out_tok}` : "?";
+      return `<div class="ctl-row"><strong>${escapeHtml(c.clone || "clone")}</strong>` +
+        `<span>${escapeHtml(status)} · ${escapeHtml(String(c.stop || "?"))}</span>` +
+        `<span class="stat-note">${escapeHtml(tokens)} tokens</span>` +
+        `<span class="stat-note" style="min-width:0;overflow-wrap:anywhere;">${escapeHtml(excerpt)}</span></div>`;
+    }).join("");
+    const when = f.ts ? new Date(Number(f.ts) * 1000).toLocaleString() : "";
+    return `<details class="fleet-row"><summary>${escapeHtml(f.id || "fleet")} · ` +
+      `${(f.clones || []).length} · ${escapeHtml(when)}</summary>${clones}</details>`;
+  }).join("") + `<div class="stat-note">${escapeHtml(
+    fleetData.coverage || "")}</div>`;
+}
+
 /* --------------------------------------------------- X13 sessions panel --- */
 async function refreshSessions(q) {
   const list = document.getElementById("sessList");
@@ -11343,6 +11393,7 @@ function setView(name, fromUser) {
   // Wave 6 delta2: the gallery (X17) and the session browser (X13) lazy-load
   // with the SAME rule — first open, then only on a user nav click.
   if (name === "stream" && (fromUser || !artData)) refreshArtifacts();
+  if (name === "stream" && (fromUser || !fleetData)) refreshFleet();
   if (name === "chat") chatModelOptions();   // picker follows the live model list
   if (name === "chat" && (fromUser || !sessData)) refreshSessions("");
   // delta4: the community panel fetches on first open, then only on a user

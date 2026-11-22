@@ -82,6 +82,37 @@ Rules (no silent fallback, ever):
   parent's reply).
 - No persistent sub-agent sessions; every `delegate` call starts fresh.
 
+## Fleet observability (Need-B P0, implemented in the development tree)
+
+This increment adds an owner-visible receipt and a bounded local ledger without
+changing the model-facing fan-out contract:
+
+- `mycore/fleet.py` records one bounded JSONL row per clone under
+  `<state>/fleet/YYYY-MM-DD.jsonl`; activation is explicit and the service,
+  console and CLI resolve the same profile state directory.
+- `GET /api/fleet` is read-only and loopback-only. Its fixed whitelist omits
+  task text, chat ids, raw errors and credentials; custom model labels and tool
+  names are filtered. Incomplete bounded reads are labelled.
+- The console Stream view has a FLEETS section; Telegram has read-only
+  `/fleet`. A system-generated receipt is appended to chat/cron/channel
+  replies, and mission reports carry a fleet event subject to mission reporting
+  tiers, quiet hours and throttling.
+- Token fields are provider-reported input/output facts. Receipts distinguish
+  parent-turn usage, clone usage and their combined total; any missing usage
+  makes the corresponding total `?`, never a guessed partial total.
+- Console Chat STOP uses a web-process-local cancellation event. It does not
+  increment the persisted service `stop_seq` observed by TG turns. PAUSE and
+  RESUME remain cross-surface persisted controls. A synchronous model request
+  cannot be force-killed; cancellation is observed at loop checkpoints and a
+  late return is reported as aborted rather than successful.
+- Each clone receives an equal share of the parent's context-compaction
+  threshold. This is a context bound, **not** a billing/token spend cap;
+  daily guardrails remain the spend control.
+
+P0 verification in the development tree: core 2718/2718, web smoke 607/607,
+Stream browser probe 6/6, locale packs 1733/1733, source-language scan 0, and
+publish gate READY(0). This is not yet included in a release.
+
 ## Evidence
 
 - Whitelist carrier + console editor (0.5.40): `tmp/e2e_activation.py` `L2`

@@ -45,15 +45,16 @@ from typing import Callable
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
-# Event whitelist — converged to the service's REAL wiring points (v1):
+# Event whitelist — converged to the service's REAL wiring points:
 # turn_start/turn_end/tool_call/compact/error live in ChatService, cron_fire
 # in _cron_deliver, mission_tick in ChatService._maybe_tick_missions (car 3:
-# one emission per active mission per mission-leg tick). `checkpoint` is
-# deliberately NOT in the list: snapshots happen inside the tool layer (not
-# this car's partition), and a restore-only hook would be misleading — see
-# docs/features/event_hooks.md.
+# one emission per active mission per mission-leg tick), fleet at the receipt
+# point of any turn that dispatched sub-agent clones (need-B P0).
+# `checkpoint` is deliberately NOT in the list: snapshots happen inside the
+# tool layer (not a lifecycle point), and a restore-only hook would be
+# misleading — see docs/features/event_hooks.md.
 EVENTS = ("turn_start", "turn_end", "tool_call", "compact", "cron_fire",
-          "error", "mission_tick")
+          "error", "mission_tick", "fleet")
 
 DEFAULT_TIMEOUT = 5
 MIN_TIMEOUT = 1

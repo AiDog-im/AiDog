@@ -28,11 +28,14 @@ Stdlib only; English comments (repo i18n policy).
 from __future__ import annotations
 
 import json
+import secrets
+import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from .loop import run_turn
 from .tools import ToolError, ToolRegistry
+from . import fleet
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile settings)
 
 MAX_PARALLEL = 3                    # alignment target: 3 parallel slots
@@ -112,37 +115,91 @@ def _limits() -> tuple[int, int]:
 
 def _one(task: str, idx: int, total: int, sub_registry: ToolRegistry,
          chat: Callable[..., dict], budget: int | None,
-         model: str | None = None, max_iters: int = SUB_MAX_ITERS) -> str:
-    """Run one sub-agent turn. Never raises; every outcome is a labelled
-    block so the parent sees exactly which task produced what. `model`
-    (validated against the settings whitelist by the caller) overrides the
-    model NAME only — the wrapped callable injects `model=` into the same
-    chat connection, so base URL and credentials stay the turn's own."""
+         model: str | None = None, max_iters: int = SUB_MAX_ITERS,
+         should_stop: Callable[[], bool] | None = None,
+         run_deadline: float | None = None) -> dict:
+    """Run one sub-agent turn. Never raises; every outcome is structured.
+    The provider's usage block is captured from the existing chat response;
+    no extra model call is made."""
+    import time
     messages = [{"role": "system", "content": SYSTEM_LINE},
                 {"role": "user", "content": task}]
-    if model:
-        base = chat
+    usage = {"in_tok": None, "out_tok": None, "complete": True}
+    base = chat
 
-        def chat(**kw):  # noqa: E306 — deliberate keyword-only override
+    def counted_chat(**kw):
+        doc = base(**kw)
+        block = doc.get("usage") if isinstance(doc, dict) else None
+        if isinstance(block, dict):
+            in_value = next((block[k] for k in ("prompt_tokens", "input_tokens")
+                             if type(block.get(k)) is int), None)
+            out_value = next((block[k] for k in ("completion_tokens", "output_tokens")
+                              if type(block.get(k)) is int), None)
+            if in_value is None or out_value is None:
+                usage["complete"] = False
+            if in_value is not None:
+                usage["in_tok"] = (usage["in_tok"] or 0) + max(0, in_value)
+            if out_value is not None:
+                usage["out_tok"] = (usage["out_tok"] or 0) + max(0, out_value)
+        else:
+            usage["complete"] = False
+        return doc
+
+    def selected_chat(**kw):
+        if model:
             kw["model"] = model
-            return base(**kw)
+        return counted_chat(**kw)
+
+    started = time.time()
+    started_mono = time.monotonic()
     try:
-        res = run_turn(messages, chat, sub_registry,
-                       max_iters=max_iters, budget_chars=budget)
+        res = run_turn(messages, selected_chat, sub_registry,
+                       max_iters=max_iters, budget_chars=budget,
+                       should_stop=should_stop, run_deadline=run_deadline)
+        stop = res.stop
+        body = res.text.strip()
+        if stop == "final" and should_stop is not None:
+            try:
+                if should_stop():
+                    stop = "aborted"
+                    body = "[mycore: sub-agent stopped by the operator (STOP) after the active model call returned]"
+            except Exception:  # noqa: BLE001 — a broken observer is not success evidence
+                pass
+        if stop == "final" and run_deadline is not None \
+                and (time.monotonic() - started_mono) >= run_deadline:
+            stop = "deadline"
+            body = f"[mycore: sub-agent call returned after its {run_deadline:.1f}s deadline]"
+        if not body:
+            body = f"(no output; stopped: {stop})"
+        elif stop != "final" and not body.startswith("[mycore:"):
+            body += f"\n(stop: {stop})"
+        calls = res.tool_calls
+        error = ""
     except Exception as e:  # noqa: BLE001 — belt: run_turn never raises
-        return f"[{idx}/{total}] failed ({type(e).__name__})"
-    body = res.text.strip()
-    if not body:
-        body = f"(no output; stopped: {res.stop})"
-    elif res.stop != "final":
-        body += f"\n(stop: {res.stop})"
+        stop = "error"
+        body = f"failed ({type(e).__name__})"
+        calls = 0
+        error = type(e).__name__
     if len(body) > TASK_RESULT_CAP:
         body = body[:TASK_RESULT_CAP] + f"... [+{len(body) - TASK_RESULT_CAP} chars]"
-    return f"[{idx}/{total} · {res.stop} · {res.tool_calls} tool call(s)]\n{body}"
+    task_digest, excerpt, lint = fleet.task_excerpt(task)
+    row_model = model or "parent"
+    row = {"clone": f"c{idx}", "task_digest": task_digest,
+           "task_excerpt": excerpt, "lint": lint, "model": row_model,
+           "tools": list(sub_registry.names()), "stop": stop,
+           "tool_calls": calls,
+           "in_tok": usage["in_tok"] if usage["complete"] else None,
+           "out_tok": usage["out_tok"] if usage["complete"] else None,
+           "usage_complete": usage["complete"], "ts": started,
+           "ended": time.time(), "failure_class": error}
+    return {"text": f"[{idx}/{total} · {stop} · {calls} tool call(s)]\n{body}",
+            "row": row}
 
 
 def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
-              chat: Callable[..., dict] | None, budget: int | None) -> str:
+              chat: Callable[..., dict] | None, budget: int | None, *,
+              should_stop: Callable[[], bool] | None = None,
+              run_deadline: float | None = None) -> str:
     """Validate + fan out up to MAX_PARALLEL tasks in parallel, fold the
     results. Raises ToolError for caller mistakes (validation), never for a
     sub-agent's runtime outcome. A task entry is a plain string or an object
@@ -200,16 +257,66 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
                        "fallback")
         plan.append((i, text, model, why))
     total = len(clean)
+    fleet_id = f"f{int(time.time())}{__import__('secrets').token_hex(2)}"
+    # budget_chars is a context-compaction threshold, not a spend cap. Split
+    # the parent's threshold across clones so a fan-out cannot multiply it.
+    clone_budget = max(1, budget // total) if budget else None
+    remaining = max(0.0, run_deadline) if run_deadline is not None else None
+    launch = time.monotonic()
+    rows: list[dict | None] = [None] * total
 
     def _run(item: tuple[int, str, str | None, str | None]) -> str:
         i, text, model, why = item
         if why:
+            row = {"clone": f"c{i}", "task_digest": fleet.digest(text),
+                   "task_excerpt": "", "lint": "", "model": "unavailable",
+                   "tools": list(sub_registry.names()), "stop": "error",
+                   "tool_calls": 0, "in_tok": None, "out_tok": None,
+                   "ts": time.time(), "ended": time.time(),
+                   "failure_class": "model_not_allowed"}
+            rows[i - 1] = row
             return f"[{i}/{total}] error: {why}"
-        return _one(text, i, total, sub_registry, chat, budget, model,
-                    max_iters=max_iters)
+        deadline = None
+        if remaining is not None:
+            deadline = remaining - (time.monotonic() - launch)
+        if deadline is not None and deadline <= 0:
+            task_digest, excerpt, lint = fleet.task_excerpt(text)
+            rows[i - 1] = {"clone": f"c{i}", "task_digest": task_digest,
+                           "task_excerpt": excerpt, "lint": lint,
+                           "model": model or "parent",
+                           "tools": list(sub_registry.names()),
+                           "stop": "deadline", "tool_calls": 0,
+                           "in_tok": None, "out_tok": None,
+                           "ts": time.time(), "ended": time.time(),
+                           "failure_class": "run_deadline"}
+            return (f"[{i}/{total} · deadline · 0 tool call(s)]\\n"
+                    "[mycore: sub-agent was not started because the parent "
+                    "turn deadline had elapsed]")
+        result = _one(text, i, total, sub_registry, chat, clone_budget, model,
+                      max_iters=max_iters, should_stop=should_stop,
+                      run_deadline=deadline)
+        rows[i - 1] = result["row"]
+        return result["text"]
 
     if total == 1:
-        return _run(plan[0])
-    with ThreadPoolExecutor(max_workers=min(max_parallel, total)) as pool:
-        parts = list(pool.map(_run, plan))
+        parts = [_run(plan[0])]
+    else:
+        with ThreadPoolExecutor(max_workers=min(max_parallel, total)) as pool:
+            parts = list(pool.map(_run, plan))
+    for i, row in enumerate(rows):
+        if row is None:
+            text = clean[i][0]
+            task_digest, excerpt, lint = fleet.task_excerpt(text)
+            rows[i] = {"clone": f"c{i + 1}", "task_digest": task_digest,
+                       "task_excerpt": excerpt, "lint": lint,
+                       "model": clean[i][1] or "parent",
+                       "tools": list(sub_registry.names()), "stop": "error",
+                       "tool_calls": 0, "in_tok": None, "out_tok": None,
+                       "ts": time.time(), "ended": time.time(),
+                       "failure_class": "worker_no_result"}
+    for row in rows:
+        if row is not None:
+            row["clone_total"] = total
+    parent_usage = registry.turn_usage()
+    fleet.note_fleet({"id": fleet_id, "clones": rows}, parent_usage)
     return "\n\n".join(parts)
