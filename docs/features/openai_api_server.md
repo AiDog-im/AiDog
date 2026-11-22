@@ -5,7 +5,7 @@ Status: shipped in car 4a (`web/server.py`). Read the companion page
 what this gateway can reach.
 
 The console exposes an OpenAI-shaped HTTP gateway so stock OpenAI clients
-(base URL `http://127.0.0.1:8790/v1`) can drive the same agent loop the
+(base URL `http://127.0.0.1:19167/v1`) can drive the same agent loop the
 console chat uses — one gateway, one loop, one tool registry.
 
 ## Endpoints

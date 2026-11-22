@@ -2,7 +2,7 @@
 
 An Electron shell around the **local** I'm AiDog web console:
 
-- **Main window** (1280x860) loads the local console at `http://127.0.0.1:8790/`
+- **Main window** (1280x860) loads the local console at `http://127.0.0.1:19167/`
   (port honors `AIDOG_WEB_PORT`).
 - **HUD window** (460x64, frameless, transparent, always-on-top, top-right)
   loads `/static/hud.html` -- opacity / pin / click-through controls.

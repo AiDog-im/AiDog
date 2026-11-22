@@ -8,7 +8,7 @@ not an aidog.im clone).
 ## Run
 
 ```bash
-python3 web/server.py            # http://127.0.0.1:8790/  (loopback only)
+python3 web/server.py            # http://127.0.0.1:19167/  (loopback only)
 AIDOG_WEB_PORT=9000 python3 web/server.py   # custom port
 ```
 
