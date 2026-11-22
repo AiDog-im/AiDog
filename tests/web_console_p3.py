@@ -1577,6 +1577,103 @@ def main() -> int:
               and _sn.get("rules") == [] and _sn.get("interval_s") == 300,
               str(_sn)[:240])
 
+    # --- PIPELINE car: the acquisition board (read model + gate surface) ---
+    s, board = get("/api/pipeline")
+    check("GET /api/pipeline read model shape",
+          s == 200 and isinstance(board, dict) and board.get("ok") is True
+          and board.get("enabled") is False          # kill switch ships OFF
+          and board.get("daily_cap") == 5
+          and board.get("interval_min") == 60
+          and board.get("qualify_min") == 50
+          and board.get("stages") == ["source", "qualify", "draft", "approve",
+                                      "send", "track"]
+          and isinstance(board.get("counts"), dict)
+          and isinstance(board.get("leads"), list)
+          and isinstance(board.get("drafts"), list)
+          and isinstance(board.get("replies"), list)
+          and isinstance(board.get("events"), list),
+          f"got {s} {str(board)[:260]}")
+    _route = board.get("email_route") if isinstance(board, dict) else None
+    check("GET /api/pipeline reports the email route readiness honestly",
+          isinstance(_route, dict)
+          and set(_route) == {"enabled", "configured", "note"}
+          and isinstance(_route.get("enabled"), bool)
+          and isinstance(_route.get("configured"), bool),
+          str(_route)[:200])
+    _counts = board.get("counts") if isinstance(board, dict) else {}
+    check("GET /api/pipeline counters are record counts, not prose",
+          isinstance(_counts, dict)
+          and set(_counts) >= {"leads", "qualified", "drafted", "approved",
+                               "sent", "sends_today"}
+          and all(isinstance(v, int) and not isinstance(v, bool)
+                  for v in _counts.values()), str(_counts)[:200])
+    check("GET /api/pipeline carries no credential material",
+          "Bearer " not in json.dumps(board)
+          and "secrets.env" not in json.dumps(board), str(board)[:200])
+    s, body = post("/api/pipeline", {"action": "run"}, None)
+    check("POST /api/pipeline without token -> 401", s == 401, f"got {s}")
+    if token:
+        s, body = post("/api/pipeline", {"action": "bogus"}, token)
+        check("POST /api/pipeline bad action -> 400 + closed enum",
+              s == 400 and isinstance(body, dict)
+              and "details" in body, f"got {s} {body}")
+        s, body = post("/api/pipeline",
+                       {"action": "lead.add", "name": "x",
+                        "email": "not-an-address"}, token)
+        check("POST /api/pipeline refuses an invalid address -> 400",
+              s == 400 and "invalid email" in str(body), f"got {s} {body}")
+        s, body = post("/api/pipeline",
+                       {"action": "draft.send", "id": "D9999"}, token)
+        check("POST /api/pipeline draft.send on an unknown draft -> 400",
+              s == 400 and "unknown draft" in str(body), f"got {s} {body}")
+        # settings partition: bounded fields, one line each, partial patches
+        s, st = get("/api/settings")
+        _pl = st.get("pipeline") if isinstance(st, dict) else None
+        check("GET settings always carries the pipeline partition",
+              s == 200 and isinstance(_pl, dict)
+              and _pl.get("enabled") is False and _pl.get("daily_cap") == 5
+              and _pl.get("interval_min") == 60
+              and _pl.get("physical_address") == "", str(_pl)[:240])
+        s, body = post("/api/settings",
+                       {"pipeline": {"enabled": True, "daily_cap": 3,
+                                     "interval_min": 30,
+                                     "from_name": "Smoke",
+                                     "physical_address": "1 Test Street"}},
+                       token)
+        check("POST settings pipeline valid partition -> 200", s == 200,
+              f"got {s} {str(body)[:200]}")
+        s, st = get("/api/settings")
+        _pl = st.get("pipeline") if isinstance(st, dict) else {}
+        check("GET settings echoes the pipeline partition",
+              s == 200 and _pl.get("enabled") is True
+              and _pl.get("daily_cap") == 3 and _pl.get("interval_min") == 30
+              and _pl.get("physical_address") == "1 Test Street",
+              str(_pl)[:240])
+        s, body = post("/api/settings", {"pipeline": {"daily_cap": 500}}, token)
+        check("POST settings pipeline cap out of range -> 400", s == 400
+              and "daily_cap" in str(body), f"got {s} {body}")
+        s, body = post("/api/settings",
+                       {"pipeline": {"physical_address": "a\nb"}}, token)
+        check("POST settings pipeline multi-line text -> 400", s == 400
+              and "one line" in str(body), f"got {s} {body}")
+        s, body = post("/api/settings", {"pipeline": {"enabled": "yes"}}, token)
+        check("POST settings pipeline non-boolean switch -> 400", s == 400
+              and "must be a boolean" in str(body), f"got {s} {body}")
+        # leave settings as found: the documented fail-closed partition
+        s, body = post("/api/settings",
+                       {"pipeline": {"enabled": False, "auto_source": False,
+                                     "interval_min": 60, "daily_cap": 5,
+                                     "from_name": "",
+                                     "physical_address": "",
+                                     "opt_out_note": ""}}, token)
+        check("pipeline leg cleanup -> 200", s == 200, f"got {s} {body}")
+        s, st = get("/api/settings")
+        _pl = st.get("pipeline") if isinstance(st, dict) else {}
+        check("cleanup verified: pipeline back to the fail-closed default",
+              s == 200 and _pl.get("enabled") is False
+              and _pl.get("daily_cap") == 5 and _pl.get("physical_address") == "",
+              str(_pl)[:240])
+
     # --- SNIFF board API: read model + the two write actions ---------------
     s, board = get("/api/sniff")
     check("GET /api/sniff read model shape (read-only board)",

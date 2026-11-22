@@ -394,7 +394,7 @@ sys.path.insert(0, str(REPO))
 from lib import i18n  # noqa: E402
 from lib import profile_paths  # noqa: E402  (car F §13.1: per-profile path seams)
 from lib import skill_route  # noqa: E402  (car H §3.2: gallery roots follow the router's ladder)
-from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, ledger, mission, mcp, modeltier, security, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
+from mycore import bridge, checkpoint, cli, decision, evolution, hooks, leash, ledger, mission, mcp, modeltier, pipeline, security, sniff, terminal  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore import secrets_store  # noqa: E402  (E2: secrets.env at-rest state)
 from mycore.assembly import (build_system_stack,  # noqa: E402
@@ -681,12 +681,19 @@ DEFAULT_SETTINGS: dict = {
     # `commands` absent = publish all 11 BOT_COMMANDS. The service reads the
     # LIVE file once at poll-loop start; enabled=false clears the menu there.
     "botmenu": {"enabled": True},
+    # Pipeline car (owner concept: acquiring customers automatically): a copy
+    # of mycore.pipeline.DEFAULT_SETTINGS — that constant stays the source of
+    # truth and the block is always present so the console renders the controls
+    # without an absence check. Shipped OFF: the kill switch is the default, and
+    # `physical_address` must be filled before any message may be sent.
+    "pipeline": dict(pipeline.DEFAULT_SETTINGS),
 }
 ALLOWED_TOP = ("language", "refresh_sec", "sound", "voice_volume",
                "alert_preview", "currency", "fx_rate", "mycore", "usage",
                "evolution", "channels", "hooks", "media", "web3", "mission",
                "bridge", "guardrails", "obedience", "ledger", "extensions",
-               "skills", "outbound_proxy", "region", "botmenu")
+               "skills", "outbound_proxy", "region", "botmenu",
+               "pipeline")
 # Car I: the only legal region.code values (explicit owner choice, never a
 # detected value — see the DEFAULT_SETTINGS note).
 REGION_CODES = ("global", "cn")
@@ -696,6 +703,10 @@ MYCORE_KEYS = ("base_url", "model", "context_dirs", "upstreams", "mcp", "shell",
                "reasoning_effort", "endpoints", "rotation", "max_rpm",
                "max_tpm", "sniff", "decision", "subagent", "timeout",
                "max_tokens", "run_deadline", "allowed_roots")
+# Pipeline car: the six writable fields of the acquisition-pipeline controls
+# card (mycore.pipeline.py owns the bounds; this tuple owns the field set).
+PIPELINE_KEYS = ("enabled", "auto_source", "interval_min", "daily_cap",
+                 "from_name", "physical_address", "opt_out_note")
 # Car 4 (D6): fields the mycore.decision block accepts — the key slot is NOT
 # one of them (see the DEFAULT_SETTINGS note).
 DECISION_KEYS = ("enabled", "url", "model", "router_model")
@@ -1603,6 +1614,56 @@ def validate_settings_patch(patch) -> tuple[dict, list[str]]:
                         clean_bm["commands"] = list(cmds)
             if clean_bm:
                 clean["botmenu"] = clean_bm
+    if "pipeline" in patch:
+        # Pipeline car: {enabled, auto_source, interval_min, daily_cap,
+        # from_name, physical_address, opt_out_note}. Partial patches are
+        # legal (it is a controls card, not an all-or-nothing cap pair); every
+        # field is bounded and a text field is one line — a newline would be a
+        # header/body injection vector in an outbound message.
+        pl_block = patch["pipeline"]
+        if not isinstance(pl_block, dict):
+            errors.append("pipeline must be an object")
+        else:
+            before_pl = len(errors)
+            clean_pl: dict = {}
+            for key in pl_block:
+                if key not in PIPELINE_KEYS:
+                    errors.append(f"unknown pipeline key: {key}")
+                    continue
+                val = pl_block[key]
+                if key in ("enabled", "auto_source"):
+                    if isinstance(val, bool):
+                        clean_pl[key] = val
+                    else:
+                        errors.append(f"pipeline.{key} must be a boolean")
+                    continue
+                if key == "interval_min":
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not pipeline.ENABLED_MIN <= val <= pipeline.ENABLED_MAX:
+                        errors.append("pipeline.interval_min must be an integer in "
+                                      f"{pipeline.ENABLED_MIN}..{pipeline.ENABLED_MAX}")
+                        continue
+                    clean_pl[key] = val
+                    continue
+                if key == "daily_cap":
+                    if isinstance(val, bool) or not isinstance(val, int) \
+                            or not pipeline.CAP_MIN <= val <= pipeline.CAP_MAX:
+                        errors.append("pipeline.daily_cap must be an integer in "
+                                      f"{pipeline.CAP_MIN}..{pipeline.CAP_MAX}")
+                        continue
+                    clean_pl[key] = val
+                    continue
+                cap = {"from_name": pipeline.FROM_NAME_MAX,
+                       "physical_address": pipeline.ADDRESS_MAX,
+                       "opt_out_note": pipeline.OPT_OUT_MAX}[key]
+                if not isinstance(val, str) or len(val) > cap \
+                        or "\x00" in val or "\n" in val or "\r" in val:
+                    errors.append(f"pipeline.{key} must be one line of at most "
+                                  f"{cap} chars")
+                    continue
+                clean_pl[key] = val
+            if clean_pl and len(errors) == before_pl:
+                clean["pipeline"] = clean_pl
     if "mycore" in patch:
         mc = patch["mycore"]
         if not isinstance(mc, dict):
@@ -5996,6 +6057,43 @@ def collect_sniff() -> dict:
     }
 
 
+def collect_pipeline() -> dict:
+    """GET /api/pipeline — the acquisition pipeline read model (loopback, no
+    auth, same contract as GET /api/sniff / /api/mission).
+
+    Everything here is derived from the pipeline document and the settings
+    block: the counters are record counts, the event feed is the document's own
+    tail, and the route readiness row is what GET /api/channels already
+    reports. No credential material (slot names only), and no mailbox bodies —
+    mycore.pipeline bounds a reply to sender + subject + a 200-char excerpt.
+
+    An unreadable state file is NOT an error here: mycore.pipeline.load()
+    collapses it to an empty pipeline (the honest "nothing recorded yet"
+    state), which is exactly what the view renders."""
+    try:
+        settings = load_settings()
+    except Exception as e:  # noqa: BLE001 — the view must always answer
+        return {"ok": False,
+                "note": f"settings unreadable ({type(e).__name__})"}
+    try:
+        view = pipeline.collect(settings)
+    except Exception as e:  # noqa: BLE001 — honest degradation, no internals
+        return {"ok": False,
+                "note": f"pipeline state unreadable ({type(e).__name__})"}
+    route = {"enabled": False, "configured": False,
+             "note": "channel module unavailable"}
+    try:
+        from mycore import channels as _channels
+        for row in _channels.status(settings, REPO):
+            if isinstance(row, dict) and row.get("name") == "email":
+                route = {k: row.get(k) for k in ("enabled", "configured", "note")}
+                break
+    except Exception as e:  # noqa: BLE001 — never take the view down
+        route["note"] = f"route status unavailable ({type(e).__name__})"
+    view["email_route"] = route
+    return view
+
+
 # ------------------------------------- activation & operations (0.5.40) ----
 
 def _http_answered(url: str, timeout: float = 1.0) -> bool:
@@ -7246,6 +7344,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(collect_mission())
         if path == "/api/sniff":
             return self._json(collect_sniff())
+        if path == "/api/pipeline":
+            return self._json(collect_pipeline())
         if path == "/api/bridge/status":
             return self._json(collect_bridge_status())
         if path == "/api/bridge/template":
@@ -7337,6 +7437,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._handle_mission_post()
         if path == "/api/sniff":
             return self._handle_sniff_post()
+        if path == "/api/pipeline":
+            return self._handle_pipeline_post()
         if path == "/api/service/restart":
             return self._handle_service_restart()
         if path == "/api/recovery/watchdog/retry":
@@ -8716,6 +8818,137 @@ class Handler(BaseHTTPRequestHandler):
         return self._json({"error": "validation failed",
                            "details": ["action must be one of: sweep|ack"]},
                           400)
+
+    def _handle_pipeline_post(self) -> None:
+        """POST /api/pipeline {action, ...} — Bearer gate (the settings write's
+        contract). The acquisition pipeline's write face:
+
+          run                 one automatic pass (source/qualify/draft, NEVER sends)
+          source.discussions  collect our own public forum threads as leads
+          lead.add            {name, email, org, signal}
+          lead.import         {text} — one `name <addr> | org | signal` per line
+          lead.qualify        score every new lead
+          lead.suppress       {email} — permanent, honored before any draft
+          draft.make          draft for every qualified lead with an address
+          draft.edit          {id, subject, body}
+          draft.approve       {id, send?} — `send: true` approves AND sends once
+          draft.reject        {id, reason?}
+          draft.send          {id} — the ONLY send path (every gate re-checked)
+          reply.handle        {id} — mark a triaged reply reviewed
+
+        Sending is never implicit: `draft.send` is the only action that can put
+        a message on the wire, `draft.approve` only when the caller passes
+        `send: true`, and every refusal comes back as an honest reason string."""
+        if not self._require_token():
+            return
+        doc = self._read_json_body()
+        if doc is None:
+            return
+        action = doc.get("action")
+        if not isinstance(action, str) or not action:
+            return self._json({"error": "validation failed",
+                               "details": ["action is required"]}, 400)
+        try:
+            settings = load_settings()
+        except Exception as e:  # noqa: BLE001
+            return self._json({"error": f"settings unavailable: "
+                                       f"{type(e).__name__}"}, 500)
+        # ONE read-modify-write at a time (auditor P2-1): the console
+        # server is a ThreadingHTTPServer and the service leg is a second
+        # process — the lock spans load -> mutate -> send -> save so two
+        # concurrent sends can never both pass the daily-cap check.
+        with pipeline.mutation_lock():
+            state = pipeline.load()
+            payload: dict = {}
+            try:
+                if action == "run":
+                    payload["report"] = pipeline.auto_tick(state, settings)
+                elif action == "source.discussions":
+                    payload["report"] = pipeline.source_discussions(state)
+                elif action == "lead.add":
+                    lead = pipeline.add_lead(
+                        state, name=doc.get("name"), email=doc.get("email"),
+                        org=doc.get("org"), signal=doc.get("signal"))
+                    payload["lead"] = lead
+                elif action == "lead.import":
+                    if not isinstance(doc.get("text"), str):
+                        raise pipeline.PipelineError("text is required")
+                    payload["report"] = pipeline.import_leads(state, doc["text"])
+                elif action == "lead.qualify":
+                    payload["qualified"] = pipeline.qualify_all(state)
+                elif action == "lead.suppress":
+                    payload["suppressed"] = pipeline.suppress(
+                        state, doc.get("email"), note="owner decision")
+                elif action == "draft.make":
+                    payload["drafted"] = pipeline.draft_ready(state, settings)
+                elif action == "draft.edit":
+                    payload["draft"] = pipeline.edit_draft(
+                        state, self._pipeline_id(doc), subject=doc.get("subject"),
+                        body=doc.get("body"))
+                elif action == "draft.approve":
+                    payload["draft"] = pipeline.approve(
+                        state, self._pipeline_id(doc))
+                elif action == "draft.reject":
+                    payload["draft"] = pipeline.reject(
+                        state, self._pipeline_id(doc), reason=doc.get("reason"))
+                elif action == "draft.send":
+                    draft_id = self._pipeline_id(doc)
+                    pipeline.require_draft(state, draft_id)   # unknown id -> 400
+                    route = self._pipeline_channel(settings)
+                    payload["send"] = pipeline.send_approved(
+                        state, draft_id, settings, route)
+                elif action == "reply.handle":
+                    payload["reply"] = pipeline.handle_reply(
+                        state, self._pipeline_id(doc))
+                else:
+                    return self._json(
+                        {"error": "validation failed",
+                         "details": ["unknown action"]}, 400)
+            except pipeline.PipelineError as e:
+                return self._json({"error": "validation failed",
+                                   "details": [str(e)]}, 400)
+            except OSError as e:              # unwritable state = honest 500
+                return self._json(
+                    {"error": f"persist failed: {type(e).__name__}"}, 500)
+            try:
+                pipeline.save(state)
+            except OSError as e:              # noqa: BLE001
+                return self._json(
+                    {"error": f"persist failed: {type(e).__name__}"}, 500)
+            out = {"ok": True, **payload}
+            if action == "draft.approve" and doc.get("send") is True:
+                route = self._pipeline_channel(settings)
+                draft_id = (payload.get("draft") or {}).get("id") or ""
+                out["send"] = pipeline.send_approved(state, draft_id, settings,
+                                                     route)
+                try:
+                    pipeline.save(state)
+                except OSError as e:          # noqa: BLE001
+                    return self._json(
+                        {"error": f"persist failed: {type(e).__name__}"}, 500)
+            out["pipeline"] = collect_pipeline()
+            return self._json(out)
+
+    @staticmethod
+    def _pipeline_id(doc: dict) -> str:
+        """The `id` of a pipeline row, validated as the short opaque token the
+        module issues (L1/D1/R1 …) — a missing or malformed id is a 400, never
+        an empty-string lookup."""
+        value = doc.get("id")
+        if not isinstance(value, str) or not value or len(value) > 16:
+            raise pipeline.PipelineError("id is required")
+        return value
+
+    @staticmethod
+    def _pipeline_channel(settings: dict):
+        """The email route adapter, or None when the channel module cannot be
+        loaded (mycore.pipeline then refuses with an honest reason instead of
+        raising). Built per call so a settings edit applies immediately."""
+        try:
+            from mycore import channels as _channels
+            return _channels.load_channels(REPO, settings).get("email")
+        except Exception:  # noqa: BLE001 — the send path reports the gap
+            return None
 
     def _require_token(self) -> bool:
         """Bearer WEB_TOKEN gate (same contract as the settings write). The

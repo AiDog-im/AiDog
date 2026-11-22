@@ -1,0 +1,50 @@
+name: Private offline quality
+on:
+  push:
+    branches: [main, dev]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: private-quality-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  offline:
+    if: github.repository == 'AiDog-im/aidog-internal'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Source and locale checks
+        run: python3 tests/source_lang_check.py
+      - name: Prepare isolated test settings and speech models
+        run: |
+          python3 -m pip install faster-whisper
+          python3 - <<'PY'
+          import json
+          from pathlib import Path
+          from huggingface_hub import snapshot_download
+          Path('web/settings.json').write_text(json.dumps({'mycore': {'model': 'ci-fixture'}}))
+          for size in ('tiny', 'base'):
+              snapshot_download('Systran/faster-whisper-' + size)
+          PY
+      - name: Core suite with prepared local speech models
+        env:
+          HF_HUB_OFFLINE: '1'
+        run: python3 -m mycore.tests.run
+      - name: Deployment and usage regressions
+        run: |
+          python3 tests/deploy_site_cf.py
+          python3 tests/free_tier_usage.py
+          node tests/bridge_redirect.mjs
+# Publish READY remains an operator-local gate: it verifies vault remote,
+# pre-push hooks and sanitized export structure absent in a fresh CI checkout.
+# This workflow never pushes, publishes, uploads artifacts or reads secrets.

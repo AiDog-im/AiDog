@@ -13,7 +13,8 @@
 # public charts and counters. See docs/design/usage_ledger_design.md.
 #
 # Credential slots (secrets.env, values never echoed):
-#   AIDOG_CF_API_TOKEN   Pages edit + zone read (wrangler + Pages domains API)
+#   AIDOG_CF_API_TOKEN   Pages edit + zone read + Cache Purge
+#                        (wrangler + Pages domains API + post-deploy purge)
 #   AIDOG_CF_DNS_TOKEN   zone DNS read/write (record ensure)
 #   AIDOG_CF_ACCOUNT_ID / AIDOG_CF_ZONE_ID
 set -euo pipefail
@@ -58,6 +59,49 @@ cfjson() { # cfjson METHOD URL [token] [body]
     curl -s --noproxy '*' --max-time 20 -X "$method" \
       -H "Authorization: Bearer $token" "$url"
   fi
+}
+
+# Purge after upload/domain setup, before public verification. Keep credentials
+# in the child environment and never print API response bodies or exceptions.
+# HTTP 200 alone is insufficient: Cloudflare can return success:false in JSON.
+cf_purge_cache() {
+  python3 - <<'PYPURGE'
+import json, os, sys, time, urllib.error, urllib.request
+
+url = "https://api.cloudflare.com/client/v4/zones/" + os.environ["AIDOG_CF_ZONE_ID"] + "/purge_cache"
+request = urllib.request.Request(
+    url, data=b'{"purge_everything":true}', method="POST",
+    headers={"Authorization": "Bearer " + os.environ["AIDOG_CF_API_TOKEN"],
+             "Content-Type": "application/json"})
+# Match the direct connection used by the other Cloudflare operations.
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+for attempt in range(3):
+    retryable = False
+    try:
+        with opener.open(request, timeout=20) as response:
+            status = response.status
+            raw = response.read()
+        if not 200 <= status < 300:
+            retryable = status == 429 or status >= 500
+        else:
+            payload = json.loads(raw)
+            result = payload.get("result") if isinstance(payload, dict) else None
+            if (isinstance(payload, dict) and payload.get("success") is True
+                    and payload.get("errors") == [] and isinstance(result, dict)
+                    and isinstance(result.get("id"), str) and result["id"].strip()):
+                print("DEPLOY_SITE: Cloudflare zone cache purge confirmed")
+                sys.exit(0)
+    except urllib.error.HTTPError as error:
+        retryable = error.code == 429 or error.code >= 500
+    except (urllib.error.URLError, OSError):
+        retryable = True
+    except (ValueError, TypeError):
+        pass
+    if not retryable or attempt == 2:
+        print("DEPLOY_SITE: cache purge failed or was not confirmed; check token Cache Purge permission and Cloudflare status", file=sys.stderr)
+        sys.exit(1)
+    time.sleep(attempt + 1)
+PYPURGE
 }
 
 if [ "$CHECK_ONLY" -eq 0 ]; then
@@ -308,6 +352,9 @@ print(f"DEPLOY_SITE: dns created {name} -> {target} -> {d.get('success')}")
 sys.exit(0 if d.get("success") else 1)
 PY
   done
+
+  # ---- 3b) invalidate cached content after a successful deployment --------
+  cf_purge_cache || die "post-deploy cache purge failed"
 fi
 
 # ---- 4) verify public endpoints -------------------------------------------
@@ -361,7 +408,7 @@ if grep -q "## Product" /tmp/deploy_site_llms.txt \
    && grep -q "nine venues" /tmp/deploy_site_llms.txt \
    && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
    && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
-   && grep -q "2494/2494" /tmp/deploy_site_llms.txt \
+   && grep -q "2574/2574" /tmp/deploy_site_llms.txt \
    && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else

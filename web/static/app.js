@@ -10003,8 +10003,8 @@ async function commSendReply(num) {
 /* All ten views live in the same document; the inactive ones are hidden with
    CSS, so every poller keeps writing into real DOM and ids stay stable.
    ?view=<name> deep-links the active view (default: overview). */
-const VIEWS = ["overview", "chat", "skills", "exchange", "evolution", "stream",
-               "community", "sniff", "help", "settings"];
+const VIEWS = ["overview", "chat", "skills", "pipeline", "exchange", "evolution",
+               "stream", "community", "sniff", "help", "settings"];
 const QS_VIEW = (params.get("view") || "").toLowerCase();
 let currentView = VIEWS.includes(QS_VIEW) ? QS_VIEW : "overview";
 
@@ -11023,6 +11023,452 @@ function setView(name, fromUser) {
   // SNIFF car: the SENSE board lazy-loads on the same rule — first open, then
   // only on a user nav click (the sweep state changes server-side anyway).
   if (name === "sniff" && (fromUser || !sniffData)) refreshSniff();
+  // PIPELINE car: the acquisition board lazy-loads on the same rule — first
+  // open, then only on a user nav click (the stages change server-side).
+  if (name === "pipeline" && (fromUser || !pipeData)) refreshPipeline();
+}
+
+/* ======================== PIPELINE car: acquisition pipeline ==============
+   Owner concept (2026-11-09): acquire customers automatically. This view is the
+   honest half of that ask — the six stages read GET /api/pipeline (our own
+   state), and the ONLY path to the wire is the owner's own click:
+     APPROVE  -> POST {action:"draft.approve"}
+     SEND     -> POST {action:"draft.send"}      (server re-checks every gate)
+   No counter here is invented: counts come from server records, and a stage
+   with nothing recorded renders the honest empty state, never a cheerful zero.
+   Controls write the `pipeline` settings partition through POST /api/settings
+   (the same Bearer path every other card uses). */
+let pipeData = null;    // GET /api/pipeline payload (null = never loaded)
+let pipeCfg = null;     // the stored `pipeline` settings partition
+
+function pipeNote(kind, text) {
+  const el = document.getElementById("pipeMsg");
+  if (!el) return;
+  el.textContent = text || "";
+  el.dataset.kind = kind || "";
+}
+
+async function refreshPipeline() {
+  try {
+    pipeData = await fetch("/api/pipeline").then(r => r.json());
+  } catch (e) { /* keep the last render */ }
+  if (!pipeCfg) await pipeCfgRefresh();
+  renderPipeline();
+}
+
+async function pipeCfgRefresh() {
+  try {
+    const doc = await fetch("/api/settings").then(r => r.json());
+    settings = Object.assign(settings, doc);
+    pipeCfg = settings.pipeline || {};
+  } catch (e) { pipeCfg = pipeCfg || {}; }
+  return pipeCfg;
+}
+
+function pipeAge(ts) {
+  const n = Number(ts) || 0;
+  if (!n) return "—";
+  const sec = Math.max(0, (Date.now() / 1000) - n);
+  if (sec < 60) return Math.round(sec) + "s";
+  if (sec < 3600) return Math.round(sec / 60) + "m";
+  if (sec < 86400) return Math.round(sec / 3600) + "h";
+  return Math.round(sec / 86400) + "d";
+}
+
+function pipeBadge(status) {
+  const map = {
+    new: "adv-info", qualified: "adv-info", drafted: "adv-warn",
+    contacted: "", replied: "adv-warn", suppressed: "adv-urgent",
+    skipped: "", draft: "adv-warn", approved: "adv-info",
+    rejected: "", sent: "", failed: "adv-urgent",
+    opt_out: "adv-urgent", interested: "adv-info", question: "adv-warn",
+    other: ""
+  };
+  const cls = map[String(status)] === undefined ? "" : map[String(status)];
+  const label = t("pipe.st." + String(status), String(status));
+  return `<span class="chip ${cls}">${escapeHtml(label)}</span>`;
+}
+
+function renderPipeline() {
+  if (!pipeData) return;
+  const d = pipeData;
+  if (d.ok === false) {                       // honest unreadable state
+    pipeNote("err", String(d.note || t("pipe.unavailable", "pipeline unavailable")));
+  }
+  const counts = d.counts || {};
+  const kill = document.getElementById("pipeKill");
+  if (kill) {
+    kill.setAttribute("aria-pressed", d.enabled === true ? "true" : "false");
+    kill.textContent = d.enabled === true
+      ? t("pipe.killOff", "PAUSE") : t("pipe.killOn", "TURN ON");
+  }
+  const off = document.getElementById("pipeOff");
+  if (off) off.hidden = d.enabled === true;
+
+  // --- the stage rail -----------------------------------------------------
+  const rail = document.getElementById("pipeStages");
+  if (rail) {
+    const stages = [
+      ["source", counts.leads || 0],
+      ["qualify", counts.qualified || 0],
+      ["draft", counts.drafted || 0],
+      ["approve", counts.approved || 0],
+      ["send", counts.sends_today || 0],
+      ["track", counts.replies || 0]
+    ];
+    rail.innerHTML = stages.map(([key, n], i) => `<div class="pipe-stage">
+      <span class="pipe-stage-name">${escapeHtml(t("pipe.stage." + key, key))}</span>
+      <span class="pipe-stage-n">${Number(n) || 0}</span>
+      ${i < stages.length - 1 ? '<span class="pipe-stage-arrow" aria-hidden="true">→</span>' : ""}
+    </div>`).join("");
+  }
+
+  // --- the send gate, stated with its facts -------------------------------
+  const gate = document.getElementById("pipeGate");
+  if (gate) {
+    const route = d.email_route || {};
+    const bits = [];
+    if (d.enabled !== true) bits.push(t("pipe.gate.off", "pipeline off — nothing can send"));
+    if (route.enabled !== true) bits.push(t("pipe.gate.routeOff", "email route disabled in settings"));
+    else if (route.configured !== true) bits.push(t("pipe.gate.routeCfg",
+      "email route not configured ({why})").replace("{why}", String(route.note || "—")));
+    if (d.physical_address_set !== true) bits.push(t("pipe.gate.address",
+      "postal address missing — a send is refused (CAN-SPAM)"));
+    bits.push(t("pipe.gate.cap", "{n} of {cap} sent today")
+      .replace("{n}", String(counts.sends_today || 0))
+      .replace("{cap}", String(d.daily_cap || 0)));
+    gate.hidden = false;
+    gate.textContent = bits.join(" · ");
+  }
+
+  // --- leads -------------------------------------------------------------
+  const leads = Array.isArray(d.leads) ? d.leads : [];
+  const leadCount = document.getElementById("pipeLeadCount");
+  if (leadCount) leadCount.textContent = String(Number(counts.leads) || 0);
+  const leadBox = document.getElementById("pipeLeads");
+  if (leadBox) {
+    leadBox.innerHTML = leads.length ? leads.map(l => {
+      const id = String(l.id || "");
+      const score = (l.score === null || l.score === undefined)
+        ? "—" : String(l.score);
+      const addr = l.email ? escapeHtml(String(l.email))
+        : `<span class="pipe-dim">${escapeHtml(t("pipe.noAddress", "no address"))}</span>`;
+      const why = l.reason ? `<div class="pipe-why">${escapeHtml(String(l.reason))}</div>` : "";
+      const sig = l.signal ? `<div class="pipe-sig">${escapeHtml(String(l.signal))}</div>` : "";
+      return `<div class="pipe-row">
+        <div class="pipe-row-main">
+          <span class="pipe-id">${escapeHtml(id)}</span>
+          <span class="pipe-name">${escapeHtml(String(l.name || "—"))}</span>
+          ${pipeBadge(l.status)}
+          <span class="pipe-score" title="${escapeHtml(String(l.reason || ""))}">${escapeHtml(score)}</span>
+          <span class="pipe-addr">${addr}</span>
+          <span class="pipe-src">${escapeHtml(String(l.source || ""))}</span>
+        </div>${sig}${why}
+      </div>`;
+    }).join("")
+      : `<div class="sniff-empty">${escapeHtml(t("pipe.leadsEmpty",
+          "no leads yet — add one, paste a list, or read your own forum"))}</div>`;
+  }
+
+  // --- approval queue ----------------------------------------------------
+  const drafts = Array.isArray(d.drafts) ? d.drafts : [];
+  const draftCount = document.getElementById("pipeDraftCount");
+  if (draftCount) draftCount.textContent = String(
+    (Number(counts.drafted) || 0) + (Number(counts.approved) || 0));
+  const draftBox = document.getElementById("pipeDrafts");
+  if (draftBox) {
+    const live = drafts.filter(x => ["draft", "approved", "failed"].includes(String(x.status)));
+    draftBox.innerHTML = live.length ? live.map(x => {
+      const id = String(x.id || "");
+      const status = String(x.status || "");
+      const canSend = status === "approved" || status === "failed";
+      const body = String(x.body || "");
+      return `<div class="pipe-draft" data-draft="${escapeHtml(id)}">
+        <div class="pipe-row-main">
+          <span class="pipe-id">${escapeHtml(id)}</span>
+          ${pipeBadge(status)}
+          <span class="pipe-who">${escapeHtml(String(x.subject || ""))}</span>
+          ${x.edited ? `<span class="pipe-dim">${escapeHtml(t("pipe.edited", "edited"))}</span>` : ""}
+        </div>
+        <textarea class="pipe-body" rows="4" data-draft-body="${escapeHtml(id)}">${escapeHtml(body)}</textarea>
+        <input class="pipe-subj" type="text" maxlength="140" value="${escapeHtml(String(x.subject || ""))}"
+               data-draft-subject="${escapeHtml(id)}" aria-label="${escapeHtml(t("pipe.subject", "Subject"))}">
+        <div class="ctl-actions">
+          <button class="btn tiny" type="button" data-pipe="draft-save" data-id="${escapeHtml(id)}">${escapeHtml(t("pipe.save", "SAVE"))}</button>
+          ${canSend ? `<button class="btn tiny primary" type="button" data-pipe="draft-send" data-id="${escapeHtml(id)}">${escapeHtml(t("pipe.send", "SEND"))}</button>`
+            : `<button class="btn tiny primary" type="button" data-pipe="draft-approve" data-id="${escapeHtml(id)}">${escapeHtml(t("pipe.approve", "APPROVE"))}</button>`}
+          <button class="btn tiny" type="button" data-pipe="draft-reject" data-id="${escapeHtml(id)}">${escapeHtml(t("pipe.reject", "REJECT"))}</button>
+        </div>
+        ${x.error ? `<div class="sniff-err">${escapeHtml(String(x.error))}</div>` : ""}
+      </div>`;
+    }).join("")
+      : `<div class="sniff-empty">${escapeHtml(t("pipe.draftsEmpty",
+          "nothing waiting — draft for every qualified lead with an address"))}</div>`;
+  }
+
+  // --- replies -----------------------------------------------------------
+  const replies = Array.isArray(d.replies) ? d.replies : [];
+  const replyCount = document.getElementById("pipeReplyCount");
+  if (replyCount) replyCount.textContent = String(Number(counts.replies) || 0);
+  const replyBox = document.getElementById("pipeReplies");
+  if (replyBox) {
+    replyBox.innerHTML = replies.length ? replies.map(r => {
+      const id = String(r.id || "");
+      return `<div class="pipe-row">
+        <div class="pipe-row-main">
+          <span class="pipe-id">${escapeHtml(id)}</span>
+          ${pipeBadge(r.cls)}
+          <span class="pipe-addr">${escapeHtml(String(r.from || ""))}</span>
+          <span class="pipe-when">${escapeHtml(pipeAge(r.ts))}</span>
+        </div>
+        <div class="pipe-sig">${escapeHtml(String(r.subject || ""))}</div>
+        <div class="pipe-why">${escapeHtml(String(r.excerpt || ""))}</div>
+        ${r.handled ? `<span class="pipe-dim">${escapeHtml(t("pipe.handled", "reviewed"))}</span>`
+          : `<div class="ctl-actions"><button class="btn tiny" type="button" data-pipe="reply-handle" data-id="${escapeHtml(id)}">${escapeHtml(t("pipe.markReviewed", "MARK REVIEWED"))}</button></div>`}
+      </div>`;
+    }).join("")
+      : `<div class="sniff-empty">${escapeHtml(t("pipe.repliesEmpty",
+          "no replies yet — inbound mail from a known lead lands here, classified, never auto-answered"))}</div>`;
+  }
+
+  // --- live feed ---------------------------------------------------------
+  const events = Array.isArray(d.events) ? d.events : [];
+  const evBox = document.getElementById("pipeEvents");
+  if (evBox) {
+    evBox.innerHTML = events.length ? events.map(e => `<div class="pipe-event">
+      <span class="pipe-when">${escapeHtml(pipeAge(e.ts))}</span>
+      <span class="pipe-stage-tag">${escapeHtml(t("pipe.stage." + String(e.stage), String(e.stage)))}</span>
+      <span class="pipe-id">${escapeHtml(String(e.lead || ""))}</span>
+      <span class="pipe-ev">${escapeHtml(String(e.note || ""))}</span>
+    </div>`).join("")
+      : `<div class="sniff-empty">${escapeHtml(t("pipe.eventsEmpty",
+          "nothing recorded yet — the feed updates as stages run"))}</div>`;
+  }
+
+  renderPipeControls();
+}
+
+function renderPipeControls() {
+  const cfg = pipeCfg || {};
+  const d = pipeData || {};
+  const set = (id, value) => { const el = document.getElementById(id); if (el) el.value = value; };
+  const chk = (id, on) => { const el = document.getElementById(id); if (el) el.checked = on === true; };
+  chk("pipeEnabled", d.enabled === true);
+  chk("pipeAuto", d.auto_source === true);
+  set("pipeInterval", String(Number(d.interval_min) || 60));
+  set("pipeCap", String(Number(d.daily_cap) || 5));
+  set("pipeFromName", String(d.from_name || cfg.from_name || ""));
+  set("pipeAddress", String(cfg.physical_address || ""));
+  set("pipeOptOut", String(cfg.opt_out_note || ""));
+}
+
+async function pipePost(payload, okText) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { pipeNote("err", t("save.needToken", "token required")); return null; }
+  try {
+    const res = await fetch("/api/pipeline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify(payload) });
+    const body = await res.json().catch(() => ({}));
+    if (res.status === 401) { pipeNote("err", badTokenText()); return null; }
+    if (!res.ok) {
+      const details = (body.details || [body.error || "error"])
+        .map(x => String(x)).join("; ");
+      pipeNote("err", details.slice(0, 160)); return null;
+    }
+    if (body.pipeline) pipeData = body.pipeline;
+    renderPipeline();
+    if (body.send && body.send.ok === false && body.send.reason) {
+      pipeNote("err", String(body.send.reason).slice(0, 160));
+    } else if (okText) {
+      pipeNote("ok", okText);
+    }
+    return body;
+  } catch (e) {
+    pipeNote("err", String(e).slice(0, 80));
+    return null;
+  }
+}
+
+async function pipeCfgWrite(mutate, okText) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  if (!token) { pipeNote("err", t("save.needToken", "token required")); return false; }
+  await pipeCfgRefresh();
+  const block = Object.assign({}, pipeCfg || {});
+  mutate(block);
+  try {
+    const res = await fetch("/api/settings", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ pipeline: block }) });
+    const body = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      const details = (body.details || [body.error || "error"])
+        .map(x => String(x)).join("; ");
+      pipeNote("err", details.slice(0, 160));
+      return false;
+    }
+    pipeCfg = block;
+    await refreshPipeline();
+    if (okText) pipeNote("ok", okText);
+    return true;
+  } catch (e) {
+    pipeNote("err", String(e).slice(0, 80));
+    return false;
+  }
+}
+
+function wirePipeline() {
+  const on = (id, fn) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", fn);
+  };
+  on("pipeRun", async () => {
+    const body = await pipePost({ action: "run" }, t("pipe.ran", "one pass done — nothing was sent"));
+    if (!body) return;
+    const rep = body.report || {};
+    if (rep.ok === false) pipeNote("err", String(rep.reason || "off"));
+  });
+  on("pipeKill", async () => {
+    const on_ = pipeData && pipeData.enabled === true;
+    await pipeCfgWrite(b => { b.enabled = !on_; },
+      on_ ? t("pipe.offText", "pipeline paused — nothing runs, nothing sends")
+          : t("pipe.onText", "pipeline on — sourcing, qualifying and drafting only"));
+  });
+  on("pipeSource", async () => {
+    const body = await pipePost({ action: "source.discussions" },
+      t("pipe.sourced", "forum read done"));
+    const rep = (body && body.report) || {};
+    if (rep.available === false && rep.note) pipeNote("err", String(rep.note));
+  });
+  on("pipeLeadNew", () => {
+    document.getElementById("pipeLeadForm").hidden = false;
+    document.getElementById("pipeLeadActions").hidden = true;
+  });
+  on("pipeLeadCancel", () => {
+    document.getElementById("pipeLeadForm").hidden = true;
+    document.getElementById("pipeLeadActions").hidden = false;
+  });
+  on("pipeImportNew", () => {
+    document.getElementById("pipeImportForm").hidden = false;
+    document.getElementById("pipeLeadActions").hidden = true;
+  });
+  on("pipeImportCancel", () => {
+    document.getElementById("pipeImportForm").hidden = true;
+    document.getElementById("pipeLeadActions").hidden = false;
+  });
+  on("pipeLeadAdd", async () => {
+    const val = id => { const el = document.getElementById(id); return el ? el.value.trim() : ""; };
+    const body = await pipePost({ action: "lead.add", name: val("pipeName"),
+      email: val("pipeEmail"), org: val("pipeOrg"), signal: val("pipeSignal") },
+      t("pipe.leadAdded", "lead added"));
+    if (!body) return;
+    ["pipeName", "pipeEmail", "pipeOrg", "pipeSignal"].forEach(id => {
+      const el = document.getElementById(id); if (el) el.value = "";
+    });
+    document.getElementById("pipeLeadForm").hidden = true;
+    document.getElementById("pipeLeadActions").hidden = false;
+  });
+  on("pipeImportAdd", async () => {
+    const el = document.getElementById("pipeImportText");
+    const text = el ? el.value : "";
+    if (!text.trim()) { pipeNote("err", t("pipe.importEmpty", "nothing to import")); return; }
+    const body = await pipePost({ action: "lead.import", text },
+      t("pipe.imported", "import finished"));
+    if (!body) return;
+    const rep = body.report || {};
+    if (el) el.value = "";
+    pipeNote(rep.errors && rep.errors.length ? "err" : "ok",
+      t("pipe.importResult", "imported {n}, refused {m}")
+        .replace("{n}", String(rep.added || 0))
+        .replace("{m}", String((rep.errors || []).length)));
+    document.getElementById("pipeImportForm").hidden = true;
+    document.getElementById("pipeLeadActions").hidden = false;
+  });
+  const howtoHead = document.getElementById("pipeHowtoHead");
+  if (howtoHead) howtoHead.addEventListener("click", () => {
+    const box = document.getElementById("pipeHowto");
+    if (!box) return;
+    box.dataset.touched = "1";
+    const open = box.classList.toggle("is-open");
+    howtoHead.setAttribute("aria-expanded", open ? "true" : "false");
+  });
+  // the controls card: one write per changed field (the card is the policy)
+  const num = (id, lo, hi, key, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", async () => {
+      const n = Math.min(hi, Math.max(lo, Math.round(Number(el.value) || lo)));
+      el.value = String(n);
+      await pipeCfgWrite(b => { b[key] = n; },
+        t("pipe.saved", "{what} saved").replace("{what}", label));
+    });
+  };
+  num("pipeInterval", 5, 1440, "interval_min", t("pipe.interval", "Interval"));
+  num("pipeCap", 1, 50, "daily_cap", t("pipe.cap", "Daily cap"));
+  const chk = (id, key, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", async () => {
+      await pipeCfgWrite(b => { b[key] = el.checked === true; },
+        t("pipe.saved", "{what} saved").replace("{what}", label));
+    });
+  };
+  chk("pipeEnabled", "enabled", t("pipe.enabled", "Pipeline on"));
+  chk("pipeAuto", "auto_source", t("pipe.auto", "Automatic forum read"));
+  const text = (id, key, label) => {
+    const el = document.getElementById(id);
+    if (!el) return;
+    el.addEventListener("change", async () => {
+      const val = el.value.trim();
+      await pipeCfgWrite(b => { b[key] = val; },
+        t("pipe.saved", "{what} saved").replace("{what}", label));
+    });
+  };
+  text("pipeFromName", "from_name", t("pipe.fromName", "Signature"));
+  text("pipeAddress", "physical_address", t("pipe.address", "Postal address"));
+  text("pipeOptOut", "opt_out_note", t("pipe.optOut", "Opt-out line"));
+  // delegated row actions (the lists re-render, so the handlers bind once)
+  const view = document.getElementById("view-pipeline");
+  if (view) view.addEventListener("click", async e => {
+    const btn = e.target.closest ? e.target.closest("[data-pipe]") : null;
+    if (!btn) return;
+    const id = btn.dataset.id || "";
+    const act = btn.dataset.pipe;
+    if (act === "draft-save") {
+      const box = document.querySelector(`[data-draft-body="${id}"]`);
+      const subj = document.querySelector(`[data-draft-subject="${id}"]`);
+      await pipePost({ action: "draft.edit", id,
+        body: box ? box.value : undefined,
+        subject: subj ? subj.value : undefined },
+        t("pipe.draftSaved", "draft saved"));
+      return;
+    }
+    if (act === "draft-approve") {
+      await pipePost({ action: "draft.approve", id },
+        t("pipe.approved", "approved — press SEND when you are ready"));
+      return;
+    }
+    if (act === "draft-send") {
+      const body = await pipePost({ action: "draft.send", id }, "");
+      if (body && body.send && body.send.ok === true) {
+        pipeNote("ok", t("pipe.sent", "sent — one message, after your click"));
+      }
+      return;
+    }
+    if (act === "draft-reject") {
+      await pipePost({ action: "draft.reject", id },
+        t("pipe.rejected", "rejected — nothing was sent"));
+      return;
+    }
+    if (act === "reply-handle") {
+      await pipePost({ action: "reply.handle", id },
+        t("pipe.replyHandled", "marked reviewed"));
+    }
+  });
 }
 
 /* --------------------------------------------------------- topbar height -- */
@@ -11073,6 +11519,9 @@ if (commCatEl) {
 /* SNIFF car: the SENSE board wires once — the row actions are delegated and
    the two composer forms toggle their own visibility. */
 wireSniff();
+/* PIPELINE car: the acquisition board wires once; actions are delegated and a
+   reload of the poller re-renders the same DOM nodes. */
+wirePipeline();
 document.getElementById("soundToggle").addEventListener("click", e => {
   const b = e.currentTarget;
   b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") !== "true");

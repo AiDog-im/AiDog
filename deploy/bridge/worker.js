@@ -117,7 +117,7 @@ export default {
     if (target.protocol !== "http:" && target.protocol !== "https:") {
       return refuse(400, "only http(s) targets are allowed");
     }
-    if (!hostAllowed(target.hostname)) {
+    if (target.username || target.password || !hostAllowed(target.hostname)) {
       return refuse(403, "target host is not on this Worker's allow-list");
     }
 
@@ -136,12 +136,32 @@ export default {
 
     let upstream;
     try {
-      upstream = await fetch(target.toString(), {
-        method: request.method,
-        headers,
-        redirect: "follow",
-        signal: AbortSignal.timeout(TIMEOUT_MS),
-      });
+      // Revalidate every redirect: following automatically bypasses ALLOW.
+      // Use one deadline across the whole redirect chain.
+      const signal = AbortSignal.timeout(TIMEOUT_MS);
+      for (let hop = 0; hop <= 5; hop += 1) {
+        upstream = await fetch(target.toString(), {
+          method: request.method,
+          headers,
+          redirect: "manual",
+          signal,
+        });
+        if (![301, 302, 303, 307, 308].includes(upstream.status)) break;
+        const location = upstream.headers.get("location");
+        if (!location) break;
+        if (upstream.body) await upstream.body.cancel();
+        const next = new URL(location, target);
+        if (!['http:', 'https:'].includes(next.protocol)
+            || next.username || next.password || !hostAllowed(next.hostname)) {
+          return refuse(403, "redirect target is not on this Worker's allow-list");
+        }
+        if (hop === 5) return refuse(502, "too many upstream redirects");
+        if (next.origin !== target.origin) {
+          headers.delete("authorization");
+          headers.delete("cookie");
+        }
+        target = next;
+      }
     } catch (e) {
       return refuse(502, "upstream unreachable: " + (e && e.name ? e.name : "error"));
     }
