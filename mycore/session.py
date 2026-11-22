@@ -758,6 +758,49 @@ def session_file(directory: str | Path, sid: str) -> Path:
     return _resolve_session_path(directory, sid)
 
 
+# ------------------------------------------- car C1 (A-2): rewind/fork ----
+def read_head(path: str | Path, keep: int) -> tuple[dict, list[dict]]:
+    """(meta, first `keep` messages) of a session file — the read half of
+    the car C1 rewind/fork primitives. Raises ValueError when `keep` is out
+    of range (caller maps that to an honest 400/404); corrupt lines are
+    skipped exactly like load() (they are garbage, never re-emitted)."""
+    s = Session(path)
+    msgs = s.load()
+    if not isinstance(keep, int) or isinstance(keep, bool) \
+            or not 0 <= keep <= len(msgs):
+        raise ValueError(f"keep must be 0..{len(msgs)}")
+    return s.meta(), msgs[:keep]
+
+
+def write_session_file(path: str | Path, meta: dict,
+                       messages: list[dict]) -> None:
+    """Atomic full rewrite of a session file (tmp + os.replace, same dir):
+    the meta line (when non-empty) then one JSON line per message in the
+    MSG_KEYS shape append() writes — a round-trip through load(). The tmp
+    name carries entropy so a pre-planted symlink at a predictable name can
+    never be followed (wrap-up audit W2-02 rule). Raises OSError to the
+    caller (an honest failure — the caller leaves the live file alone)."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines: list[str] = []
+    if meta:
+        lines.append(json.dumps({"meta": meta}, ensure_ascii=False))
+    for m in messages:
+        lines.append(json.dumps(
+            {k: m[k] for k in MSG_KEYS if k in m}, ensure_ascii=False))
+    tmp = path.with_name(path.name + f".tmp-{os.getpid()}-{os.urandom(4).hex()}")
+    try:
+        tmp.write_text("\n".join(lines) + ("\n" if lines else ""),
+                       encoding="utf-8")
+        os.replace(str(tmp), str(path))
+    except OSError:
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+        raise
+
+
 def export_session(directory: str | Path, sid: str, fmt: str = "json") -> tuple[str, str]:
     """X13 export: one session as (text, content_type).
 
