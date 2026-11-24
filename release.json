@@ -1,5 +1,5 @@
 {
-  "version": "0.5.109",
+  "version": "0.5.110",
   "date": "2026-11-24",
   "channel": "stable",
   "notes": "Public releases now append a snapshot to verified history so existing installations can fast-forward. Each fleet approval authorizes one dispatch of the approved plan. Memory reads and restores withhold affected data when the forget ledger cannot be verified, and confirmation checks the selected source and revision. The setup checklist can retry after a temporary failure. The public site exposes a read-only health endpoint and publishes examples matching its API. Console smoke tests run on a disposable installation. This release includes 3036 core assertions, 619 console smoke assertions and 1951 keys in each product locale pack."

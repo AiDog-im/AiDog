@@ -44,10 +44,7 @@ jobs:
               *) verdict='Scanner failed' ;;
             esac
           fi
-          printf '## %s
-
-Commit: \x60%s\x60
-' "$verdict" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          printf '## %s\n\nCommit: `%s`\n' "$verdict" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
           if [ "$verdict" != Clean ]; then
             echo "::error::$verdict ($GITHUB_SHA)"
             exit 1
