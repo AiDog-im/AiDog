@@ -140,6 +140,54 @@ class MonitorTests(unittest.TestCase):
             self.assertIn(key, report["local_warnings"])
             self.assertEqual(report["metrics"][key]["fraction"], 0.7)
 
+    def test_saved_sample_expires_by_age_or_utc_midnight(self):
+        report, _ = collect(fixture())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.json"
+            path.write_text(json.dumps(report))
+            self.assertEqual(usage.check_file(path, NOW)[1], 0)
+            self.assertEqual(usage.check_file(path, NOW + timedelta(seconds=1))[0]["status"], "stale")
+            observed = NOW - usage.MAX_SAMPLE_AGE
+            report["observed_at"] = observed.isoformat()
+            path.write_text(json.dumps(report))
+            self.assertEqual(usage.check_file(path, NOW)[1], 0)
+            report["observed_at"] = (observed - timedelta(seconds=1)).isoformat()
+            path.write_text(json.dumps(report))
+            self.assertEqual(usage.check_file(path, NOW)[1], 2)
+
+    def test_saved_sample_cannot_claim_health_without_valid_evidence(self):
+        report, _ = collect(fixture())
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "sample.json"
+            for changes in ({"observed_at": (NOW + timedelta(microseconds=1)).isoformat()},
+                            {"observed_at": NOW.replace(tzinfo=None).isoformat()},
+                            {"period_end": report["period_start"]}, {"schema_version": 99},
+                            {"metrics": {}}, {"datasets": {}}, {"metrics": dict(report["metrics"],
+                             kv_reads={"used": None, "daily_limit": 100000})}):
+                with self.subTest(fields=changes.keys()):
+                    path.write_text(json.dumps(dict(report, **changes)))
+                    self.assertEqual(usage.check_file(path, NOW), ({"status": "unavailable"}, 2))
+            data = fixture()
+            data["workersInvocationsAdaptive"][0]["sum"]["requests"] = 70000
+            for status, code in (("threshold", 1), ("partial", 2)):
+                report, _ = collect(data)
+                path.write_text(json.dumps(report))
+                checked, actual = usage.check_file(path, NOW)
+                self.assertEqual((checked["status"], actual), (status, code))
+                data["d1AnalyticsAdaptiveGroups"] = None
+
+    def test_check_cli_missing_or_corrupt_file_is_offline(self):
+        with tempfile.TemporaryDirectory() as tmp, patch.object(usage, "credentials",
+                side_effect=AssertionError), patch.object(usage, "query_dataset", side_effect=AssertionError):
+            path = Path(tmp) / "sample.json"
+            for content in (None, "invalid sensitive contents", "null"):
+                if content is not None:
+                    path.write_text(content)
+                stream = io.StringIO()
+                with redirect_stdout(stream):
+                    self.assertEqual(usage.main(["--check", str(path)]), 2)
+                self.assertEqual(json.loads(stream.getvalue()), {"status": "unavailable"})
+
     def test_query_is_read_only_and_rejects_graphql_errors(self):
         body = {"data": {"viewer": {"accounts": [{
             "workersInvocationsAdaptive": []}]}}}
@@ -186,6 +234,7 @@ class MonitorTests(unittest.TestCase):
             stream = io.StringIO()
             with redirect_stdout(stream):
                 self.assertEqual(usage.main(["--output", "unused"]), 2)
+            self.assertEqual(json.loads(stream.getvalue())["status"], "unavailable")
             self.assertEqual(json.loads(stream.getvalue())["output_status"], "unavailable")
             self.assertNotIn("sensitive-path", stream.getvalue())
 

@@ -500,7 +500,8 @@ from mycore.session import (Session, export_session, list_sessions,  # noqa: E40
                              prune_old, read_head, session_file,
                              write_session_file,
                              find_message_by_source_id,
-                             message_digest, message_suppression)
+                             message_is_visible, message_suppression,
+                             visible_session_messages)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
                           resolve_disabled_tools, outbound_probe,
                           outbound_validate)
@@ -1212,7 +1213,10 @@ def backup_payload(include) -> dict:
         # restore on another machine keeps the suppression instead of
         # silently un-forgetting a source. It is omitted when nothing was
         # forgotten — the payload stays byte-identical to the old shape.
-        rows = memforget.load_rows()
+        try:
+            rows = memforget.load_rows()
+        except memforget.LedgerUnavailable:
+            raise BackupReadError(503, memforget.LEDGER_UNAVAILABLE) from None
         if rows:
             payload["tombstones"] = rows
     return payload
@@ -1430,7 +1434,11 @@ def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
     incoming = memforget.TombstoneSet.from_rows(
         row for row in (tombstones if isinstance(tombstones, list) else [])
         if isinstance(row, dict))
-    local = memforget.load_set()
+    try:
+        local = memforget.load_set()
+    except memforget.LedgerUnavailable:
+        return {"files": [], "bytes": 0, "suppression": {"status": "unavailable"},
+                "failed": [{"name": "memory", "reason": memforget.LEDGER_UNAVAILABLE}]}
     effective = local.merged(incoming)
     files: list[str] = []
     failed: list[dict] = []
@@ -1459,7 +1467,27 @@ def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
         data = kept_text.encode("utf-8")
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            _atomic_write(path, data, chmod=0o644)
+            if name == BACKUP_MEMORY_FILES[2]:
+                # The learned slot is written by the /learn path too, which
+                # appends to it under the evolution mutation lock. The
+                # restore takes the SAME lock (one implementation, one lock
+                # inode), so the two can never interleave: either the
+                # learn lands first and the restore overwrites it (the
+                # restore's whole-file contract, unchanged), or the restore
+                # lands first and the learn appends after it — the learned
+                # entry survives. A lock that cannot be taken is refused
+                # HONESTLY: this file is not written and the refusal is
+                # reported per file, while the other slots still land.
+                with evolution.mutation_lock(path, evolution.REPO):
+                    _atomic_write(path, data, chmod=0o644)
+            else:
+                _atomic_write(path, data, chmod=0o644)
+        except evolution.EvolutionLockError:
+            failed.append({"name": name,
+                           "reason": "the learned-memory lock is held by "
+                                     "another writer — this file was not "
+                                     "written"})
+            continue
         except OSError as e:  # noqa: BLE001 — type name only
             failed.append({"name": name,
                            "reason": f"persist failed: {type(e).__name__}"})
@@ -5031,36 +5059,13 @@ def chat_session_path() -> Path:
 # A FORGOTTEN transcript message must not resurface through ANY read path
 # (D31). The console's own faces — the live chat history, the context
 # usage, the model's own context, the rewind/fork heads — therefore run the
-# SAME filter the session module's read paths run: the message is matched by
-# the digest of its NORMALISED text (the identity form the search index uses
-# on both sides of the index), and the whole comparison is SKIPPED while the
-# ledger holds no session-channel row (D34) — so a read path pays nothing
-# when nothing is forgotten.
-def _session_suppression(directory=None):
-    """The session-channel suppressor of the ACTIVE ledger (D34).
-
-    The ledger is the one of the state root that owns the sessions directory
-    (its parent) — the same rule the session module applies. An unreadable
-    ledger hides nothing: the suppressor degrades to "nothing is silenced"
-    (fail-soft, never a raised error in a read face)."""
-    return message_suppression(directory)
-
-
-def _visible_session_messages(messages: list[dict], suppression) -> list[dict]:
-    """The messages of a loaded session that are still VISIBLE (D31).
-
-    A forgotten message is dropped from every read: the console's history,
-    the context usage, the model's own context, the rewind/fork heads. The
-    transcript FILE is never rewritten — the line stays on disk, append-only
-    and reviewable (D10/D31).
-
-    The check is skipped entirely while the ledger holds no session-channel
-    row (D34): with nothing forgotten the list comes back unchanged, so the
-    behaviour is byte-identical to the pre-suppression build."""
-    if suppression.empty:
-        return messages
-    return [m for m in messages
-            if not suppression.suppresses_digest(message_digest(m))]
+# SAME filter every other surface runs: mycore.session.visible_session_
+# messages, the ONE implementation of the rule (the message is matched by
+# the digest of its NORMALISED text, the identity form the search index uses
+# on both sides of the index, and the whole comparison is SKIPPED while the
+# ledger holds no session-channel row — D34 — so a read face pays nothing
+# when nothing is forgotten). This module holds no copy of the rule on
+# purpose.
 
 
 def chat_context_usage() -> dict:
@@ -5091,8 +5096,8 @@ def chat_context_usage() -> dict:
         # A FORGOTTEN message is not part of the context the next model call
         # sees, so it is not counted here either (D31) — the number stays the
         # REAL one (the loop's own metric over what is actually sent).
-        history = _visible_session_messages(
-            history, _session_suppression(chat_sessions_dir()))
+        history = visible_session_messages(
+            history, directory=chat_sessions_dir())
         sys_chars = measure(stack)
         ses_chars = measure(history)
     except Exception as e:  # noqa: BLE001 — honest degradation, no numbers
@@ -5123,7 +5128,10 @@ def chat_history(limit: int = 200) -> dict:
     sess = Session(chat_session_path())
     full = sess.load()
     start = max(0, len(full) - limit)
-    suppression = _session_suppression(chat_sessions_dir())
+    suppression = message_suppression(chat_sessions_dir())
+    if not suppression.available:
+        return {"messages": [], "count": 0, "suppression": "unavailable",
+                "note": memforget.LEDGER_UNAVAILABLE}
     out = []
     for idx in range(start, len(full)):
         m = full[idx]
@@ -5133,8 +5141,7 @@ def chat_history(limit: int = 200) -> dict:
         content = m.get("content")
         if not isinstance(content, str):
             continue
-        if not suppression.empty and suppression.suppresses_digest(
-                message_digest(m)):
+        if not message_is_visible(m, suppression):
             continue          # a forgotten message is not shown (D31)
         out.append({"id": idx, "role": role,
                     "content": content[:CHAT_HISTORY_CAP]})
@@ -5382,8 +5389,7 @@ def rewind_chat_session(msg_id: object) -> tuple[int, dict]:
                                  "(use fork to branch from any message)"]}
     msgs = all_msgs[:msg_id]                          # drop target + tail
     # A FORGOTTEN message is not carried into the new live session (D31).
-    msgs = _visible_session_messages(
-        msgs, _session_suppression(root))
+    msgs = visible_session_messages(msgs, directory=root)
     stamp = int(time.time())
     tmp = root / f"{CHAT_SESSION_NAME}.rewind-{stamp}." \
                f"{os.urandom(4).hex()}.jsonl.tmp"
@@ -5468,7 +5474,7 @@ def fork_chat_session(msg_id: object) -> tuple[int, dict]:
                      "details": ["no live session to fork"]}
     # A FORGOTTEN message is not copied into the fork (D31) — the same
     # suppressor the history face uses.
-    msgs = _visible_session_messages(msgs, _session_suppression(root))
+    msgs = visible_session_messages(msgs, directory=root)
     stamp = int(time.time())
     sid = f"{CHAT_SESSION_NAME}.fork.{stamp}"
     dst = root / f"{sid}.jsonl"
@@ -5625,8 +5631,8 @@ def _run_webhook_turn(text: str, sender: str):
     history = [m for m in history if m.get("role") != "system"]
     # A FORGOTTEN message never reaches the model (D31) — the webhook leg
     # reads the same transcripts as every other face.
-    history = _visible_session_messages(
-        history, _session_suppression(chat_sessions_dir()))
+    history = visible_session_messages(
+        history, directory=chat_sessions_dir())
 
     stack = build_system_stack(
         context_dirs=resolve_context_dirs(),
@@ -6569,6 +6575,9 @@ def collect_profiling() -> dict:
         cfg = profiling.parse_config({})
         config_error = str(e)[:160]
     doc = profiling.load_profile()
+    if doc.get("suppression") == "unavailable":
+        return {"keywords": [], "suppression": "unavailable",
+                "config_error": memforget.LEDGER_UNAVAILABLE}
     keywords: list[dict] = []
     for row in doc.get("keywords") if isinstance(doc.get("keywords"), list) \
             else []:
@@ -6651,17 +6660,15 @@ def collect_profiling() -> dict:
     }
 
 
-def collect_fleet_plans() -> dict:
-    """GET /api/fleet/plans — the owner's sign-off queue for a write-capable
-    clone fleet (Need-B P1b). Read-only list; the decision is a separate
-    Bearer POST."""
+def collect_fleet_plans() -> tuple[dict, int]:
+    """Read the sign-off queue; unavailable is not the same as empty."""
     try:
         from mycore import fleetplan
         rows = [fleetplan.public_row(p) for p in fleetplan.load_plans()]
-    except Exception as e:  # noqa: BLE001 — the queue must always answer
-        return {"plans": [], "note": f"fleet plans unavailable "
-                                    f"({type(e).__name__})"}
-    return {"plans": rows, "read_only": True}
+    except Exception as e:  # noqa: BLE001 — a failed queue must be visible
+        return ({"plans": [], "read_only": True, "unavailable": True,
+                 "error": f"fleet plans unavailable ({type(e).__name__})"}, 503)
+    return {"plans": rows, "read_only": True}, 200
 
 
 def collect_memory(query: str = "") -> dict:
@@ -6748,6 +6755,8 @@ def collect_memory_forget_preview(slot: str, title: str) -> tuple[dict, int]:
         return _forget_slot_error(), 400
     try:
         described = memforget.describe_entry(_forget_slot_path(key), title)
+    except memforget.LedgerUnavailable as exc:
+        return {"error": str(exc)}, 503
     except memforget.MemforgetError as exc:
         return {"error": str(exc)}, 404
     return {
@@ -6755,13 +6764,15 @@ def collect_memory_forget_preview(slot: str, title: str) -> tuple[dict, int]:
         "title": described.get("title") or str(title or "").strip(),
         "channel": described["channel"],
         "source_id": described["source_id"],
+        "revision": described["revision"],
         "entries": described["entries"],
         "affects": _forget_affects(key),
         "limits": memforget.LIMITS_NOTE,
     }, 200
 
 
-def apply_memory_forget(slot: str, title: str) -> tuple[dict, int]:
+def apply_memory_forget(slot: str, title: str, source_id: str = "",
+                        revision: str = "") -> tuple[dict, int]:
     """POST /api/memory/forget — record the tombstone for one entry.
 
     Nothing is deleted: the source stays in its file and the ledger records
@@ -6771,9 +6782,17 @@ def apply_memory_forget(slot: str, title: str) -> tuple[dict, int]:
     key = str(slot or "").strip().lower()
     if key not in FORGET_SLOTS:
         return _forget_slot_error(), 400
+    if (not isinstance(source_id, str) or not re.fullmatch(r"src_[0-9a-f]+", source_id)
+            or not isinstance(revision, str) or not re.fullmatch(r"[0-9a-f]{64}", revision)):
+        return {"error": "source_id and revision from a current preview are required"}, 400
     wanted = str(title or "").strip()
     try:
-        result = memforget.forget_entry(_forget_slot_path(key), wanted)
+        result = memforget.forget_entry(_forget_slot_path(key), wanted,
+                                        expected_id=source_id, revision=revision)
+    except memforget.LedgerUnavailable as exc:
+        return {"error": str(exc)}, 503
+    except memforget.StaleEntry as exc:
+        return {"error": str(exc)}, 409
     except memforget.MemforgetError as exc:
         return {"error": str(exc)}, 404
     return {
@@ -6834,9 +6853,12 @@ def collect_profiling_forget_preview(source_id: str) -> tuple[dict, int]:
         return {"error": "a source id is required"}, 400
     if not _PROFILE_SOURCE_RE.match(sid):
         return {"error": "malformed source id"}, 400
-    if sid in memforget.load_set().ids:
-        # Already silenced: a forget would change nothing, and the answer
-        # says so instead of pretending there is work to do.
+    try:
+        snapshot = memforget.load_set()
+    except memforget.LedgerUnavailable:
+        return {"error": memforget.LEDGER_UNAVAILABLE}, 503
+    if sid in snapshot.ids:
+        # Already silenced: a forget would change nothing.
         return {"source_id": sid, "channel": PROFILE_FORGET_CHANNEL,
                 "items": 0,
                 "affects": {"profile": False, "score": False,
@@ -6871,7 +6893,11 @@ def apply_profiling_forget(source_id: str) -> tuple[dict, int]:
         return {"error": "a source id is required"}, 400
     if not _PROFILE_SOURCE_RE.match(sid):
         return {"error": "malformed source id"}, 400
-    if sid in memforget.load_set().ids:
+    try:
+        snapshot = memforget.load_set()
+    except memforget.LedgerUnavailable:
+        return {"error": memforget.LEDGER_UNAVAILABLE}, 503
+    if sid in snapshot.ids:
         return {"ok": True, "id": sid, "channel": PROFILE_FORGET_CHANNEL,
                 "already": True, "limits": memforget.LIMITS_NOTE}, 200
     row = _profiling_row_for_source(sid)
@@ -6940,9 +6966,12 @@ def collect_session_forget_preview(source_id: str) -> tuple[dict, int]:
         return {"error": "a source id is required"}, 400
     if not _SESSION_SOURCE_RE.match(sid):
         return {"error": "malformed source id"}, 400
-    if sid in memforget.load_set().ids:
-        # Already silenced: a forget would change nothing, and the answer
-        # says so instead of pretending there is work to do.
+    try:
+        snapshot = memforget.load_set()
+    except memforget.LedgerUnavailable:
+        return {"error": memforget.LEDGER_UNAVAILABLE}, 503
+    if sid in snapshot.ids:
+        # Already silenced: a forget would change nothing.
         return {"source_id": sid, "channel": SESSION_FORGET_CHANNEL,
                 "items": 0,
                 "affects": {"recall": False, "session_list": False,
@@ -6977,7 +7006,11 @@ def apply_session_forget(source_id: str) -> tuple[dict, int]:
         return {"error": "a source id is required"}, 400
     if not _SESSION_SOURCE_RE.match(sid):
         return {"error": "malformed source id"}, 400
-    if sid in memforget.load_set().ids:
+    try:
+        snapshot = memforget.load_set()
+    except memforget.LedgerUnavailable:
+        return {"error": memforget.LEDGER_UNAVAILABLE}, 503
+    if sid in snapshot.ids:
         return {"ok": True, "id": sid, "channel": SESSION_FORGET_CHANNEL,
                 "already": True, "limits": memforget.LIMITS_NOTE}, 200
     found = find_message_by_source_id(chat_sessions_dir(), sid)
@@ -8390,13 +8423,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/fleet":
             return self._json(collect_fleet())
         if path == "/api/fleet/plans":
-            return self._json(collect_fleet_plans())
+            payload, code = collect_fleet_plans()
+            return self._json(payload, code)
         if path.startswith("/api/fleet/plans/"):
-            # a decision is a POST; a GET here would be a confusing no-op
-            return self._json(
-                {"error": "use POST to decide a plan",
-                 "details": ["POST /api/fleet/plans/<id> "
-                             "{action: approve|reject|cancel}"]}, 405)
+            if not self._require_token():
+                return
+            from mycore import fleetplan
+            pid = urllib.parse.unquote(path[len("/api/fleet/plans/"):])
+            try:
+                preview = fleetplan.owner_preview(pid)
+            except (OSError, ValueError, RuntimeError, OverflowError):
+                return self._json({"error": fleetplan.UNAVAILABLE}, 503)
+            if preview is None:
+                return self._json({"error": "no current approval preview"}, 404)
+            return self._json(preview)
         if path == "/api/memory":
             q = ""
             if "?" in self.path:
@@ -9836,6 +9876,8 @@ class Handler(BaseHTTPRequestHandler):
             fmt = (query.get("format") or ["json"])[0]
             try:
                 text, mime = export_session(chat_sessions_dir(), sid, fmt)
+            except memforget.LedgerUnavailable:
+                return self._json({"error": memforget.LEDGER_UNAVAILABLE}, 503)
             except ValueError as e:
                 return self._json({"error": "validation failed",
                                    "details": [str(e)]}, 400)
@@ -10307,7 +10349,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"error": "validation failed",
                                "details": ["slot and title must be strings"]},
                               400)
-        payload, code = apply_memory_forget(slot, title)
+        payload, code = apply_memory_forget(slot, title, doc.get("source_id"),
+                                            doc.get("revision"))
         if code == 200:
             sys.stderr.write("memory forget slot=%s already=%s\n"
                              % (str(slot).strip().lower(),
@@ -10588,8 +10631,8 @@ class Handler(BaseHTTPRequestHandler):
         # context is a READ path like any other. The base index above stays
         # the RAW row count, so the ids of this turn's rows still point at
         # the file's own rows (the filtered rows are still ON disk).
-        history = _visible_session_messages(
-            history, _session_suppression(chat_sessions_dir()))
+        history = visible_session_messages(
+            history, directory=chat_sessions_dir())
 
         stack = build_system_stack(
             context_dirs=resolve_context_dirs(),
@@ -11573,9 +11616,9 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 — module absent = honest 503
             sys.stderr.write(f"fleet plans import failed err={type(e).__name__}\n")
             return self._json({"error": "plan store unavailable"}, 503)
-        plan, err = _fleetplan.decide(pid, action)
+        plan, err = _fleetplan.decide(pid, action, doc.get("digest"))
         if plan is None:
-            code = 404 if err == "unknown plan id" else 409
+            code = {"unknown plan id": 404, _fleetplan.UNAVAILABLE: 503}.get(err, 409)
             return self._json({"error": err or "decision failed"}, code)
         return self._json({"ok": True, "plan_id": pid,
                            "status": plan.get("status")})

@@ -30,11 +30,12 @@ from __future__ import annotations
 import json
 import secrets
 import time
+from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
 from typing import Callable
 
 from .loop import run_turn
-from .tools import ToolError, ToolRegistry
+from .tools import KNOWN_TOOL_NAMES, ToolError, ToolRegistry, _shell_spec
 from . import fleet
 from . import fleetgate
 from . import fleetplan
@@ -211,21 +212,6 @@ def _one(task: str, idx: int, total: int, sub_registry: ToolRegistry,
             "row": row}
 
 
-def _approval_valid(plan_id: str, granted: list[str]) -> bool:
-    """An approval is valid when the plan is APPROVED and its recorded tool
-    set covers every write tool this dispatch would use. One approval serves
-    one dispatch: the plan is consumed so a second write needs a new one."""
-    plan = fleetplan.get_plan(plan_id)
-    if not plan or plan.get("status") != "approved":
-        return False
-    approved = set(plan.get("tools") or [])
-    needed = {t for t in granted if t in fleetplan.WRITE_TOOLS}
-    if not needed.issubset(approved):
-        return False
-    fleetplan.consume(plan_id)   # consume: one approval, one dispatch
-    return True
-
-
 def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
               chat: Callable[..., dict] | None, budget: int | None, *,
               should_stop: Callable[[], bool] | None = None,
@@ -306,32 +292,17 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
     signoff = fleetgate.resolve_signoff(gate)
     named_role = any(r for _, _, r in clean)
     gate_write = (signoff == "writes") or (signoff == "roles" and named_role)
-    # The gate reads the tools the fleet would ACTUALLY use: a role may
-    # narrow them, and the narrowest role in the fleet decides.
-    effective_names: list[str] = []
-    for _t, _m, role_name in clean:
-        if not role_name:
-            effective_names = list(granted_names)
-            break
-        role_record = fleetgate.ROLE_CATALOG.get(role_name, {})
-        allowed = set(fleetgate.role_tools(role_record))
-        effective_names.extend(t for t in granted_names if t in allowed)
-    write_capable = gate_write and fleetplan.is_write_capable(effective_names)
-    approval = ""
-    if write_capable:
-        approval = str(approval_id or "").strip()
-        if not approval:
-            plan = fleetplan.propose(
-                [{"summary": t} for t, _, _ in clean], granted_names)
-            if plan.get("error"):
-                raise ToolError(plan["error"])
-            raise ToolError(
-                f"this fleet may write ({', '.join(sorted(set(granted_names) & fleetplan.WRITE_TOOLS))}) "
-                f"and needs your approval first — plan {plan['id']} is waiting "
-                "for you (approve it in the console, then dispatch again with "
-                "approval=\"<plan id>\")")
-        if not _approval_valid(approval, granted_names):
-            raise ToolError("the approval for this fleet is not valid")
+    # Resolve each role once. Approval and execution use the same registries.
+    roles = [fleetgate.role_for(role) for _, _, role in clean]
+    registries = [sub_registry.select(
+        [t for t in granted_names if t in fleetgate.role_tools(record)]
+        if role else granted_names)
+        for (_, _, role), (_, record) in zip(clean, roles)]
+    effective_names = {t for reg in registries for t in reg.names()}
+    write_names = (effective_names & fleetplan.WRITE_TOOLS) | (
+        effective_names - KNOWN_TOOL_NAMES)
+    approval = str(approval_id or "").strip()
+    needs_claim = bool(write_names and (gate_write or approval))
     # THE DECISION KEY (Need-B P1a): a deterministic, zero-token band over
     # the briefs. `advise` (default) only reports; `enforce` may refuse a
     # split wider than the band justifies; `off` skips the band entirely.
@@ -343,6 +314,39 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
             f"{band.get('band')}, ceiling {band.get('ceiling')}: "
             f"{'; '.join(band.get('reasons') or ['narrow request'])} — "
             "do it inline or dispatch fewer briefs")
+    preview = None
+    if needs_claim:
+        if any(why for _, _, _, why in plan):
+            raise ToolError("cannot approve a fleet with an unavailable model")
+        # Fail closed for handlers without a reviewable, pinned target.
+        if write_names - {"write_file", "edit_file", "run_bash"}:
+            raise ToolError("fleet approval cannot bind the target for: "
+                            + ", ".join(sorted(write_names - {
+                                "write_file", "edit_file", "run_bash"})))
+        if registry.fleet_scope is None:
+            raise ToolError("fleet target scope is unavailable")
+        roots, state = registry.fleet_scope
+        preview = {
+            "version": 1,
+            "scope": {"roots": roots, "state": state, "cwd": str(Path.cwd())},
+            "tasks": [{"brief": task, "model": model, "requested_role": role,
+                       "role": effective if role else None, "tools": reg.names()}
+                      for (task, model, role), (effective, _), reg
+                      in zip(clean, roles, registries)],
+        }
+        if "run_bash" in write_names:
+            from dataclasses import asdict
+            from . import terminal
+            spec = _shell_spec()
+            try:
+                backend = terminal.parse(spec)
+            except ValueError as exc:
+                raise ToolError(f"cannot approve fleet shell: {exc}") from None
+            preview["scope"]["shell"] = {
+                **asdict(backend), "cwd": str(terminal.REPO), "sandboxed": False}
+            for reg in registries:
+                reg.pin_fleet_shell(spec)
+
     fleet_id = f"f{int(time.time())}{secrets.token_hex(2)}"
     # budget_chars is a context-compaction threshold, not a spend cap. Split
     # the parent's threshold across clones so a fan-out cannot multiply it.
@@ -353,16 +357,8 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
 
     def _run(item: tuple[int, str, str | None, str | None]) -> str:
         i, text, model, why = item
-        role_name, role_record = fleetgate.role_for(clean[i - 1][2])
-        # A role may NARROW the tool set only, and only when the parent
-        # NAMED one: without an explicit role the clone keeps today's
-        # behavior (the granted tools, the shared system line) so the
-        # existing delegate contract does not change under the owner's feet.
-        role_allowed = set(fleetgate.role_tools(role_record)) \
-            if clean[i - 1][2] else set()
-        role_registry = (sub_registry.select(
-            [t for t in sub_registry.names() if t in role_allowed])
-            if role_allowed else sub_registry)
+        role_name, role_record = roles[i - 1]
+        role_registry = registries[i - 1]
         role_iters = fleetgate.role_max_iters(role_record, max_iters) \
             if clean[i - 1][2] else max_iters
         if why:
@@ -401,6 +397,20 @@ def run_tasks(tasks: list, registry: ToolRegistry, extra_tools: list | None,
         rows[i - 1] = result["row"]
         return result["text"]
 
+    if preview is not None:
+        if ((should_stop is not None and should_stop()) or
+                (remaining is not None and time.monotonic() - launch >= remaining)):
+            raise ToolError("fleet was stopped or its deadline elapsed before dispatch")
+        if not approval:
+            proposal = fleetplan.propose(preview)
+            if proposal.get("error"):
+                raise ToolError(proposal["error"])
+            raise ToolError(
+                f"this fleet may write ({', '.join(sorted(write_names))}) "
+                f"and needs your approval first — plan {proposal['id']} is waiting "
+                'for you (review it in the console, then retry with approval="<plan id>")')
+        if not fleetplan.consume(approval, preview):
+            raise ToolError("the approval for this fleet is not valid or could not be claimed")
     if total == 1:
         parts = [_run(plan[0])]
     else:

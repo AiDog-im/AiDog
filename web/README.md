@@ -12,6 +12,23 @@ python3 web/server.py            # http://127.0.0.1:19167/  (loopback only)
 AIDOG_WEB_PORT=9000 python3 web/server.py   # custom port
 ```
 
+## Console smoke tests
+
+```bash
+python3 tests/web_console_p3.py
+python3 tests/web_console_p3.py --live-read-only http://127.0.0.1:19167
+```
+
+The default suite creates a temporary installation with fixture credentials,
+loopback servers on ephemeral ports, a fake chat model and a stub transcriber.
+It exercises state-changing endpoints, including pause and history clear, only
+in that installation. Provider voice synthesis and watchdog process recycling
+are outside this suite.
+
+The explicit live probe sends unauthenticated `GET /api/health` and
+`GET /api/console` requests only. It bypasses proxies and rejects redirects.
+It does not read the secrets store or alter pause or history state.
+
 ## Routes
 
 | Route | Purpose |

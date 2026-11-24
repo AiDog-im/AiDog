@@ -24,30 +24,13 @@ PROJECT=aidog-site
 TARGET=aidog-site.pages.dev
 DOMAINS=("aidog.im" "www.aidog.im")
 CHECK_ONLY=0
-[ "${1:-}" = "--check" ] && CHECK_ONLY=1
+case "$#:${1:-}" in
+  0:) ;;
+  1:--check) CHECK_ONLY=1 ;;
+  *) echo 'Usage: deploy_site.sh [--check]' >&2; exit 2 ;;
+esac
 
 die() { echo "DEPLOY_SITE: $*" >&2; exit 1; }
-
-# ---- credentials (subshell load; never print values) -----------------------
-[ -f secrets.env ] || die "secrets.env missing"
-if [ "$(head -c 4 secrets.env)" = "SAFE" ]; then
-  # E2: the store is encrypted — decrypt into THIS shell's memory only
-  # (stdout is captured by $(...), never echoed; the passphrase travels
-  # only inside the helper's child env, never in argv).
-  _aidog_env="$(python3 deploy/aidog_secrets.py shell-env)" \
-    || die "secrets.env locked/unreadable (E2) — run: aidog secrets status"
-  eval "$_aidog_env"
-  unset _aidog_env
-else
-  set -a; . ./secrets.env; set +a
-fi
-: "${AIDOG_CF_API_TOKEN:?AIDOG_CF_API_TOKEN missing}"
-: "${AIDOG_CF_DNS_TOKEN:?AIDOG_CF_DNS_TOKEN missing}"
-: "${AIDOG_CF_ACCOUNT_ID:?AIDOG_CF_ACCOUNT_ID missing}"
-: "${AIDOG_CF_ZONE_ID:?AIDOG_CF_ZONE_ID missing}"
-export CLOUDFLARE_API_TOKEN="$AIDOG_CF_API_TOKEN"
-export CLOUDFLARE_ACCOUNT_ID="$AIDOG_CF_ACCOUNT_ID"
-API="https://api.cloudflare.com/client/v4"
 
 cfjson() { # cfjson METHOD URL [token] [body]
   local method=$1 url=$2 token=${3:-$AIDOG_CF_API_TOKEN} body=${4:-}
@@ -105,10 +88,30 @@ PYPURGE
 }
 
 if [ "$CHECK_ONLY" -eq 0 ]; then
+  # ---- credentials (subshell load; never print values) -----------------------
+  [ -f secrets.env ] || die "secrets.env missing"
+  if [ "$(head -c 4 secrets.env)" = "SAFE" ]; then
+    # E2: the store is encrypted — decrypt into THIS shell's memory only
+    # (stdout is captured by $(...), never echoed; the passphrase travels
+    # only inside the helper's child env, never in argv).
+    _aidog_env="$(python3 deploy/aidog_secrets.py shell-env)" \
+      || die "secrets.env locked/unreadable (E2) — run: aidog secrets status"
+    eval "$_aidog_env"
+    unset _aidog_env
+  else
+    set -a; . ./secrets.env; set +a
+  fi
+  : "${AIDOG_CF_API_TOKEN:?AIDOG_CF_API_TOKEN missing}"
+  : "${AIDOG_CF_DNS_TOKEN:?AIDOG_CF_DNS_TOKEN missing}"
+  : "${AIDOG_CF_ACCOUNT_ID:?AIDOG_CF_ACCOUNT_ID missing}"
+  : "${AIDOG_CF_ZONE_ID:?AIDOG_CF_ZONE_ID missing}"
+  export CLOUDFLARE_API_TOKEN="$AIDOG_CF_API_TOKEN"
+  export CLOUDFLARE_ACCOUNT_ID="$AIDOG_CF_ACCOUNT_ID"
+  API="https://api.cloudflare.com/client/v4"
+
   # ---- 0) ensure KV counter namespace + Pages binding (idempotent) ---------
   # Namespace title fixed; binding = VISITS on both environments so the
-  # Pages Function sees env.VISITS. Missing permission => WARN + continue:
-  # /api/visits then honestly answers 503 and verify reports it as pending.
+  # rollback configuration sees env.VISITS. The live counter uses D1.
   KV_TITLE=aidog-site-visits
   kvid=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/storage/kv/namespaces" \
     | python3 -c 'import json,sys
@@ -124,7 +127,7 @@ d=json.load(sys.stdin); print(d["result"]["id"] if d.get("success") else "")' 2>
     echo "DEPLOY_SITE: KV namespace reused ($KV_TITLE)"
   fi
   if [ -z "$kvid" ]; then
-    echo "DEPLOY_SITE: WARN KV namespace ensure failed — token likely lacks Workers KV Storage:Edit; /api/visits will stay pending" >&2
+    echo "DEPLOY_SITE: WARN KV namespace ensure failed — token likely lacks Workers KV Storage:Edit; KV rollback unavailable" >&2
   else
     proj=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/pages/projects/$PROJECT")
     need=$(printf '%s' "$proj" | python3 -c 'import json,sys
@@ -144,7 +147,7 @@ print(json.dumps({"deployment_configs": dc}))' "$kvid")
         "$AIDOG_CF_API_TOKEN" "$body")
       ok=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("success"))' 2>/dev/null || echo parse_error)
       echo "DEPLOY_SITE: KV binding VISITS -> $kvid ensure ($ok)"
-      [ "$ok" = "True" ] || echo "DEPLOY_SITE: WARN binding patch result=$ok — /api/visits may stay pending" >&2
+      [ "$ok" = "True" ] || echo "DEPLOY_SITE: WARN binding patch result=$ok — KV rollback may be unavailable" >&2
     else
       echo "DEPLOY_SITE: KV binding VISITS already -> $kvid"
     fi
@@ -153,8 +156,7 @@ print(json.dumps({"deployment_configs": dc}))' "$kvid")
   # ---- 0b) ensure D1 ledger database + Pages binding (idempotent) -------
   # D2 car: ONE D1 database backs /api/ledger (reports), /api/stats (public
   # aggregates) and the migrated /api/visits counter. Missing permission =>
-  # WARN + continue: the endpoints then honestly answer 503 and verify
-  # reports them as pending, never as a fabricated zero.
+  # WARN during provisioning; verification fails if required storage is unavailable.
   D1_NAME=aidog-site-ledger
   dbid=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/d1/database" \
     | python3 -c 'import json,sys
@@ -171,7 +173,7 @@ d=json.load(sys.stdin); print(d["result"]["uuid"] if d.get("success") else "")' 
     echo "DEPLOY_SITE: D1 database reused ($D1_NAME)"
   fi
   if [ -z "$dbid" ]; then
-    echo "DEPLOY_SITE: WARN D1 ensure failed — token likely lacks D1 Edit; /api/ledger /api/stats /api/visits will stay pending" >&2
+    echo "DEPLOY_SITE: WARN D1 ensure failed — token likely lacks D1 Edit; required D1-backed endpoints may fail verification" >&2
   else
     proj=$(cfjson GET "$API/accounts/$AIDOG_CF_ACCOUNT_ID/pages/projects/$PROJECT")
     # Pages API quirk (measured): the d1_databases entry key is `id`, NOT
@@ -194,7 +196,7 @@ print(json.dumps({"deployment_configs": dc}))' "$dbid")
         "$AIDOG_CF_API_TOKEN" "$body")
       ok=$(printf '%s' "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("success"))' 2>/dev/null || echo parse_error)
       echo "DEPLOY_SITE: D1 binding LEDGER -> $dbid ensure ($ok)"
-      [ "$ok" = "True" ] || echo "DEPLOY_SITE: WARN d1 binding patch result=$ok — endpoints may stay pending" >&2
+      [ "$ok" = "True" ] || echo "DEPLOY_SITE: WARN d1 binding patch result=$ok — required D1-backed endpoints may fail verification" >&2
     else
       echo "DEPLOY_SITE: D1 binding LEDGER already -> $dbid"
     fi
@@ -358,12 +360,14 @@ PY
 fi
 
 # ---- 4) verify public endpoints -------------------------------------------
+verify_dir=$(mktemp -d)
+trap 'rm -rf -- "$verify_dir"' EXIT
 # pget URL OUTFILE -> http status (always via direct connection, no proxy)
-pget() { curl -s --noproxy '*' --max-time 25 -o "$2" -w '%{http_code}' "$1" 2>/dev/null || true; }
+pget() { curl -q -s --noproxy '*' --max-time 25 -o "$2" -w '%{http_code}' "$1" 2>/dev/null || echo failed; }
 fail=0
 for url in https://aidog.im/ https://www.aidog.im/; do
-  code=$(pget "$url" /tmp/deploy_site_check.html)
-  if [ "$code" = "200" ] && grep -q "<title>I'm AiDog" /tmp/deploy_site_check.html; then
+  code=$(pget "$url" "$verify_dir/check.html")
+  if [ "$code" = "200" ] && grep -q "<title>I'm AiDog" "$verify_dir/check.html"; then
     echo "DEPLOY_SITE: VERIFY OK $url (200, title I'm AiDog)"
   else
     echo "DEPLOY_SITE: VERIFY FAIL $url (http $code)" >&2
@@ -372,17 +376,17 @@ for url in https://aidog.im/ https://www.aidog.im/; do
 done
 # assets reachable over the real domain
 for a in assets/style.css assets/main.js i18n/en.json i18n/zh.json; do
-  code=$(pget "https://aidog.im/$a" /tmp/deploy_site_asset)
+  code=$(pget "https://aidog.im/$a" "$verify_dir/asset")
   [ "$code" = "200" ] || { echo "DEPLOY_SITE: asset FAIL /$a (http $code)" >&2; fail=1; }
 done
 
 # --- site-pack parity: en/zh key sets must be identical (mirrors tmp/shoot_site.js)
-code_en=$(pget https://aidog.im/i18n/en.json /tmp/deploy_site_en.json)
-code_zh=$(pget https://aidog.im/i18n/zh.json /tmp/deploy_site_zh.json)
-if [ "$code_en" = "200" ] && [ "$code_zh" = "200" ] && python3 - <<'PYPAR'
-import json
-en = json.load(open("/tmp/deploy_site_en.json"))
-zh = json.load(open("/tmp/deploy_site_zh.json"))
+code_en=$(pget https://aidog.im/i18n/en.json "$verify_dir/en.json")
+code_zh=$(pget https://aidog.im/i18n/zh.json "$verify_dir/zh.json")
+if [ "$code_en" = "200" ] && [ "$code_zh" = "200" ] && python3 - "$verify_dir/en.json" "$verify_dir/zh.json" <<'PYPAR'
+import json,sys
+en = json.load(open(sys.argv[1]))
+zh = json.load(open(sys.argv[2]))
 only_en = sorted(set(en) - set(zh))
 only_zh = sorted(set(zh) - set(en))
 assert len(en) == len(zh) and not only_en and not only_zh, (only_en, only_zh)
@@ -395,9 +399,20 @@ else
   fail=1
 fi
 
+# --- the site's LOC fact must match the measured core LOC (a number that
+# appears in two places needs a comparison, not a habit) ---
+_site_loc="$(grep -o '≈[0-9.]*k</b>' site/index.html | head -n1 | tr -cd '0-9.')"
+_measured_loc="$(LC_ALL=C awk 'END { tenths = int((NR + 50) / 100); printf "%d.%d", int(tenths / 10), tenths % 10 }' mycore/*.py)"
+if [ -n "$_site_loc" ] && [ "$_site_loc" = "$_measured_loc" ]; then
+  echo "DEPLOY_SITE: VERIFY OK site LOC fact matches the measured core LOC (≈${_measured_loc}k)"
+else
+  echo "DEPLOY_SITE: VERIFY FAIL site LOC fact is '$_site_loc' but the core measures ≈${_measured_loc}k" >&2
+  fail=1
+fi
+
 # --- AI-readable surface: llms.txt / robots.txt / sitemap / manifest / icons
-llms_code=$(pget https://aidog.im/llms.txt /tmp/deploy_site_llms.txt)
-if [ "$llms_code" = "200" ] && head -n 1 /tmp/deploy_site_llms.txt | grep -qx "# I'm AiDog"; then
+llms_code=$(pget https://aidog.im/llms.txt "$verify_dir/llms.txt")
+if [ "$llms_code" = "200" ] && head -n 1 "$verify_dir/llms.txt" | grep -qx "# I'm AiDog"; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt (200, H1 '# I'm AiDog')"
 else
   echo "DEPLOY_SITE: VERIFY FAIL /llms.txt (http $llms_code, H1 mismatch or missing)" >&2
@@ -405,7 +420,7 @@ else
 fi
 # --- the llms release line must name the release we are deploying (two pins:
 # the evidence line AND the release line — one alone ships a stale fact) ---
-_llms_release="$(grep -m1 'Current release:' /tmp/deploy_site_llms.txt | sed 's/.*Current release: \([0-9.]*\).*/\1/' | sed 's/\.$//')"
+_llms_release="$(grep -m1 'Current release:' "$verify_dir/llms.txt" | sed 's/.*Current release: \([0-9.]*\).*/\1/' | sed 's/\.$//')"
 _tree_version="$(tr -cd '0-9.' < VERSION)"
 if [ -n "$_llms_release" ] && [ "$_llms_release" = "$_tree_version" ]; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt release line matches VERSION ($_tree_version)"
@@ -415,19 +430,19 @@ else
 fi
 
 # --- llms.txt must carry the new capability/Web3/gate facts (capability car M1-M5)
-if grep -q "## Product" /tmp/deploy_site_llms.txt \
-   && grep -q "nine venues" /tmp/deploy_site_llms.txt \
-   && grep -q "prepare → human console approval → execute" /tmp/deploy_site_llms.txt \
-   && grep -q "ACTIVATION card" /tmp/deploy_site_llms.txt \
-   && grep -q "3005/3005" /tmp/deploy_site_llms.txt \
-   && grep -q "aidog.im/#capabilities" /tmp/deploy_site_llms.txt; then
+if grep -q "## Product" "$verify_dir/llms.txt" \
+   && grep -q "nine venues" "$verify_dir/llms.txt" \
+   && grep -q "prepare → human console approval → execute" "$verify_dir/llms.txt" \
+   && grep -q "ACTIVATION card" "$verify_dir/llms.txt" \
+   && grep -q "3036/3036" "$verify_dir/llms.txt" \
+   && grep -q "aidog.im/#capabilities" "$verify_dir/llms.txt"; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else
   echo "DEPLOY_SITE: VERIFY FAIL /llms.txt facts (capability/Web3/gate lines missing)" >&2
   fail=1
 fi
 for a in robots.txt sitemap.xml manifest.webmanifest assets/icons/icon-512.png assets/icons/apple-touch-icon.png; do
-  code=$(pget "https://aidog.im/$a" /tmp/deploy_site_asset)
+  code=$(pget "https://aidog.im/$a" "$verify_dir/asset")
   if [ "$code" = "200" ]; then
     echo "DEPLOY_SITE: VERIFY OK /$a (200)"
   else
@@ -436,16 +451,16 @@ for a in robots.txt sitemap.xml manifest.webmanifest assets/icons/icon-512.png a
   fi
 done
 # manifest must parse as JSON
-code=$(pget https://aidog.im/manifest.webmanifest /tmp/deploy_site_manifest.json)
+code=$(pget https://aidog.im/manifest.webmanifest "$verify_dir/manifest.json")
 if [ "$code" = "200" ]; then
-  python3 -c 'import json,sys; d=json.load(open("/tmp/deploy_site_manifest.json")); assert d["name"] and d["icons"]' \
+  python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["name"] and d["icons"]' "$verify_dir/manifest.json" \
     || { echo "DEPLOY_SITE: VERIFY FAIL /manifest.webmanifest (invalid JSON)" >&2; fail=1; }
 fi
 
 # --- car G: /models statistics page (200 + markers) ------------------------
-code=$(pget https://aidog.im/models /tmp/deploy_site_models.html)
-if [ "$code" = "200" ] && grep -q 'id="daily"' /tmp/deploy_site_models.html \
-   && grep -q 'data-i18n="md.pageTitle"' /tmp/deploy_site_models.html; then
+code=$(pget https://aidog.im/models "$verify_dir/models.html")
+if [ "$code" = "200" ] && grep -q 'id="daily"' "$verify_dir/models.html" \
+   && grep -q 'data-i18n="md.pageTitle"' "$verify_dir/models.html"; then
   echo "DEPLOY_SITE: VERIFY OK /models (200, statistics markers)"
 else
   echo "DEPLOY_SITE: VERIFY FAIL /models (http $code or markers missing)" >&2
@@ -453,8 +468,8 @@ else
 fi
 
 # --- car G: dated GitHub pulse snapshot (must exist after a deploy) --------
-code=$(pget https://aidog.im/data/gh.json /tmp/deploy_site_gh.json)
-if [ "$code" = "200" ] && python3 - /tmp/deploy_site_gh.json <<'PYV'
+code=$(pget https://aidog.im/data/gh.json "$verify_dir/gh.json")
+if [ "$code" = "200" ] && python3 - "$verify_dir/gh.json" <<'PYV'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert isinstance(d.get("fetched_at"), str) and "T" in d["fetched_at"], d
@@ -471,8 +486,8 @@ else
 fi
 
 # --- usage ledger (D2): public aggregates must answer, never fabricate --
-st_code=$(pget "https://aidog.im/api/stats" /tmp/deploy_site_stats.json)
-if [ "$st_code" = "200" ] && python3 - /tmp/deploy_site_stats.json <<'PYV'
+st_code=$(pget "https://aidog.im/api/stats" "$verify_dir/stats.json")
+if [ "$st_code" = "200" ] && python3 - "$verify_dir/stats.json" <<'PYV'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert isinstance(d.get("totals"), dict) and isinstance(d["totals"].get("requests"), int), d
@@ -484,47 +499,17 @@ assert isinstance(d.get("probe_reports"), int), d
 PYV
 then
   echo "DEPLOY_SITE: VERIFY OK /api/stats (200, aggregate shape)"
-elif [ "$st_code" = "503" ] && python3 - /tmp/deploy_site_stats.json <<'PYV' 2>/dev/null
-import json, sys
-assert json.load(open(sys.argv[1])).get("error"), "503 without error field"
-PYV
-then
-  echo "DEPLOY_SITE: PENDING /api/stats (503 ledger not configured — D1 binding not active; not a failure)"
 else
-  echo "DEPLOY_SITE: VERIFY FAIL /api/stats (http $st_code)" >&2
+  echo "DEPLOY_SITE: VERIFY FAIL /api/stats (http $st_code or invalid aggregate)" >&2
   fail=1
 fi
 
-# --- visit counter: 200 + increment, or honest 503 (pending, not a failure) -
-v1=$(pget "https://aidog.im/api/visits" /tmp/deploy_site_v1.json)
-v2=$(pget "https://aidog.im/api/visits" /tmp/deploy_site_v2.json)
-if [ "$v1" = "200" ] && [ "$v2" = "200" ]; then
-  if python3 - /tmp/deploy_site_v1.json /tmp/deploy_site_v2.json <<'PYV'
-import json, sys
-a = json.load(open(sys.argv[1])); b = json.load(open(sys.argv[2]))
-assert isinstance(a.get("count"), int) and a.get("unit") == "page views", a
-assert isinstance(b.get("count"), int) and b.get("unit") == "page views", b
-assert b["count"] > a["count"], (a, b)
-PYV
-  then
-    echo "DEPLOY_SITE: VERIFY OK /api/visits (200, count increments)"
-  else
-    echo "DEPLOY_SITE: VERIFY FAIL /api/visits (200 but shape/increment wrong)" >&2
-    fail=1
-  fi
-  vt=$(curl -s --noproxy '*' --max-time 25 "https://aidog.im/api/visits?format=text" 2>/dev/null || true)
-  case "$vt" in
-    visits:*) echo "DEPLOY_SITE: VERIFY OK /api/visits?format=text (text/plain)" ;;
-    *) echo "DEPLOY_SITE: VERIFY FAIL /api/visits?format=text (got: ${vt:0:40})" >&2; fail=1 ;;
-  esac
-elif [ "$v1" = "503" ] && python3 - /tmp/deploy_site_v1.json <<'PYV' 2>/dev/null
-import json, sys
-assert json.load(open(sys.argv[1])).get("error"), "503 without error field"
-PYV
-then
-  echo "DEPLOY_SITE: PENDING /api/visits (503 counter not configured — KV binding not active; not a failure)"
+# The visits route increments on GET. Probe both storage schemas via SELECT.
+code=$(pget https://aidog.im/api/health "$verify_dir/health.json")
+if [ "$code" = "200" ] && python3 -c 'import json,sys; sys.exit(json.load(open(sys.argv[1])).get("ok") is not True)' "$verify_dir/health.json"; then
+  echo "DEPLOY_SITE: VERIFY OK /api/health (ledger and visits readable)"
 else
-  echo "DEPLOY_SITE: VERIFY FAIL /api/visits (http v1=$v1 v2=$v2)" >&2
+  echo "DEPLOY_SITE: VERIFY FAIL /api/health (http $code or unavailable)" >&2
   fail=1
 fi
 

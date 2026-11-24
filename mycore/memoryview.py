@@ -99,6 +99,12 @@ def collect(repo: Path | None = None, query: str = "",
         mem, usr = pp.memory_slots(root)
     q = str(query or "").strip()[:MAX_QUERY].lower()
     slots: list[dict] = []
+    try:
+        snapshot = memforget.load_set(root)
+    except memforget.LedgerUnavailable:
+        return {"slots": [], "entries_total": 0, "query": q, "read_only": True,
+                "local_only": True, "editable": False,
+                "suppression": "unavailable", "note": memforget.LEDGER_UNAVAILABLE}
     total = 0
     for label, path in (("memory", mem), ("user", usr)):
         text, error = _read(path)
@@ -108,7 +114,7 @@ def collect(repo: Path | None = None, query: str = "",
             continue
         # Memory suppression (D5): a tombstoned entry is not shown here.
         # With nothing suppressed the text is unchanged, byte for byte.
-        text = memforget.filter_slot(path, text)
+        text = memforget.filter_slot(path, text, tombstones=snapshot)
         channel = memforget.channel_for_path(path)
         entries = _entries(text, channel)
         total += len(entries)

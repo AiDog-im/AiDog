@@ -8245,7 +8245,8 @@ async function profileRm(name) {
        running; non-zero FAIL is output, not an error).
      - cron delete: per-row #cronDelBtn[data-job] -> confirm -> POST /api/cron
        {action:"del", id} -> list refresh; creation stays natural-language. */
-let setupData = null, setupSeen = false, setupBusy = false;
+let setupData = null, setupUnavailable = false, setupBusy = false;
+let setupRequest = null;
 
 /* item id -> the Settings control that fixes it (deep-link target) */
 const ACT_FIX = {
@@ -8308,11 +8309,25 @@ function renderSetup() {
   paintChanTgRow();             // car I: the Channels TG row tracks setupData
   const card = document.getElementById("actCard");
   if (!card) return;
-  if (!setupData) {                // no endpoint / bad shape: hide, honestly
-    card.hidden = true;
-    card.style.display = "none";
+  const service = document.getElementById("actService");
+  if (service) service.hidden = !setupData;
+  if (!setupData) {
+    card.hidden = !setupUnavailable;
+    card.style.display = setupUnavailable ? "" : "none";
     const tgBotHide = document.getElementById("tgBotState");
     if (tgBotHide) { tgBotHide.hidden = true; tgBotHide.textContent = ""; }
+    const badge = document.getElementById("actBadge");
+    if (badge) {
+      badge.textContent = "—";
+      badge.classList.remove("st-ok", "st-warn");
+    }
+    const start = document.getElementById("actStart");
+    if (start) {
+      start.hidden = !setupUnavailable;
+      start.textContent = t("act.cliCheck", "In a terminal, run ./aidog setup --check.");
+    }
+    const list = document.getElementById("actList");
+    if (list) list.replaceChildren();
     return;
   }
   card.hidden = false;
@@ -8415,30 +8430,51 @@ function renderSetup() {
   if (tgBot) { tgBot.hidden = false; tgBot.innerHTML = botHtml; }
 }
 
-async function refreshSetup() {
-  const msg = document.getElementById("actMsg");
-  try {
-    const res = await fetch("/api/setup");
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const d = await res.json();
-    if (!d || typeof d !== "object" || !Array.isArray(d.items)) {
-      throw new Error("bad payload");
+function refreshSetup() {
+  if (!setupRequest) {
+    const retry = document.getElementById("actRecheck");
+    const msg = document.getElementById("actMsg");
+    if (retry) retry.disabled = true;
+    if (msg) {
+      msg.className = "save-state";
+      msg.textContent = t("act.checking", "checking…");
     }
-    setupData = d;
-    if (msg) { msg.className = "save-state"; msg.textContent = ""; }
-  } catch (e) {
-    if (setupSeen && setupData) {
-      // keep the last honest snapshot and report this probe failure verbatim
-      if (msg) {
-        msg.className = "save-state err";
-        msg.textContent = t("act.checkFail", "setup check failed: {e}")
-          .replace("{e}", String(e).slice(0, 120));
-      }
+    setupRequest = readSetup().finally(() => {
+      setupRequest = null;
+      if (retry) retry.disabled = false;
+    });
+  }
+  return setupRequest;
+}
+
+async function readSetup() {
+  const msg = document.getElementById("actMsg");
+  let reason = "network error";
+  try {
+    const res = await fetch("/api/setup", { redirect: "error" });
+    if (res.status === 404) {
+      setupData = null;       // legacy console has no setup endpoint
+      setupUnavailable = false;
     } else {
-      setupData = null;           // 404 (lane not landed) / bad shape
+      reason = `HTTP ${res.status}`;
+      if (!res.ok) throw new Error(reason);
+      reason = "invalid response";
+      const d = await res.json();
+      if (!d || !Array.isArray(d.items) || typeof d.ready !== "boolean") {
+        throw new Error(reason);
+      }
+      setupData = d;
+      setupUnavailable = false;
+    }
+    if (msg) { msg.className = "save-state"; msg.textContent = ""; }
+  } catch {
+    setupUnavailable = true;
+    if (msg) {
+      msg.className = "save-state err";
+      msg.textContent = t("act.checkFail", "setup check failed: {e}")
+        .replace("{e}", reason);
     }
   }
-  setupSeen = true;
   renderSetup();
   renderOvState();             // round C (P4): ready / endpoint state follows
   renderOvTech();
@@ -10227,7 +10263,7 @@ let fleetRefresh = null;
 
 async function readFleetSnapshot(url, key) {
   try {
-    const res = await fetch(url);
+    const res = await fetch(url, { cache: "no-store" });
     const doc = res.ok ? await res.json() : null;
     return doc && !doc.note && Array.isArray(doc[key]) ? doc : null;
   } catch (e) { return null; }
@@ -11040,7 +11076,8 @@ async function memForgetConfirm() {
       ? await memForgetPost("/api/sessions/forget",
         { source_id: st.sourceId })
       : await memForgetPost("/api/memory/forget",
-        { slot: st.slot, title: st.title });
+        { slot: st.slot, title: st.title, source_id: st.preview.source_id,
+          revision: st.preview.revision });
   memForgetBusy = false;
   if (!res.ok) {
     st.error = forgetWriteError(st, res.reason);
@@ -13315,14 +13352,7 @@ wireCredList();
 /* --- activation & operations car (0.5.40): every listener is guarded so an
        absent element is a no-op, never a page error --- */
 const actRecheckEl = document.getElementById("actRecheck");
-if (actRecheckEl) actRecheckEl.addEventListener("click", async () => {
-  const msg = document.getElementById("actMsg");
-  actRecheckEl.disabled = true;
-  if (msg) { msg.className = "save-state";
-    msg.textContent = t("act.checking", "checking…"); }
-  await refreshSetup();
-  actRecheckEl.disabled = false;
-});
+if (actRecheckEl) actRecheckEl.addEventListener("click", refreshSetup);
 const actListEl = document.getElementById("actList");
 if (actListEl) actListEl.addEventListener("click", e => {
   const btn = e.target.closest("[data-act-fix]");
@@ -13339,14 +13369,25 @@ if (agentPlanRefreshEl) agentPlanRefreshEl.addEventListener("click",
   () => refreshAgentPlans());
 
 /* -------------------------------------- clone fleet approvals (P1b) ----- */
-let fleetPlanData = null;
+let fleetPlanData;
+let fleetPlanRequest = 0;
 
 function renderFleetPlans() {
   const list = document.getElementById("fleetPlanList");
   const empty = document.getElementById("fleetPlanEmpty");
+  const unavailableEl = document.getElementById("fleetPlanUnavailable");
   if (!list) return;
-  const rows = (Array.isArray(fleetPlanData) ? fleetPlanData : []).slice(0, 12);
-  if (empty) empty.hidden = rows.length > 0;
+  const unavailable = fleetPlanData === null;
+  const rows = fleetPlanData?.plans.slice(0, 12) || [];
+  if (empty) {
+    empty.hidden = !fleetPlanData || rows.length > 0;
+    empty.textContent = t("fplan.empty", "no fleets waiting");
+  }
+  if (unavailableEl) {
+    unavailableEl.hidden = !unavailable;
+    unavailableEl.textContent = unavailable
+      ? t("fplan.unavailable", "Fleet approval queue unavailable; retry REFRESH.") : "";
+  }
   list.innerHTML = rows.map(r => {
     const st = String(r.status || "pending");
     const id = String(r.id || "");
@@ -13360,8 +13401,8 @@ function renderFleetPlans() {
         `${escapeHtml(String(r.clones ?? 0))} clone(s) · ${tools || ""} ` +
         `${desc}</label>` +
         `<button class="btn" type="button" data-fplan-decide="approve" ` +
-        `data-fplan-id="${escapeHtml(id)}" data-i18n="fplan.approve">` +
-        `APPROVE</button>` +
+        `data-fplan-id="${escapeHtml(id)}" data-i18n="fplan.review">` +
+        `REVIEW</button>` +
         `<button class="btn" type="button" data-fplan-decide="reject" ` +
         `data-fplan-id="${escapeHtml(id)}" data-i18n="fplan.reject">` +
         `REJECT</button></div></div>`;
@@ -13380,11 +13421,46 @@ function renderFleetPlans() {
 }
 
 async function refreshFleetPlans() {
-  try {
-    const doc = await fetch("/api/fleet/plans").then(r => r.json());
-    fleetPlanData = (doc && Array.isArray(doc.plans)) ? doc.plans : [];
-  } catch (e) { /* keep the last paint */ }
+  const request = ++fleetPlanRequest;
+  const snapshot = await readFleetSnapshot("/api/fleet/plans", "plans");
+  if (request !== fleetPlanRequest) return;
+  fleetPlanData = snapshot;
   renderFleetPlans();
+}
+
+function confirmFleetPreview(preview) {
+  const dialog = document.createElement("dialog");
+  const form = document.createElement("form");
+  form.method = "dialog";
+  const heading = document.createElement("h3");
+  heading.textContent = t("fplan.confirm", "Approve this exact fleet?");
+  const brief = document.createElement("pre");
+  brief.style.cssText = "white-space:pre-wrap;overflow-wrap:anywhere;max-height:55vh;overflow:auto";
+  brief.textContent = JSON.stringify(preview, null, 2).replace(
+    /[\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g,
+    c => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  brief.tabIndex = 0;
+  for (const [value, label] of [["cancel", t("fplan.cancelReview", "Cancel")],
+                                 ["approve", t("fplan.approve", "Approve")]]) {
+    const btn = document.createElement("button");
+    btn.className = "btn";
+    btn.value = value;
+    btn.textContent = label;
+    if (value === "cancel") btn.autofocus = true;
+    form.append(btn);
+  }
+  form.prepend(heading, brief);
+  dialog.append(form);
+  dialog.setAttribute("aria-label", heading.textContent);
+  document.body.append(dialog);
+  return new Promise(resolve => {
+    dialog.addEventListener("close", () => {
+      const ok = dialog.returnValue === "approve";
+      dialog.remove();
+      resolve(ok);
+    }, { once: true });
+    dialog.showModal();
+  });
 }
 
 async function decideFleetPlan(id, action) {
@@ -13397,12 +13473,26 @@ async function decideFleetPlan(id, action) {
   }
   if (msg) { msg.className = "save-state"; msg.textContent = "…"; }
   try {
-    const res = await fetch("/api/fleet/plans/"
-      + encodeURIComponent(id), {
+    const url = "/api/fleet/plans/" + encodeURIComponent(id);
+    const auth = { "Authorization": "Bearer " + token };
+    let digest;
+    if (action === "approve") {
+      const res = await fetch(url, { headers: auth, cache: "no-store" });
+      const doc = await res.json();
+      if (!res.ok || !doc.preview || !doc.digest) {
+        throw new Error(res.status === 401 ? badTokenText()
+          : (doc.error || t("fplan.noPreview", "No current approval preview")));
+      }
+      if (!await confirmFleetPreview(doc.preview)) {
+        if (msg) msg.textContent = "";
+        return;
+      }
+      digest = doc.digest;
+    }
+    const res = await fetch(url, {
         method: "POST",
-        headers: { "Content-Type": "application/json",
-                   "Authorization": "Bearer " + token },
-        body: JSON.stringify({ action }) });
+        headers: { "Content-Type": "application/json", ...auth },
+        body: JSON.stringify({ action, digest }) });
     const body = await res.json().catch(() => ({}));
     if (res.status === 401) {
       if (msg) { msg.className = "save-state err";

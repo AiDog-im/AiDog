@@ -706,7 +706,10 @@ def curated_memory_text(repo: Path | None = None) -> str:
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        parts.append(memforget.filter_slot(path, text))
+        try:
+            parts.append(memforget.filter_slot(path, text))
+        except memforget.LedgerUnavailable:
+            return ""
     return "\n".join(parts).casefold()
 
 
@@ -799,8 +802,13 @@ def analyze(now: float | None = None, *, block: dict | None = None,
     state_root = root if root is not None else pp.state_dir(repo or REPO)
     # ONE ledger read serves both channels: the derived profile items and
     # the transcript messages the corpus is built from (D31/D34).
-    snapshot = (tombstones if tombstones is not None
-                else memforget.load_set(repo, state=state_root))
+    try:
+        snapshot = (tombstones if tombstones is not None
+                    else memforget.load_set(repo, state=state_root))
+    except memforget.LedgerUnavailable:
+        return {"ok": False, "at": t, "reason": "suppression-unavailable",
+                "error": memforget.LEDGER_UNAVAILABLE, "keywords": [],
+                "corpus": {}, "truncated": False, "rhythm": {}}
     session_suppression = memforget.ChannelSuppression(
         memforget.CHANNEL_SESSION, snapshot)
     got = collect_messages(state_root, since=cfg["since"],
@@ -997,8 +1005,12 @@ def filter_profile(doc: dict, *,
     rows = doc.get("keywords")
     if not isinstance(rows, list) or not rows:
         return doc
-    snapshot = (tombstones if tombstones is not None
-                else memforget.load_set(repo, state))
+    try:
+        snapshot = (tombstones if tombstones is not None
+                    else memforget.load_set(repo, state))
+    except memforget.LedgerUnavailable:
+        return {"keywords": [], "error": memforget.LEDGER_UNAVAILABLE,
+                "suppression": "unavailable"}
     suppression = _Suppression(snapshot)
     if suppression.empty:
         return doc

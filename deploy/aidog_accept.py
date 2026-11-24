@@ -20,6 +20,7 @@ The two acceptance legs that are still waiting on a human:
     * /api/backup/agent      the agent-backup status face
     * /api/version           installed vs latest
     * /api/chat/history      the console session shape + context accounting
+    * /api/setup              activation readiness (read-only when present)
 
   TELEGRAM — the service that long-polls the dedicated bot. The runner
   checks the service's own state (/api/status mycore.service), the
@@ -31,10 +32,9 @@ The two acceptance legs that are still waiting on a human:
 
 WHAT IT NEVER DOES
 ------------------
-Read-only by construction: every request is a GET to the local console, no
-file is written, no message is sent, nothing is restarted, and no
-credential value is ever printed (only presence and the source a value
-would come from).
+Read-only by construction: every request is an unauthenticated GET to the
+specified console origin. The runner does not follow redirects, write files,
+send messages, restart services, or print credential values.
 
 VERDICTS
 --------
@@ -46,7 +46,8 @@ SKIP = the check does not apply here (feature not provisioned) or could not
 
 EXIT CODE
 ---------
-0 when every applicable check passed, 1 when any check FAILED.
+0 when every applicable check passed, 1 when any check FAILED, and 2 for
+invalid command-line arguments.
 
 USAGE
 -----
@@ -63,6 +64,7 @@ import re
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -122,19 +124,25 @@ def utc_stamp(epoch: object) -> str:
 
 # ------------------------------------------------------ the console client ---
 
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class Console:
     """Read-only HTTP client for the local console.
 
-    Only GET is ever issued. The opener bypasses any configured proxy: the
-    console is local, and an outbound proxy hop is a network call this
-    runner must not make. Errors are reported as a status code or an
-    exception CLASS name — never a body, never a URL, never a credential.
+    Only unauthenticated GETs are issued. The opener bypasses proxies and
+    refuses redirects so the runner reads only from the supplied origin.
+    Errors are reported as a status code or an exception CLASS name — never
+    a body, never a redirect URL, never a credential.
     """
 
     def __init__(self, base: str, timeout: float) -> None:
         self.base = base.rstrip("/")
         self.timeout = timeout
-        self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self.opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), NoRedirect())
 
     def get(self, path: str) -> tuple[dict | None, str]:
         """-> (document, error). An empty error means the read succeeded."""
@@ -146,7 +154,8 @@ class Console:
                 code = response.status
                 body = response.read()
         except urllib.error.HTTPError as exc:
-            return None, f"HTTP {exc.code}"
+            with exc:
+                return None, f"HTTP {exc.code}"
         except Exception as exc:  # noqa: BLE001 — never echo a traceback
             return None, type(exc).__name__
         if code != 200:
@@ -342,6 +351,20 @@ def leg_console(report: Report, console: Console, tree_version: str) -> None:
                    f"the console runs {running or '(unknown)'} while the tree "
                    f"declares {tree_version} — restart the console before "
                    "accepting")
+
+
+def leg_setup(report: Report, console: Console) -> None:
+    doc, err = console.get("/api/setup")
+    if err == "HTTP 404":
+        report.add("setup", "setup.readiness", SKIP, "setup endpoint unavailable on this build")
+    elif err:
+        report.add("setup", "setup.readiness", FAIL, err)
+    elif not isinstance(doc.get("items"), list) or type(doc.get("ready")) is not bool:
+        report.add("setup", "setup.readiness", FAIL, "invalid readiness response")
+    elif doc["ready"]:
+        report.add("setup", "setup.readiness", PASS, "activation checklist ready")
+    else:
+        report.add("setup", "setup.readiness", FAIL, "activation incomplete; run ./aidog setup --check")
 
 
 def leg_status(report: Report, console: Console) -> None:
@@ -910,6 +933,7 @@ def render_text(report: Report) -> str:
 SECTION_TITLES = {
     "console": "CONSOLE — reachability and build identity",
     "status": "STATUS — panels and mycore runtime facts",
+    "setup": "SETUP — activation readiness",
     "control": "CONTROL — the leash (pause, gate, budget)",
     "usage": "USAGE — the cost display block",
     "model-slots": "MODEL SLOTS — per-slot cooldown (no credential)",
@@ -975,9 +999,10 @@ def build_parser() -> argparse.ArgumentParser:
             "  0  every applicable check passed (a SKIP does not count as a "
             "failure)\n"
             "  1  at least one check FAILED\n"
+            "  2  invalid command-line arguments\n"
         ))
     parser.add_argument("--base", default=DEFAULT_BASE,
-                        help="the local console base URL "
+                        help="the local console HTTP(S) origin without credentials "
                              f"(default: {DEFAULT_BASE})")
     parser.add_argument("--timeout", type=float, default=8.0,
                         help="per-request timeout in seconds (default: 8)")
@@ -1001,8 +1026,19 @@ def run_leg(report: Report, name: str, fn, *fn_args) -> None:
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     base = str(args.base).rstrip("/")
-    if not base.startswith(("http://", "https://")):
-        print("aidog accept: --base must be an http(s) URL", file=sys.stderr)
+    try:
+        origin = urllib.parse.urlsplit(base)
+        valid_base = (origin.scheme in ("http", "https") and bool(origin.hostname)
+                      and origin.username is None and origin.password is None
+                      and not origin.path and not origin.query and not origin.fragment
+                      and "?" not in base and "#" not in base
+                      and not any(ch.isspace() or ord(ch) < 32 for ch in base)
+                      and (origin.port is None or origin.port > 0))
+    except ValueError:
+        valid_base = False
+    if not valid_base:
+        print("aidog accept: --base must be an http(s) origin without credentials",
+              file=sys.stderr)
         return 2
     console = Console(base, max(0.5, float(args.timeout)))
     report = Report(base=base, tree_version=repo_version())
@@ -1010,6 +1046,7 @@ def main(argv: list[str] | None = None) -> int:
 
     run_leg(report, "console", leg_console, console, report.tree_version)
     run_leg(report, "status", leg_status, console)
+    run_leg(report, "setup", leg_setup, console)
     run_leg(report, "control", leg_control, console)
     run_leg(report, "usage", leg_usage, console)
     run_leg(report, "model-slots", leg_endpoints, console)

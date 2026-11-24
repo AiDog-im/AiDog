@@ -392,9 +392,51 @@ def message_suppression(directory=None, *, repo=None,
         if state is None and directory is not None:
             state = state_root_of(directory)
         snapshot = memforget.load_set(repo, state)
-    except Exception:  # noqa: BLE001 — an unreadable ledger hides nothing
-        return memforget.ChannelSuppression(SESSION_CHANNEL, None)
+    except memforget.LedgerUnavailable:
+        return memforget.ChannelSuppression(SESSION_CHANNEL, available=False)
     return memforget.ChannelSuppression(SESSION_CHANNEL, snapshot)
+
+
+def visible_session_messages(messages, suppression=None, *,
+                             directory=None) -> list[dict]:
+    """The messages of a loaded session that are still VISIBLE (D31).
+
+    ONE implementation for EVERY read path: the chat service, the one-shot
+    runner and the console all call THIS function. The three copies that
+    used to live in those modules are gone — one rule, one place, so the
+    three surfaces cannot drift apart.
+
+    `suppression` may be passed in (a caller that already resolved the
+    ledger for this profile pays for the ledger read once) or left out, in
+    which case the suppressor of `directory` — or of the ACTIVE profile —
+    is resolved here.
+
+    A forgotten message is dropped from every read: the model's own
+    context, the turn count, the /rewind head, the console's history. The
+    transcript FILE is never rewritten — the line stays on disk,
+    append-only and reviewable (D10/D31).
+
+    The check is skipped entirely while the ledger holds no session-channel
+    row (D34): with nothing forgotten the list comes back unchanged, so
+    the behaviour is byte-identical to the pre-suppression build."""
+    if suppression is None:
+        suppression = message_suppression(directory)
+    if suppression.empty:
+        return messages
+    return [m for m in messages
+            if not suppression.suppresses_digest(message_digest(m))]
+
+
+def message_is_visible(message: dict, suppression) -> bool:
+    """Is this ONE message still visible (D31)?
+
+    The per-message half of `visible_session_messages`, for a face that
+    walks the rows itself and must keep every OTHER row's identity (the
+    console's history keeps each message's absolute id, so a row that is
+    filtered out never shifts the ids of the rows around it)."""
+    if suppression.empty:
+        return True
+    return not suppression.suppresses_digest(message_digest(message))
 
 
 def _fts_expr(qf: str) -> str | None:
@@ -837,6 +879,9 @@ def list_sessions(directory: str | Path, *, q: str | None = None,
     files = _session_files(directory)
     files.sort(key=lambda pair: _mtime(pair[0]), reverse=True)
     suppression = message_suppression(directory)
+    if not suppression.available:
+        return {"sessions": [], "count": 0, "suppression": "unavailable",
+                "note": memforget.LEDGER_UNAVAILABLE}
 
     if qf is None:
         rows: list[dict] = []
@@ -1022,6 +1067,8 @@ def export_session(directory: str | Path, sid: str, fmt: str = "json") -> tuple[
     # A FORGOTTEN message leaves the export (D31) — the file on disk stays
     # byte-identical, only the READ drops it.
     suppression = message_suppression(directory)
+    if not suppression.available:
+        raise memforget.LedgerUnavailable(memforget.LEDGER_UNAVAILABLE)
     if not suppression.empty:
         msgs = [m for m in msgs
                 if not suppression.suppresses_digest(message_digest(m))]

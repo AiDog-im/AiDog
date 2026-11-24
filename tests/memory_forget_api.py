@@ -326,8 +326,11 @@ class Console:
         return api(self.base, "GET", preview_url(slot, title))
 
     def forget(self, slot: str, title: str, token: str | None = None):
+        _, preview, _ = self.preview(slot, title)
         return api(self.base, "POST", "/api/memory/forget",
-                   body={"slot": slot, "title": title},
+                   body={"slot": slot, "title": title,
+                         "source_id": preview.get("source_id"),
+                         "revision": preview.get("revision")},
                    token=self.token if token is None else token)
 
 
@@ -425,7 +428,7 @@ def main() -> int:
               str(preview.get("limits"))[:160])
         check("C5b the preview carries exactly the contracted keys",
               set(preview) == {"slot", "title", "channel", "source_id",
-                               "entries", "affects", "limits"},
+                               "revision", "entries", "affects", "limits"},
               str(sorted(preview)))
         check("C6 the preview carries no excerpt, no file path and no "
               "credential",

@@ -40,6 +40,10 @@ jobs:
         env:
           HF_HUB_OFFLINE: '1'
         run: python3 -m mycore.tests.run
+      - name: Hosted API contract
+        run: |
+          python3 -m pip install 'jsonschema==4.23.0'
+          python3 tests/site_openapi_contract.py
       - name: Deployment and usage regressions
         run: |
           python3 tests/deploy_site_cf.py

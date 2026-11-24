@@ -106,7 +106,14 @@ curl -L -o ~/aidog.zip "https://codeload.github.com/AiDog-im/AiDog/zip/refs/head
 cd ~ && unzip -q aidog.zip && mv AiDog-main AiDog
 
 # 4. the same one-command install as everywhere else
-cd ~/AiDog && bash deploy/install.sh && aidog setup
+cd ~/AiDog && (
+  bash deploy/install.sh
+  install_status=$?
+  case "$install_status" in
+    0|2) ./aidog setup ;;
+    *) exit "$install_status" ;;
+  esac
+)
 ```
 
 What matters on a Mac:

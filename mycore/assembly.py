@@ -90,7 +90,10 @@ def _read_memory_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
         return None
     if not text.strip():
         return None
-    text = memforget.filter_slot(path, text)
+    try:
+        text = memforget.filter_slot(path, text)
+    except memforget.LedgerUnavailable:
+        return f"[mycore: {memforget.LEDGER_UNAVAILABLE}]"
     if not text.strip():
         return ""
     return text if len(text) <= cap else text[:cap] + f"\n... [truncated at {cap} chars]"

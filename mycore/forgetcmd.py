@@ -55,6 +55,7 @@ string comes from the locale packs through the caller's `t` resolver.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import secrets
@@ -98,13 +99,17 @@ def _now_default() -> float:
     return time.time()
 
 
-def _read_bounded(path: Path) -> str:
-    """The first MAX_BYTES chars of a file ("" when it cannot be read)."""
+def _read_bounded(path: Path) -> tuple[str, str]:
+    """Read one complete bounded snapshot for the confirmation code."""
     try:
-        with path.open("r", encoding="utf-8", errors="replace") as handle:
-            return handle.read(MAX_BYTES)
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_BYTES + 1)
     except OSError:
-        return ""
+        return "", ""
+    if len(raw) > MAX_BYTES:
+        return "", ""
+    text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
+    return text, hashlib.sha256(raw).hexdigest()
 
 
 def _matches(query: str, *fields: str) -> bool:
@@ -169,7 +174,7 @@ def candidates(query: str, *, repo: Path, state: Path) -> list[dict]:
     snapshot = memforget.load_set(state=state)
     out: list[dict] = []
     for slot, path, channel in _slot_stores(repo):
-        text = _read_bounded(path)
+        text, revision = _read_bounded(path)
         if not text.strip():
             continue
         _preamble, chunks = memforget.split_sections(
@@ -181,7 +186,7 @@ def candidates(query: str, *, repo: Path, state: Path) -> list[dict]:
                 continue
             if _matches(q, text):
                 out.append({"kind": "slot", "slot": slot, "heading": "",
-                            "label": "", "channel": channel,
+                            "label": "", "channel": channel, "revision": revision,
                             "source_id": memforget.source_id(channel, text,
                                                              repo=repo)})
             if len(out) >= MAX_CANDIDATES:
@@ -195,7 +200,7 @@ def candidates(query: str, *, repo: Path, state: Path) -> list[dict]:
                 continue
             out.append({"kind": "slot", "slot": slot,
                         "heading": chunk["heading"], "label": chunk["heading"],
-                        "channel": channel,
+                        "channel": channel, "revision": revision,
                         "source_id": memforget.source_id(channel, body,
                                                          repo=repo)})
             if len(out) >= MAX_CANDIDATES:
@@ -338,16 +343,14 @@ def _write(candidate: dict, *, repo: Path, state: Path,
         for key, path, _channel in _slot_stores(repo):
             if key != slot:
                 continue
-            try:
-                info = memforget.describe_entry(path, heading, repo=repo,
-                                                 state=state)
-            except memforget.MemforgetError:
-                return "gone", None
-            if info.get("source_id") != candidate.get("source_id"):
-                # The entry changed since the listing — the id moved.
+            if not candidate.get("source_id") or not candidate.get("revision"):
                 return "changed", None
-            result = memforget.forget_entry(path, heading, repo=repo,
-                                            state=state, now=now)
+            try:
+                result = memforget.forget_entry(
+                    path, heading, repo=repo, state=state, now=now,
+                    expected_id=candidate["source_id"], revision=candidate["revision"])
+            except memforget.StaleEntry:
+                return "changed", None
             return "ok", result
     except memforget.MemforgetError:
         return "fail", None
@@ -375,7 +378,10 @@ def handle(chat_id, arg: str, *, t, repo: Path, state: Path,
 def _query(chat_id, query: str, *, t, repo: Path, state: Path,
            now) -> str:
     """`/forget <query>` — the listing and the confirmation codes."""
-    found = candidates(query, repo=repo, state=state)
+    try:
+        found = candidates(query, repo=repo, state=state)
+    except memforget.LedgerUnavailable:
+        return t("cmd.forget.fail")
     if not found:
         return t("cmd.forget.none")
     codes = _store_pending(chat_id, found, state=state, now=float(now()))

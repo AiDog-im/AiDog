@@ -21,6 +21,7 @@ REPO = Path(__file__).resolve().parent.parent
 API = "https://api.cloudflare.com/client/v4/graphql"
 THRESHOLD = 0.70
 ROW_LIMIT = 10000
+MAX_SAMPLE_AGE = timedelta(hours=2)  # Allow one missed hourly collection.
 LIMITS = {
     "workers_pages_requests": 100000,
     "kv_reads": 100000,
@@ -166,6 +167,42 @@ def snapshot(token: str, account: str, now: datetime | None = None,
             "excluded": ["r2"]}, code
 
 
+def check_file(path: Path, now: datetime | None = None) -> tuple[dict, int]:
+    """Assess the recorded observation at read time, independent of file mtime."""
+    now = now or datetime.now(timezone.utc)
+    unavailable = {"status": "unavailable"}, 2
+    try:
+        report = json.loads(path.read_text(encoding="utf-8"))
+        if report["schema_version"] != 1 or "output_status" in report:
+            return unavailable
+        observed = datetime.fromisoformat(report["observed_at"].replace("Z", "+00:00"))
+        period = report["period_start"], report["period_end"]
+        if period != day_window(observed) or observed > now:
+            return unavailable
+        if period != day_window(now) or now - observed > MAX_SAMPLE_AGE:
+            return {"status": "stale", "observed_at": observed.isoformat()}, 2
+        if report["status"] == "partial":
+            return {"status": "partial", "observed_at": observed.isoformat()}, 2
+        if any(report["datasets"][key] != "available" for key in DATASETS):
+            return unavailable
+        warnings = []
+        for name, limit in LIMITS.items():
+            metric = report["metrics"][name]
+            used = metric["used"]
+            if (type(used) not in (int, float) or not math.isfinite(used)
+                    or used < 0 or metric["daily_limit"] != limit):
+                return unavailable
+            if used >= limit * THRESHOLD:
+                warnings.append(name)
+        status = "threshold" if warnings else "healthy"
+        if report["status"] != status:
+            return unavailable
+        return {"status": status, "observed_at": observed.isoformat(),
+                "local_warnings": warnings}, int(bool(warnings))
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, OverflowError, RecursionError):
+        return unavailable
+
+
 def write_output(path: Path, text: str) -> None:
     """Atomically replace local runtime JSON, private to the current user."""
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -182,15 +219,20 @@ def write_output(path: Path, text: str) -> None:
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--secrets", type=Path, default=REPO / "secrets.env")
-    parser.add_argument("--output", type=Path, help="Optional local runtime JSON path")
+    modes = parser.add_mutually_exclusive_group()
+    modes.add_argument("--output", type=Path, help="Optional local runtime JSON path")
+    modes.add_argument("--check", type=Path, help="Assess a saved sample offline")
     args = parser.parse_args(argv)
-    report, code = snapshot(*credentials(args.secrets))
+    if args.check:
+        report, code = check_file(args.check)
+    else:
+        report, code = snapshot(*credentials(args.secrets))
     text = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
     if args.output:
         try:
             write_output(args.output, text)
         except OSError:
-            report["output_status"] = "unavailable"
+            report["status"] = report["output_status"] = "unavailable"
             text = json.dumps(report, indent=2, sort_keys=True, allow_nan=False) + "\n"
             code = 2
     print(text, end="")

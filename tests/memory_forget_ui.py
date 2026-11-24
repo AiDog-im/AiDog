@@ -164,6 +164,7 @@ class Api:
                 "channel": (entry or {}).get("channel")
                            or CHANNEL_BY_SLOT.get(slot, ""),
                 "source_id": (entry or {}).get("source_id", ""),
+                "revision": "a" * 64,
                 "entries": 1,
                 "affects": {"injection": True,
                             "memory_view": slot in ("memory", "user"),
@@ -344,8 +345,10 @@ def main() -> int:
         check("D1 the confirmed forget wrote exactly one request",
               len(api.writes) == 1, str(api.writes))
         write = api.writes[0] if api.writes else {"body": {}, "auth": ""}
-        check("D2 the write carries the slot and the title and nothing else",
-              write["body"] == {"slot": "memory", "title": "Facts"},
+        check("D2 the write carries the exact source ID and preview revision",
+              write["body"] == {"slot": "memory", "title": "Facts",
+                                "source_id": "src_aaaabbbbccccdddd1111222233334444",
+                                "revision": "a" * 64},
               str(write["body"]))
         check("D3 the write uses the product's Bearer helper",
               write["auth"] == "Bearer " + TOKEN, write["auth"])

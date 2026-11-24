@@ -366,49 +366,68 @@ _cache: dict = {}
 _cache_lock = threading.Lock()
 
 
+class LedgerUnavailable(MemforgetError):
+    """The ledger is not known to be empty or valid."""
+
+
+LEDGER_UNAVAILABLE = "suppression ledger unavailable; affected data withheld"
+_MAX_LEDGER_BYTES = 16 * 1024 * 1024
+
+
+def _fingerprint(info: os.stat_result) -> tuple:
+    return (info.st_dev, info.st_ino, info.st_ctime_ns, info.st_mtime_ns, info.st_size)
+
+
 def load_rows(repo: Path | None = None,
               state: Path | str | None = None) -> list[dict]:
-    """Every well-formed ledger row. A missing ledger is an EMPTY set — the
-    normal state before anything is forgotten."""
-    path = ledger_path(repo, state)
-    try:
-        raw = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return []
-    rows: list[dict] = []
-    for line in raw.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue                     # a damaged line is skipped, not fatal
-        clean = _clean_row(row)
-        if clean is not None:
-            rows.append(clean)
-    return rows
+    return [dict(row) for row in load_set(repo, state).rows]
 
 
 def load_set(repo: Path | None = None,
              state: Path | str | None = None) -> TombstoneSet:
-    """The active suppression set, cached on (path, mtime, size) so a turn
-    does not re-parse the ledger for every read path."""
+    """Absent means empty; unreadable, changing or damaged means unavailable.
+
+    Open even on cache hits, so losing access cannot look like a healthy
+    cached ledger. Cache only validated snapshots tied to the open inode.
+    """
     path = ledger_path(repo, state)
     try:
-        info = path.stat()
-        key = (str(path), info.st_mtime_ns, info.st_size)
-    except OSError:
-        return TombstoneSet()
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_NOFOLLOW)
+        except FileNotFoundError:
+            # A missing directory is normal on a fresh profile, but a
+            # dangling symlink is not evidence that the ledger is empty.
+            for parent in (path, *path.parents):
+                if parent.is_symlink() and not parent.exists():
+                    raise LedgerUnavailable(LEDGER_UNAVAILABLE) from None
+            return TombstoneSet()
+        with os.fdopen(fd, "rb") as handle:
+            info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > _MAX_LEDGER_BYTES:
+                raise LedgerUnavailable(LEDGER_UNAVAILABLE)
+            signature = _fingerprint(info)
+            key = (str(path.absolute()), *signature)
+            with _cache_lock:
+                hit = _cache.get(key)
+            if hit is not None:
+                return hit
+            raw = handle.read(_MAX_LEDGER_BYTES + 1)
+            if (len(raw) > _MAX_LEDGER_BYTES or (raw and not raw.endswith(b"\n"))
+                    or _fingerprint(os.fstat(handle.fileno())) != signature):
+                raise LedgerUnavailable(LEDGER_UNAVAILABLE)
+        rows = []
+        for line in raw.decode("utf-8").splitlines():
+            clean = _clean_row(json.loads(line))
+            if clean is None:
+                raise LedgerUnavailable(LEDGER_UNAVAILABLE)
+            rows.append(clean)
+        snapshot = TombstoneSet.from_rows(rows)
+    except (OSError, ValueError, RecursionError):
+        raise LedgerUnavailable(LEDGER_UNAVAILABLE) from None
     with _cache_lock:
-        hit = _cache.get(key)
-    if hit is not None:
-        return hit
-    snapshot = TombstoneSet.from_rows(load_rows(repo, state))
-    with _cache_lock:
-        _cache[key] = snapshot
-        if len(_cache) > 8:
+        if len(_cache) >= 8:
             _cache.clear()
+        _cache[key] = snapshot
     return snapshot
 
 
@@ -527,9 +546,11 @@ class ChannelSuppression:
     channel — for the `session` channel that is the NORMALISED message
     text (mycore.session), so the digest agrees with the search index."""
 
-    __slots__ = ("_channel", "_digests", "_ids", "_cache", "_possible")
+    __slots__ = ("_channel", "_digests", "_ids", "_cache", "_possible", "available")
 
-    def __init__(self, channel: str, snapshot: "TombstoneSet | None" = None):
+    def __init__(self, channel: str, snapshot: "TombstoneSet | None" = None,
+                 *, available: bool = True):
+        self.available = available
         self._channel = channel
         self._digests: set = set()
         self._ids: frozenset = frozenset()
@@ -557,16 +578,20 @@ class ChannelSuppression:
     def empty(self) -> bool:
         """Can this set silence a source of this channel at all? (The normal
         state: nothing is forgotten — the check costs nothing then.)"""
-        return not self._possible
+        return self.available and not self._possible
 
     def suppresses_digest(self, digest: str) -> bool:
         """Is the source with this content digest silenced right now?"""
+        if not self.available:
+            return True
         if not digest or self.empty:
             return False
         return digest in self._digests
 
     def suppresses(self, text: str) -> bool:
         """Is this source (as text in the channel's identity form) silenced?"""
+        if not self.available:
+            return True
         if not text or self.empty:
             return False
         hit = self._cache.get(text)
@@ -696,16 +721,15 @@ def _find_chunk(chunks: list[dict], wanted: str) -> dict | None:
     case-insensitive. None when there is no such entry."""
     if not chunks:
         return None
-    found = [c for c in chunks if c["heading"] == wanted]
-    if not found:
-        low = wanted.casefold()
-        found = [c for c in chunks if c["heading"].casefold() == low]
+    found = [c for c in chunks if c["heading"].casefold() == wanted.casefold()]
+    if len(found) > 1:
+        raise MemforgetError("ambiguous entry heading")
     return found[0] if found else None
 
 
-def describe_entry(path: Path | str, title: str, *,
+def _entry_snapshot(path: Path | str, title: str, *,
                    repo: Path | None = None,
-                   state: Path | str | None = None) -> dict:
+                   state: Path | str | None = None) -> tuple[dict, str]:
     """Describe ONE stored entry of a memory file, addressed by its heading.
 
     READ-ONLY: nothing is written, nothing is changed. The answer is the
@@ -723,12 +747,13 @@ def describe_entry(path: Path | str, title: str, *,
     stays honest rather than inventing structure."""
     target = Path(path)
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
+        raw = target.read_bytes()
+        text = raw.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     except OSError:
-        raise MemforgetError("the memory slot could not be read")
+        raise MemforgetError("the memory slot could not be read") from None
     channel = channel_for_path(target)
     min_level, max_level = levels_for(channel)
-    preamble, chunks = split_sections(text, min_level, max_level)
+    _, chunks = split_sections(text, min_level, max_level)
     wanted = str(title or "").strip()
     if not chunks:
         if wanted:
@@ -750,38 +775,37 @@ def describe_entry(path: Path | str, title: str, *,
     return {"channel": channel,
             "source_id": source_id(channel, body, repo=repo),
             "entries": matches,
-            "title": heading}
+            "revision": hashlib.sha256(raw).hexdigest(),
+            "title": heading}, body
+
+
+def describe_entry(path: Path | str, title: str, *, repo=None, state=None) -> dict:
+    load_set(repo, state)
+    info, _ = _entry_snapshot(path, title, repo=repo, state=state)
+    return info
+
+
+class StaleEntry(MemforgetError):
+    pass
 
 
 def forget_entry(path: Path | str, title: str, *,
                  repo: Path | None = None,
                  state: Path | str | None = None,
-                 now: float | None = None) -> dict:
-    """Forget one stored entry of a memory file, addressed by its heading.
-
-    The heading is matched exactly first, then case-insensitively. The
-    source text that is tombstoned is the entry body WITHOUT its marker
-    line — the same text the reader derives the id from, so the read paths
-    and the ledger can never disagree about which text an entry owns."""
-    target = Path(path)
+                 now: float | None = None, expected_id: str | None = None,
+                 revision: str | None = None) -> dict:
+    """Forget exactly the source from one validated slot snapshot."""
+    load_set(repo, state)
     try:
-        text = target.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        raise MemforgetError("the memory slot could not be read")
-    channel = channel_for_path(target)
-    min_level, max_level = levels_for(channel)
-    _, chunks = split_sections(text, min_level, max_level)
-    wanted = str(title or "").strip()
-    if not chunks:
-        # A file with no heading at all is ONE entry: the whole file.
-        if wanted:
-            raise MemforgetError("no entry with that heading")
-        return forget(channel, text, repo=repo, state=state, now=now)
-    chunk = _find_chunk(chunks, wanted)
-    if chunk is None:
-        raise MemforgetError("no entry with that heading")
-    body = strip_markers(chunk["body"])
-    return forget(channel, body, repo=repo, state=state, now=now)
+        info, body = _entry_snapshot(path, title, repo=repo, state=state)
+    except MemforgetError as exc:
+        if expected_id is not None:
+            raise StaleEntry("entry changed; preview it again") from exc
+        raise
+    if ((expected_id is not None or revision is not None)
+            and (info["source_id"] != expected_id or info["revision"] != revision)):
+        raise StaleEntry("entry changed; preview it again")
+    return forget(info["channel"], body, repo=repo, state=state, now=now)
 
 
 def ledger_report(repo: Path | None = None,

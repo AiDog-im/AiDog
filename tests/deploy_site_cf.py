@@ -3,6 +3,9 @@
 import contextlib
 import io
 import json
+import os
+import shutil
+import tempfile
 from pathlib import Path
 import subprocess
 import unittest
@@ -98,6 +101,55 @@ class DeploySiteTests(unittest.TestCase):
         guard = branch.split("\n", 1)[0]
         checked = subprocess.run(["bash", "-c", 'CHECK_ONLY=1\n' + guard + '\nprintf unexpected-write\nfi'], capture_output=True, text=True, check=True)
         self.assertEqual(checked.stdout, "")
+
+    def test_check_runs_without_credentials_or_mutating_requests(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / 'deploy').mkdir()
+            shutil.copy(ROOT / 'deploy/deploy_site.sh', root / 'deploy')
+            for name in ('site', 'mycore', 'VERSION'):
+                (root / name).symlink_to(ROOT / name)
+            # Every curl call resolves to a local file or synthetic response.
+            curl = root / 'curl'
+            curl.write_text('''#!/bin/bash
+set -eu
+[[ "$*" != *" -X "* && "$*" != *" -d "* ]]
+out=""
+while (($# > 1)); do
+  case "$1" in
+    -o) out="$2"; shift 2;;
+    -w|--noproxy|--max-time) shift 2;;
+    -q|-s) shift;;
+    *) exit 90;;
+  esac
+done
+url="$1"
+echo "$url" >> calls
+case "$url" in
+  https://www.aidog.im/|https://aidog.im/) cp site/index.html "$out";;
+  https://aidog.im/models) cp site/models.html "$out";;
+  https://aidog.im/api/health) echo '{"ok":true}' > "$out";;
+  https://aidog.im/api/stats) echo '{"totals":{"requests":0},"installs":0,"reports":0,"daily":[],"by_model":[],"by_scenario":{},"probe_reports":0}' > "$out";;
+  https://aidog.im/api/*) exit 91;;
+  https://aidog.im/data/gh.json) echo '{"fetched_at":"2026-11-24T00:00:00Z","stars":0,"forks":0,"watchers":0,"discussions":null,"version":null,"notes_teaser":null}' > "$out";;
+  https://aidog.im/*) cp "site/${url#https://aidog.im/}" "$out";;
+  *) exit 92;;
+esac
+if [[ "$url" == "$BAD_URL" ]]; then echo '{}' > "$out"; echo "$BAD_STATUS"; else echo 200; fi
+''')
+            curl.chmod(0o700)
+            for endpoint, status in [('', ''), ('health', '503'), ('stats', '503'), ('health', '200'), ('stats', '200')]:
+                with self.subTest(endpoint=endpoint, status=status):
+                    log = root / 'calls'
+                    log.write_text('')
+                    result = subprocess.run(['bash', 'deploy/deploy_site.sh', '--check'], cwd=root,
+                        env={'PATH': tmp + os.pathsep + os.defpath, 'TMPDIR': tmp,
+                             'BAD_URL': 'https://aidog.im/api/' + endpoint, 'BAD_STATUS': status},
+                        capture_output=True, text=True)
+                    self.assertEqual(result.returncode, int(bool(endpoint)), result.stderr)
+                    self.assertEqual('ALL VERIFIED' in result.stdout, not endpoint)
+                    self.assertEqual([s for s in log.read_text().splitlines() if '/api/' in s],
+                                     ['https://aidog.im/api/stats', 'https://aidog.im/api/health'])
 
     def test_all_four_pages_have_one_deferred_beacon(self):
         pages = sorted((ROOT / "site").glob("*.html"))

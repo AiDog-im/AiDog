@@ -1,102 +1,60 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "I'm AiDog public site API",
+    "title": "I'm AiDog hosted public API",
     "version": "1.0.0",
-    "description": "Anonymous, read-only aggregate endpoints served by the aidog.im marketing site. No authentication, no per-install records: reports carry model names, request counts and token totals only — never prompts, files, paths or credentials."
+    "description": "Anonymous endpoints hosted on aidog.im. Stats are read-only. Visits increments a shared counter and ledger POST writes an anonymous daily report. Loopback console endpoints, CLI commands and ACP tools have separate contracts and trust scopes. This API does not grant access to them. Usage reports must contain only aggregate data with public model labels."
   },
   "servers": [{ "url": "https://aidog.im" }],
   "paths": {
+    "/api/health": {
+      "get": {
+        "operationId": "getSiteHealth",
+        "summary": "Read-only D1 readiness for usage reports and page views",
+        "responses": {
+          "200": {
+            "description": "Both tables are readable, including when empty",
+            "content": { "application/json": { "schema": { "type": "object", "required": ["ok"], "properties": { "ok": { "const": true } } }, "example": { "ok": true } } }
+          },
+          "503": {
+            "description": "Required storage unavailable",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "site storage unavailable" } } }
+          }
+        }
+      }
+    },
     "/api/stats": {
       "get": {
         "operationId": "getUsageStats",
         "summary": "Public usage aggregates",
-        "description": "All-time totals, the last seven UTC days, and the per-model / per-scenario breakdowns rendered by the Models page. Returns 503 with an error object when the ledger is not configured — never a fabricated zero.",
         "responses": {
           "200": {
-            "description": "Aggregate usage statistics",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "updated": { "type": "string", "format": "date-time", "nullable": true },
-                    "installs": { "type": "integer", "description": "Distinct anonymous install pseudonyms" },
-                    "reports": { "type": "integer", "description": "Daily reports received" },
-                    "totals": {
-                      "type": "object",
-                      "properties": {
-                        "requests": { "type": "integer" },
-                        "tokens": {
-                          "type": "object",
-                          "properties": {
-                            "in": { "type": "integer" },
-                            "out": { "type": "integer" }
-                          }
-                        }
-                      }
-                    },
-                    "daily": {
-                      "type": "array",
-                      "description": "Last seven UTC days",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "day": { "type": "string", "format": "date" },
-                          "requests": { "type": "integer" },
-                          "in": { "type": "integer" },
-                          "out": { "type": "integer" },
-                          "installs": { "type": "integer" }
-                        }
-                      }
-                    },
-                    "models": {
-                      "type": "array",
-                      "items": {
-                        "type": "object",
-                        "properties": {
-                          "model": { "type": "string" },
-                          "requests": { "type": "integer" },
-                          "share": { "type": "number" }
-                        }
-                      }
-                    }
-                  }
-                }
-              }
-            }
+            "description": "Usage aggregates excluding verification canaries. A successful snapshot may be reused for up to 60 seconds within a warm isolate. The updated field is the latest real report timestamp.",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Stats" } } }
           },
           "503": {
-            "description": "Ledger not configured",
-            "content": { "application/json": { "schema": { "type": "object" } } }
+            "description": "Ledger unavailable",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "stats unavailable" } } }
           }
         }
       }
     },
     "/api/visits": {
       "get": {
-        "operationId": "getVisitCount",
-        "summary": "Approximate page-view counter",
-        "description": "One increment per page load; approximate by design, includes crawlers and refreshes. Append ?format=text for plain-text output.",
+        "operationId": "incrementVisitCount",
+        "summary": "Increment and return approximate page views",
+        "parameters": [{ "name": "format", "in": "query", "schema": { "type": "string", "const": "text" }, "description": "Omit for JSON." }],
         "responses": {
           "200": {
-            "description": "Counter value",
+            "description": "Counter incremented once",
             "content": {
-              "application/json": {
-                "schema": {
-                  "type": "object",
-                  "properties": {
-                    "count": { "type": "integer" },
-                    "unit": { "type": "string", "example": "page views" },
-                    "note": { "type": "string" }
-                  }
-                }
-              }
+              "application/json": { "schema": { "type": "object", "required": ["count", "unit", "note"], "properties": { "count": { "$ref": "#/components/schemas/Count" }, "unit": { "const": "page views" }, "note": { "type": "string" } } } },
+              "text/plain": { "schema": { "type": "string" }, "example": "visits: 1\n" }
             }
           },
           "503": {
-            "description": "Counter not configured",
-            "content": { "application/json": { "schema": { "type": "object" } } }
+            "description": "Counter unavailable",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "counter not configured" } } }
           }
         }
       }
@@ -104,22 +62,17 @@
     "/api/ledger": {
       "post": {
         "operationId": "submitUsageReport",
-        "summary": "Anonymous daily usage report",
-        "description": "One whitelist-exact report per install per UTC day; last write wins, so retries are idempotent. Verification canary rows (install_id starting with _) are stored but never aggregated.",
+        "summary": "Report anonymous daily usage",
+        "description": "Last valid report wins for an install and UTC day. Install IDs starting with an underscore identify verification canaries. Unrecognized fields are ignored by the server. The body is limited to 8192 JavaScript string code units.",
         "requestBody": {
           "required": true,
           "content": {
             "application/json": {
-              "schema": {
-                "type": "object",
-                "required": ["install_id", "day"],
-                "properties": {
-                  "install_id": { "type": "string", "description": "Random per-install pseudonym, not a device fingerprint" },
-                  "day": { "type": "string", "format": "date" },
-                  "requests": { "type": "integer" },
-                  "tokens_in": { "type": "integer" },
-                  "tokens_out": { "type": "integer" },
-                  "model": { "type": "string" }
+              "schema": { "$ref": "#/components/schemas/Report" },
+              "examples": {
+                "minimal": {
+                  "summary": "Use the current UTC date when submitting. The fixed date is for offline validation.",
+                  "value": { "v": 1, "install_id": "_example123", "day": "2026-11-24", "requests": 0, "tokens": { "in": 0, "out": 0 }, "models": [] }
                 }
               }
             }
@@ -127,11 +80,104 @@
         },
         "responses": {
           "200": {
-            "description": "Stored",
-            "content": { "application/json": { "schema": { "type": "object", "properties": { "ok": { "type": "boolean" } } } } }
+            "description": "Report stored",
+            "content": { "application/json": { "schema": { "type": "object", "required": ["ok"], "properties": { "ok": { "const": true } } }, "example": { "ok": true } } }
           },
-          "400": { "description": "Validation refused; nothing stored" },
-          "503": { "description": "Ledger not configured" }
+          "400": {
+            "description": "Validation refused",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "bad tokens" } } }
+          },
+          "500": {
+            "description": "Storage write failed",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "write failed" } } }
+          },
+          "503": {
+            "description": "Ledger binding unavailable",
+            "content": { "application/json": { "schema": { "$ref": "#/components/schemas/Error" }, "example": { "error": "ledger not configured" } } }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Count": { "type": "integer", "minimum": 0 },
+      "RequestCount": { "type": "integer", "minimum": 0, "maximum": 10000000 },
+      "TokenCount": { "type": "integer", "minimum": 0, "maximum": 1000000000000000 },
+      "ScenarioCount": { "type": "integer", "minimum": 0, "maximum": 1000000000 },
+      "Error": { "type": "object", "required": ["error"], "properties": { "error": { "type": "string" } } },
+      "Tokens": {
+        "type": "object", "required": ["in", "out"],
+        "properties": { "in": { "$ref": "#/components/schemas/Count" }, "out": { "$ref": "#/components/schemas/Count" } }
+      },
+      "ReportModel": {
+        "type": "object", "required": ["model", "requests", "in", "out"],
+        "properties": {
+          "model": { "type": "string", "minLength": 1, "maxLength": 100, "description": "The runtime enforces 100 UTF-16 code units." },
+          "requests": { "$ref": "#/components/schemas/RequestCount" },
+          "in": { "$ref": "#/components/schemas/TokenCount" }, "out": { "$ref": "#/components/schemas/TokenCount" }
+        }
+      },
+      "Report": {
+        "type": "object", "required": ["v", "install_id", "day", "requests", "tokens", "models"],
+        "properties": {
+          "v": { "const": 1 },
+          "install_id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{8,64}$" },
+          "day": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$", "format": "date", "description": "The server accepts the last 400 days with up to one day of forward clock slack." },
+          "requests": { "$ref": "#/components/schemas/RequestCount" },
+          "tokens": {
+            "type": "object", "required": ["in", "out"],
+            "properties": { "in": { "$ref": "#/components/schemas/TokenCount" }, "out": { "$ref": "#/components/schemas/TokenCount" } }
+          },
+          "models": { "type": "array", "maxItems": 32, "items": { "$ref": "#/components/schemas/ReportModel" } },
+          "scenarios": {
+            "type": "object", "properties": {
+              "chat": { "$ref": "#/components/schemas/ScenarioCount" }, "coding": { "$ref": "#/components/schemas/ScenarioCount" },
+              "research": { "$ref": "#/components/schemas/ScenarioCount" }, "voice": { "$ref": "#/components/schemas/ScenarioCount" },
+              "publishing": { "$ref": "#/components/schemas/ScenarioCount" }
+            }
+          }
+        }
+      },
+      "Totals": {
+        "type": "object", "required": ["requests", "tokens"],
+        "properties": { "requests": { "$ref": "#/components/schemas/Count" }, "tokens": { "$ref": "#/components/schemas/Tokens" } }
+      },
+      "Stats": {
+        "type": "object",
+        "required": ["updated", "installs", "reports", "probe_reports", "totals", "today", "daily", "by_model", "by_scenario"],
+        "properties": {
+          "updated": { "type": ["string", "null"], "format": "date-time" },
+          "installs": { "$ref": "#/components/schemas/Count" }, "reports": { "$ref": "#/components/schemas/Count" },
+          "probe_reports": { "$ref": "#/components/schemas/Count" }, "totals": { "$ref": "#/components/schemas/Totals" },
+          "today": { "allOf": [{ "$ref": "#/components/schemas/Totals" }, { "type": "object", "required": ["installs"], "properties": { "installs": { "$ref": "#/components/schemas/Count" } } }] },
+          "daily": {
+            "type": "array", "items": {
+              "type": "object", "required": ["day", "requests", "in", "out", "installs"],
+              "properties": {
+                "day": { "type": "string", "format": "date" }, "requests": { "$ref": "#/components/schemas/Count" },
+                "in": { "$ref": "#/components/schemas/Count" }, "out": { "$ref": "#/components/schemas/Count" }, "installs": { "$ref": "#/components/schemas/Count" }
+              }
+            }
+          },
+          "by_model": {
+            "type": "array", "maxItems": 12, "items": {
+              "type": "object", "required": ["model", "requests", "in", "out", "share"],
+              "properties": {
+                "model": { "type": "string" }, "requests": { "$ref": "#/components/schemas/Count" },
+                "in": { "$ref": "#/components/schemas/Count" }, "out": { "$ref": "#/components/schemas/Count" },
+                "share": { "type": "number", "minimum": 0, "maximum": 1 }
+              }
+            }
+          },
+          "by_scenario": {
+            "type": "object", "required": ["chat", "coding", "research", "voice", "publishing"],
+            "properties": {
+              "chat": { "$ref": "#/components/schemas/Count" }, "coding": { "$ref": "#/components/schemas/Count" },
+              "research": { "$ref": "#/components/schemas/Count" }, "voice": { "$ref": "#/components/schemas/Count" },
+              "publishing": { "$ref": "#/components/schemas/Count" }
+            }
+          }
         }
       }
     }

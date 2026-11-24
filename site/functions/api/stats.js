@@ -23,6 +23,11 @@
 
 import { json, SCENARIOS, REAL_ROW, PROBE_ROW } from "./_ledger_lib.js";
 
+// One successful aggregate per D1 binding per warm isolate. Expiry is also
+// bounded by UTC midnight because the today/week windows roll over then.
+const snapshots = new WeakMap();
+const ttlMs = 60000;
+
 function utcDay(offsetDays) {
   const d = new Date(Date.now() - offsetDays * 86400000);
   return d.toISOString().slice(0, 10);
@@ -33,6 +38,9 @@ export async function onRequestGet({ env }) {
   if (!db || typeof db.prepare !== "function") {
     return json({ error: "ledger not configured" }, 503);
   }
+  const now = Date.now();
+  const cached = snapshots.get(db);
+  if (cached && cached.expires > now) return json(cached.body, 200);
   try {
     const totals = await db
       .prepare(
@@ -119,8 +127,7 @@ export async function onRequestGet({ env }) {
       out: Number(r.tout) || 0,
       installs: Number(r.installs) || 0
     }));
-    return json(
-      {
+    const body = {
         updated: (totals && totals.updated) || null,
         installs: (totals && Number(totals.installs)) || 0,
         reports: (totals && Number(totals.reports)) || 0,
@@ -143,9 +150,10 @@ export async function onRequestGet({ env }) {
         daily,
         by_model: models.slice(0, 12),
         by_scenario: byScenario
-      },
-      200
-    );
+    };
+    const nextMidnight = now - (now % 86400000) + 86400000;
+    snapshots.set(db, { body, expires: Math.min(now + ttlMs, nextMidnight) });
+    return json(body, 200);
   } catch (err) {
     return json({ error: "stats unavailable" }, 503);
   }

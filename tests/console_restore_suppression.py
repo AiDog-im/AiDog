@@ -41,6 +41,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import selectors
 import shutil
 import socket
 import subprocess
@@ -167,7 +168,7 @@ def build_sandbox(root: Path) -> Path:
     return sandbox
 
 
-SITECUSTOMIZE = '''"""Loopback-only guard for the isolated console (test seam, not product)."""
+SITECUSTOMIZE = r'''"""Loopback-only guard for the isolated console (test seam, not product)."""
 import os
 import sys
 
@@ -242,8 +243,8 @@ class Console:
         self.stdout = ""
         self._threads: list[threading.Thread] = []
 
-    def start(self, timeout: float = 60.0) -> bool:
-        env = {
+    def isolated_env(self) -> dict[str, str]:
+        return {
             "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
             "HOME": str(self.profile.parent),
             "LANG": "C.UTF-8",
@@ -256,9 +257,11 @@ class Console:
             "AIDOG_MC_STATE": str(self.profile / "state"),
             "AIDOG_WEB_PORT": str(self.port),
         }
+
+    def start(self, timeout: float = 60.0) -> bool:
         self.proc = subprocess.Popen(
             [sys.executable, "server.py"], cwd=str(self.sandbox / "web"),
-            env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            env=self.isolated_env(), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
         for stream, sink in ((self.proc.stdout, "stdout"), (self.proc.stderr, "stderr")):
             thread = threading.Thread(target=self._drain, args=(stream, sink),
                                       daemon=True)
@@ -379,6 +382,55 @@ def learned_text(profile: Path) -> str:
         return ""
 
 
+def check_learn_restore_contention(console: Console, old_memory: str) -> None:
+    """Hold the kernel writer's lock until both HTTP calls have returned."""
+    slot = "EVOLUTION_learned.md"
+    newer = "The owner prefers a brief offline contention report on Fridays."
+    status, body, _ = console.learn(newer)
+    before = learned_text(console.profile)
+    check("K1 learn writes a newer entry before restore",
+          status == 200 and (body or {}).get("ok") is True and newer in before)
+    restore = envelope({"memory": {slot: old_memory}}, {"memory": True})
+    worker_code = """
+import sys
+from mycore import evolution
+with evolution.mutation_lock(evolution.learned_memory_path()):
+    print('locked', flush=True)
+    sys.stdin.read(1)
+"""
+    holder = subprocess.Popen(
+        [sys.executable, "-c", worker_code], cwd=console.sandbox,
+        env=console.isolated_env(), stdin=subprocess.PIPE, stdout=subprocess.PIPE)
+    try:
+        with selectors.DefaultSelector() as selector:
+            selector.register(holder.stdout, selectors.EVENT_READ)
+            ready = bool(selector.select(10)) and holder.stdout.readline() == b"locked\n"
+        if not check("K2 another process holds the kernel writer's lock", ready):
+            return
+        status, body, _ = console.learn("A separate entry must wait for the active writer.")
+        check("K3 learn refuses the held lock",
+              status == 400 and (body or {}).get("details") == ["io"], str(body))
+        status, body, _ = console.restore(restore)
+        memory = (body or {}).get("memory", {})
+        check("K4 restore reports the contended file without changing the slot",
+              status == 503 and not memory.get("files")
+              and any(f.get("name") == slot and "lock" in f.get("reason", "")
+                      for f in memory.get("failed", []))
+              and learned_text(console.profile) == before, str(memory))
+    finally:
+        holder.stdin.close()
+        try:
+            holder.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            holder.kill()
+            holder.wait()
+        holder.stdout.close()
+    status, body, _ = console.restore(restore)
+    check("K5 retry after release restores the whole file and replaces the newer entry",
+          status == 200 and (body or {}).get("memory", {}).get("files") == [slot]
+          and learned_text(console.profile) == old_memory)
+
+
 # ------------------------------------------------------------------ main ---
 def main() -> int:
     root = Path(tempfile.mkdtemp(prefix="aidog-suppress-restore-"))
@@ -445,6 +497,9 @@ def main() -> int:
               "(nothing was forgotten yet)",
               "tombstones" not in payload_old,
               f"tombstones={payload_old.get('tombstones')}")
+
+        check_learn_restore_contention(
+            con_a, (payload_old.get("memory") or {}).get("EVOLUTION_learned.md", ""))
 
         # ------------------------------------------------ record a tombstone --
         result = record_tombstone(profiles / PROFILE_A / "state", PROFILE_A, TEXT_A)

@@ -398,7 +398,7 @@ def _suppression_context(manifest: dict):
 
     The effective set is the LOCAL ledger plus the set that travelled with
     the bundle (D6) — a restore on another machine keeps the suppression.
-    A failure here NEVER fails the import: the note says what happened."""
+    Unavailable suppression prevents import before extracting any files."""
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
         sys.path.insert(0, here)
@@ -406,7 +406,7 @@ def _suppression_context(manifest: dict):
     mf = jm.memforget_module()
     if mf is None:
         return None, ("suppression unavailable: the tombstone ledger could "
-                      "not be loaded here — nothing was filtered"), {}
+                      "not be loaded here — memory writes withheld"), {}
     local, note = jm.load_suppression()
     if local is None:
         return None, note, {}
@@ -490,6 +490,9 @@ def cmd_export(args: argparse.Namespace) -> int:
     # the shape it always had. The rows carry ids, channels, scopes, digests
     # and timestamps only: no content, no path, no credential.
     rows, tomb_note = _tombstone_rows()
+    if tomb_note:
+        print(f"export refused: {tomb_note}")
+        return 1
     if rows:
         manifest["tombstones"] = rows
     out_dir = Path(args.out).expanduser() if args.out else DEFAULT_OUT
@@ -521,8 +524,6 @@ def cmd_export(args: argparse.Namespace) -> int:
     print(f"  sidecar: {name}.sha256")
     if rows:
         print(f"  tombstones: {len(rows)} suppression(s) travel with the bundle")
-    if tomb_note:
-        print(f"  note: {tomb_note}")
     return 0
 
 
@@ -563,6 +564,9 @@ def cmd_import(args: argparse.Namespace) -> int:
     # source home is written with the ORIGINAL bytes — it is the owner's own
     # copy — and the output says so plainly.
     effective, note, merged = _suppression_context(manifest)
+    if effective is None or merged.get("error"):
+        print(note or "suppression unavailable: travelling ledger could not be merged")
+        return 1
 
     here = str(Path(__file__).resolve().parent)
     if here not in sys.path:
@@ -570,7 +574,7 @@ def cmd_import(args: argparse.Namespace) -> int:
     import aidog_memory as jm  # noqa: PLC0415 — sibling module, same deploy/ dir
 
     def _product_filter(rel: str, data: bytes) -> tuple[bytes, int]:
-        if effective is None or not effective:
+        if not effective:
             return data, 0
         try:
             text = data.decode("utf-8")

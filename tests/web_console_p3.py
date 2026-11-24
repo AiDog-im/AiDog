@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
 """P3 web console smoke test — endpoints, auth gate, validation, idempotency.
 
-Runs against a live console (default http://127.0.0.1:19167). The access token
-is read in-process from secrets.env and never printed or written anywhere.
-Exit code 0 = all assertions passed; exit 77 = skipped (no provisioned
-install on this machine — secrets.env absent; the suite drives a live
-console and has nothing to smoke without one).
-Live voice calls can consume provider quota. They are off by default.
-Set AIDOG_SMOKE_LIVE_VOICE=edge or byok to make one request to that engine.
+Run without arguments for the disposable, offline integration suite.
+Use --live-read-only http://127.0.0.1:PORT for the shared-console read probe.
 English comments per repo i18n policy.
 """
 from __future__ import annotations
@@ -22,7 +17,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-BASE = sys.argv[1] if len(sys.argv) > 1 else "http://127.0.0.1:19167"
+BASE = ""  # Assigned only by the disposable fixture launcher.
+FIXTURE_PORTS: set[int] = set()
 REPO = Path(__file__).resolve().parent.parent
 SECRETS = REPO / "secrets.env"
 
@@ -242,41 +238,134 @@ def sse_data_lines(text: str) -> list[str]:
             if ln.startswith("data:")]
 
 
-def main() -> int:
-    # Car A (P6): environment preflight — this suite drives an ALREADY
-    # provisioned console. On a machine without an install there is no
-    # console to smoke: report a clean, honest skip (exit 77, the
-    # conventional "skipped" code) instead of a wall of red failures.
-    if not SECRETS.exists():
-        print("SKIP  console smoke requires a provisioned install "
-              "(secrets.env not found); skipped")
-        return 77
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+def live_probe(base: str, verify=check) -> None:
+    """Only these two unauthenticated reads are allowed on a live console."""
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
+    # GET /api/control is intentionally excluded: with a priced USD cap it
+    # may fetch FX and persist a cache entry while calculating budget status.
+    for path in ("/api/health", "/api/console"):
+        req = urllib.request.Request(base + path, method="GET")
+        try:
+            with opener.open(req, timeout=8) as response:
+                body = json.loads(response.read(65536))
+                valid = response.status == 200 and isinstance(body, dict)
+                if path == "/api/health":
+                    valid = valid and body.get("status") == "ok"
+                else:
+                    valid = valid and body.get("host") == "127.0.0.1" and type(body.get("port")) is int
+                verify(f"live GET {path}", valid)
+        except (OSError, ValueError) as exc:
+            verify(f"live GET {path}", False, type(exc).__name__)
+
+
+def check_live_isolation() -> None:
+    """Treat the throwaway console as shared and compare persisted bytes."""
+    from mycore import leash
+    from mycore.session import Session
+    from unittest.mock import patch
+
+    token = re.search(r"(?m)^WEB_TOKEN=(\S+)$", store_text()).group(1)
+    state = leash.state_path()
+    session = state.parent / "sessions/web.jsonl"
+    Session(session).append({"role": "user", "content": "owner's fixture history"})
+
+    def snapshot():
+        return state.read_bytes(), session.read_bytes()
+
+    def pause(reason):
+        status, _ = post("/api/control", {"action": "pause", "reason": reason}, token)
+        if status != 200:
+            raise RuntimeError("fixture pause setup failed")
+        return snapshot()
+
+    # Deliberately use the old smoke reason for a pre-existing owner pause.
+    before = pause("smoke")
+    live_probe(BASE)
+    check("live probe preserves prior pause and session bytes", snapshot() == before)
+
+    def interrupted(*args):
+        raise KeyboardInterrupt
+
+    try:
+        live_probe(BASE, verify=interrupted)
+    except KeyboardInterrupt:
+        check("interrupted live probe preserves pause and session bytes", snapshot() == before)
+    else:
+        check("live probe interruption propagated", False)
+
+    status, _ = post("/api/control", {"action": "resume"}, token)
+    check("fixture reset before owner-pause drill", status == 200)
+    during = []
+
+    def owner_pauses_after_health(name, ok, detail=""):
+        check(name, ok, detail)
+        if name == "live GET /api/health":
+            during.append(pause("owner during smoke"))
+
+    live_probe(BASE, verify=owner_pauses_after_health)
+    check("owner pause during live probe preserves control and session bytes",
+          len(during) == 1 and snapshot() == during[0])
+
+    with patch(__name__ + ".check") as verdict:
+        paused_exit = mutating_suite(report=False)
+    check("mutating preflight aborts on prior pause without touching state",
+          paused_exit != 0 and verdict.call_args.args ==
+          ("disposable console must start unpaused", False) and snapshot() == during[0])
+    status, _ = post("/api/control", {"action": "resume"}, token)
+    check("fixture reset after isolation drills", status == 200)
+    session.unlink()
+
+    # Cover the complete live route/method allowlist and ensure a redirect
+    # never expands it, even when the target is on the same loopback origin.
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+    from unittest.mock import Mock
+
+    requests = []
+
+    class Recorder(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append((self.command, self.path, self.headers.get("Authorization")))
+            self.send_response(302)
+            self.send_header("Location", "/not-allowlisted")
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Recorder) as server:
+        port = server.server_port
+        FIXTURE_PORTS.add(port)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            verdict = Mock()
+            with patch.dict(os.environ, {"HTTP_PROXY": "http://127.0.0.1:9", "NO_PROXY": ""}):
+                live_probe(f"http://127.0.0.1:{port}", verify=verdict)
+            check("live probe uses only allowlisted unauthenticated GETs and refuses redirects",
+                  requests == [("GET", "/api/health", None), ("GET", "/api/console", None)]
+                  and [call.args[1] for call in verdict.call_args_list] == [False, False])
+        finally:
+            server.shutdown()
+            worker.join()
+            FIXTURE_PORTS.discard(port)
+
+
+def mutating_suite(*, report=True) -> int:
+    if not BASE or not FIXTURE_PORTS or not SECRETS.is_file():
+        raise RuntimeError("the mutating suite requires the disposable console fixture")
     tok_m = re.search(r"(?m)^WEB_TOKEN=(\S+)$", store_text())
     token = tok_m.group(1) if tok_m else None
-    check("secrets.WEB_TOKEN present", bool(token))
-
-    # --- a leftover pause from an INTERRUPTED run of this suite ----------
-    # This suite pauses the console to prove the fail-closed switch and
-    # resumes it afterwards. An interrupted run (timeout, kill) left the
-    # console paused with OUR reason, which then refused every later turn
-    # — including this run's live chat legs and the owner's own use of the
-    # console. A test switch must not outlive the test: resume a pause that
-    # carries our reason, and never touch a pause the owner set.
-    s, ctl0 = get("/api/control")
-    ctl0 = ctl0 if isinstance(ctl0, dict) else {}
-    owner_paused = ctl0.get("paused") is True
-    if owner_paused and ctl0.get("reason") == "smoke" and token:
-        s, _body = post("/api/control", {"action": "resume"}, token)
-        print(f"INFO  resumed a leftover smoke pause from an interrupted run "
-              f"(rc={s})")
-        owner_paused = False
-        s, ctl0 = get("/api/control")
-        ctl0 = ctl0 if isinstance(ctl0, dict) else {}
-        owner_paused = ctl0.get("paused") is True
-    elif owner_paused:
-        print("SKIP  the console is paused by the owner; the live chat legs "
-              "and the unpaused assertion are skipped (the pause is left "
-              "untouched)")
+    check("fixture secrets.WEB_TOKEN present", bool(token))
+    s, control = get("/api/control")
+    if s != 200 or not isinstance(control, dict) or control.get("paused") is not False:
+        check("disposable console must start unpaused", False)
+        return summary() if report else 1
 
     s, health = get("/api/health")
     check("GET /api/health", s == 200 and isinstance(health, dict) and health.get("status") == "ok")
@@ -443,17 +532,7 @@ def main() -> int:
     s, _ct, _b = post_raw("/api/say", {"text": "hi", "engine": "bogus"})
     check("POST /api/say engine=bogus -> 400", s == 400, f"got {s}")
 
-    voice_engine = os.environ.get("AIDOG_SMOKE_LIVE_VOICE", "")
-    if voice_engine in ("edge", "byok"):
-        s, ct, body = post_raw("/api/say", {"text": "Console voice self test.",
-                                            "lang": "en", "engine": voice_engine})
-        check(f"POST /api/say live {voice_engine} -> audio",
-              s == 200 and ct.startswith("audio/") and len(body) > 500,
-              f"got HTTP {s}, audio={ct.startswith('audio/')}, bytes={len(body)}")
-    elif voice_engine:
-        check("AIDOG_SMOKE_LIVE_VOICE must be edge or byok", False)
-    else:
-        print("SKIP  live voice synthesis (AIDOG_SMOKE_LIVE_VOICE=edge|byok)")
+    print("SKIP  provider voice synthesis (offline fixture)")
 
     # --- car 4c: /api/stt local contract — every validation leg answers
     # before the rate window, so they are stable in any order. ---
@@ -487,7 +566,7 @@ def main() -> int:
         _conn.close()
     check("POST /api/stt declared >2MB -> 413", st_413 == 413, f"got {st_413}")
 
-    # --- console chat (B1): gate first, then shape, then a live model turn ---
+    # --- console chat (B1): gate first, then shape, then a fixture-model turn ---
     s, body = post("/api/chat", {"text": "hi"}, None)
     check("POST /api/chat no token -> 401", s == 401, f"got {s}")
     s, hist = get("/api/chat/history")
@@ -508,35 +587,23 @@ def main() -> int:
         check("POST /api/chat unknown action -> 400",
               s == 400 and isinstance(body, dict) and "details" in body,
               f"got {s} {body}")
-        # live model over SSE: >=1 delta + an authoritative done frame.
-        # A red line here with the gateway up is a REAL signal, not flake.
-        if owner_paused:
-            print("SKIP  live chat legs (the console is paused by the owner)")
-        else:
-            s, ct, evs = post_sse("/api/chat",
-                                  {"text": "Reply with exactly: pong"}, token)
-            kinds = [e for e, _ in evs]
-            done = next((d for e, d in evs if e == "done"), None)
-            check("POST /api/chat live model -> SSE stream",
-                  s == 200 and ct.startswith("text/event-stream")
-                  and kinds and kinds[0] == "meta", f"got {s} ct={ct} evs={kinds[:6]}")
-            check("POST /api/chat live model -> delta + done",
-                  "delta" in kinds and "done" in kinds
-                  and isinstance(done, dict)
-                  and isinstance(done.get("text"), str)
-                  and done.get("stop") in ("final", "max_iters", "model_error"),
-                  f"kinds={kinds} done={str(done)[:120]}")
-            if isinstance(done, dict):
-                check("POST /api/chat done carries turn stats",
-                      isinstance(done.get("iterations"), int)
-                      and isinstance(done.get("tool_calls"), int),
-                      str({k: done.get(k) for k in ("iterations", "tool_calls")}))
-            # history grew by the live turn; then archive it (idempotent clear)
-            s, hist = get("/api/chat/history")
-            roles = [m["role"] for m in hist.get("messages", [])]
-            check("POST /api/chat turn persisted to the session",
-                  s == 200 and roles.count("user") >= 1
-                  and roles.count("assistant") >= 1, str(roles[-4:]))
+        s, ct, evs = post_sse("/api/chat", {"text": "Reply with exactly: pong"}, token)
+        kinds = [e for e, _ in evs]
+        done = next((d for e, d in evs if e == "done"), {})
+        check("POST /api/chat model fixture -> SSE stream",
+              s == 200 and ct.startswith("text/event-stream")
+              and kinds and kinds[0] == "meta", f"got {s} ct={ct} evs={kinds[:6]}")
+        check("POST /api/chat model fixture -> delta + done",
+              "delta" in kinds and "done" in kinds and done.get("text") == "pong"
+              and done.get("stop") == "final", f"kinds={kinds} done={str(done)[:120]}")
+        check("POST /api/chat done carries turn stats",
+              isinstance(done.get("iterations"), int)
+              and isinstance(done.get("tool_calls"), int))
+        s, hist = get("/api/chat/history")
+        roles = [m["role"] for m in hist.get("messages", [])]
+        check("POST /api/chat turn persisted to the session",
+              s == 200 and roles.count("user") >= 1
+              and roles.count("assistant") >= 1, str(roles[-4:]))
         s, body = post("/api/chat", {"action": "clear"}, token)
         check("POST /api/chat clear archives the session",
               s == 200 and isinstance(body, dict) and body.get("ok") is True
@@ -720,7 +787,7 @@ def main() -> int:
           and isinstance(ctl.get("gate"), dict),
           f"got {s} keys={sorted(ctl) if isinstance(ctl, dict) else ctl}")
     check("GET /api/control starts unpaused after boot",
-          (not owner_paused) and isinstance(ctl, dict) and ctl.get("paused") is False,
+          isinstance(ctl, dict) and ctl.get("paused") is False,
           str(ctl.get("paused")))
     bud = ctl.get("budget") if isinstance(ctl, dict) else {}
     check("GET /api/control budget blocks off by default",
@@ -787,34 +854,31 @@ def main() -> int:
           and "action" in str(body.get("details")), f"got {s} {body}")
     s, body = post("/api/control", {"action": "pause", "reason": "x" * 300}, token)
     check("POST /api/control overlong reason -> 400", s == 400, f"got {s}")
-    # pause -> a NEW chat turn is refused with the honest code; always resume.
-    # The resume runs in a finally block: an exception between pause and
-    # resume must never leave the owner's console paused by a test.
-    try:
-        s, body = post("/api/control", {"action": "pause", "reason": "smoke"}, token)
-        check("POST /api/control pause -> 200 + state echo",
-              s == 200 and isinstance(body, dict)
-              and body.get("ok") is True
-              and body.get("control", {}).get("paused") is True,
-              f"got {s} {body}")
-        s, ctl2 = get("/api/control")
-        check("pause visible on the read face (fail-closed switch)",
-              s == 200 and ctl2.get("paused") is True
-              and ctl2.get("gate", {}).get("allowed") is False
-              and ctl2.get("gate", {}).get("code") == "paused",
-              str(ctl2.get("gate")))
-        s, body = post("/api/chat", {"text": "hi"}, token)
-        check("paused -> POST /api/chat refused 409 with gate code",
-              s == 409 and isinstance(body, dict)
-              and body.get("error") == "paused"
-              and isinstance(body.get("details"), list)
-              and body.get("details"), f"got {s} {body}")
-    finally:
-        s, body = post("/api/control", {"action": "resume"}, token)
-        check("POST /api/control resume -> 200 (the human fail-closed click)",
-              s == 200 and isinstance(body, dict)
-              and body.get("control", {}).get("paused") is False,
-              f"got {s} {body}")
+    # Exercise the two actions only on our disposable console. Resume is an
+    # assertion in the test, never an interruption/cleanup action.
+    s, body = post("/api/control", {"action": "pause", "reason": "smoke"}, token)
+    check("POST /api/control pause -> 200 + state echo",
+          s == 200 and isinstance(body, dict)
+          and body.get("ok") is True
+          and body.get("control", {}).get("paused") is True,
+          f"got {s} {body}")
+    s, ctl2 = get("/api/control")
+    check("pause visible on the read face (fail-closed switch)",
+          s == 200 and ctl2.get("paused") is True
+          and ctl2.get("gate", {}).get("allowed") is False
+          and ctl2.get("gate", {}).get("code") == "paused",
+          str(ctl2.get("gate")))
+    s, body = post("/api/chat", {"text": "hi"}, token)
+    check("paused -> POST /api/chat refused 409 with gate code",
+          s == 409 and isinstance(body, dict)
+          and body.get("error") == "paused"
+          and isinstance(body.get("details"), list)
+          and body.get("details"), f"got {s} {body}")
+    s, body = post("/api/control", {"action": "resume"}, token)
+    check("POST /api/control resume -> 200 (the human fail-closed click)",
+          s == 200 and isinstance(body, dict)
+          and body.get("control", {}).get("paused") is False,
+          f"got {s} {body}")
     s, ctl3 = get("/api/control")
     check("resume re-opens the gate",
           s == 200 and ctl3.get("paused") is False
@@ -1161,25 +1225,7 @@ def main() -> int:
         check("recovery facts report the default mode again",
               s == 200 and rec3.get("proxy", {}).get("mode") == "default",
               str(rec3.get("proxy")))
-        # the REAL watchdog recycle — this machine is the feature's home.
-        # Detached + answered; the facts must show a live process again.
-        # (The console restart is deliberately NOT run here — it kills THIS
-        # console; the isolated E2E suite owns that leg.)
-        s, body = post("/api/service/restart", {"target": "watchdog"}, token)
-        check("watchdog recycle issued -> 200",
-              s == 200 and body.get("issued") is True,
-              f"got {s} {str(body)[:120]}")
-        _rec = {}
-        _up = False
-        for _ in range(30):                 # bring-up: kill + boot ~8s
-            time.sleep(1)
-            s, _rec = get("/api/recovery")
-            if s == 200 and isinstance(_rec, dict) \
-                    and _rec.get("watchdog", {}).get("process") is True:
-                _up = True
-                break
-        check("watchdog process is live again after the recycle", _up,
-              str((_rec or {}).get("watchdog"))[:160])
+        print("SKIP  watchdog process recycle (offline fixture)")
         # ---- car D (novice onboarding): the ladder + the curated board ----
         s, jr = get("/api/journey")
         check("GET /api/journey shape (stages + next + moments, no secrets)",
@@ -1212,7 +1258,7 @@ def main() -> int:
               s == 200 and body.get("settings", {}).get("extensions", {})
               .get("categories") == [{"id": "smoke-cat",
                                       "name": "Smoke Cat"}], f"got {s}")
-        # restore the owner's original categories (the console is live)
+        # Restore the fixture's original categories for later assertions.
         s, body = post("/api/settings", {"extensions": _ext_orig}, token)
         check("extensions restored after the smoke leg", s == 200,
               f"got {s} {str(body)[:120]}")
@@ -2811,46 +2857,14 @@ def main() -> int:
     # --- car 4c: /api/stt live legs — kept for LAST on purpose: the 429
     # test fills the in-process sliding window, so no stt success assertion
     # may follow it in this run. ---
-    fix_path: Path | None = Path("/tmp/stt_test.mp3")
-    if not (fix_path.is_file() and fix_path.stat().st_size > 1000):
-        fix_path = None
-        try:
-            import subprocess as _sp
-            _edge_out = Path("/tmp/smoke_stt_fixture.mp3")
-            _sp.run(["edge-tts", "--voice", "en-US-AriaNeural",
-                     "--text", "console speech test",
-                     "--write-media", str(_edge_out)],
-                    check=True, capture_output=True, timeout=60)
-            if _edge_out.is_file() and _edge_out.stat().st_size > 1000:
-                fix_path = _edge_out
-        except Exception:  # noqa: BLE001 — fall through to the stdlib wav
-            fix_path = None
-    if fix_path is not None:
-        fix_bytes = fix_path.read_bytes()
-        fix_ctype = "audio/mpeg"
-    else:
-        import math
-        import struct
-        import wave as _wave
-        _wav_out = Path("/tmp/smoke_stt_fixture.wav")
-        with _wave.open(str(_wav_out), "wb") as _w:
-            _w.setnchannels(1)
-            _w.setsampwidth(2)
-            _w.setframerate(16000)
-            _w.writeframes(b"".join(
-                struct.pack("<h",
-                            int(12000 * math.sin(2 * math.pi * 440 * i / 16000)))
-                for i in range(16000)))
-        fix_bytes = _wav_out.read_bytes()
-        fix_ctype = "audio/wav"
-
-    s, body = post_audio("/api/stt", fix_bytes, fix_ctype, timeout=60)
-    if s == 429:
-        # window filled by an earlier run seconds ago — wait it out once
-        import time as _time
-        print("INFO  /api/stt window full — waiting 62s for expiry")
-        _time.sleep(62)
-        s, body = post_audio("/api/stt", fix_bytes, fix_ctype, timeout=60)
+    import wave as _wave
+    _wav_out = _io.BytesIO()
+    with _wave.open(_wav_out, "wb") as _w:
+        _w.setnchannels(1)
+        _w.setsampwidth(2)
+        _w.setframerate(16000)
+        _w.writeframes(b"\x00\x00" * 16000)
+    s, body = post_audio("/api/stt", _wav_out.getvalue(), "audio/wav")
     check("POST /api/stt valid audio -> 200 text+duration",
           s == 200 and isinstance(body, dict)
           and isinstance(body.get("text"), str)
@@ -2902,10 +2916,8 @@ def main() -> int:
 
     # --- frontend coverage car, lane A (1.1-1.8): credential slots,
     # capabilities additions, cron list, settings partitions. Everything
-    # below either reads or fails BEFORE any write, so the live-endpoint legs
-    # are safe against the production secrets.env; the only successful writes
-    # run in-process against a temp file (module surgery on the imported
-    # console copy) — the real secrets.env is never touched. ---
+    # below either reads or fails before a write. Additional write legs use
+    # a separate temp secrets file through the imported console copy. ---
     import io as _io
     import shutil as _shutil
 
@@ -2969,7 +2981,7 @@ def main() -> int:
         s, secs_auth = get_auth("/api/secrets", token)
         _arows = secs_auth.get("slots") if isinstance(secs_auth, dict) else None
         _set_row = next((r for r in (isinstance(_arows, list) and _arows or [])
-                         if r.get("set")), {})
+                         if r.get("set") and r.get("name") != "WEB_TOKEN"), {})
         _unset_row = next((r for r in (isinstance(_arows, list) and _arows or [])
                            if not r.get("set") and r.get("name") != "WEB_TOKEN"), {})
         check("GET /api/secrets valid token -> integer lengths for set slots",
@@ -3625,6 +3637,7 @@ def main() -> int:
     _a_settings = _adir / "settings.json"
     _a_jobs = _adir / "cron_jobs.json"
     _hsrv = _THSrv(("127.0.0.1", 0), _SetupOk)
+    FIXTURE_PORTS.add(_hsrv.server_port)
     _th2.Thread(target=_hsrv.serve_forever, daemon=True).start()
     _a_port = _hsrv.server_address[1]
     _keep = (_srv.SECRETS, _srv.SETTINGS_FILE, _srv._cron_jobs_path,
@@ -3739,7 +3752,8 @@ def main() -> int:
         _a_settings.write_text(json.dumps(
             {"mycore": {"base_url": "http://127.0.0.1:1/v1"}}),
             encoding="utf-8")
-        _dead = _srv.collect_setup()
+        with _patch.object(_srv, "port_open", return_value=False):
+            _dead = _srv.collect_setup()
         _dead_row = {i["id"]: i for i in _dead["items"]}["model_endpoint"]
         check("setup dead model endpoint -> unreachable, ready false",
               _dead["ready"] is False
@@ -3914,6 +3928,7 @@ def main() -> int:
         _srv.SECRETS, _srv.SETTINGS_FILE = _keep[0], _keep[1]
         _srv._cron_jobs_path, _srv._tmux_session_exists = _keep[2], _keep[3]
         _hsrv.shutdown()
+        FIXTURE_PORTS.discard(_hsrv.server_port)
         _shutil.rmtree(_adir, ignore_errors=True)
 
     _bytes_end = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
@@ -4043,6 +4058,7 @@ def main() -> int:
             pass
 
     _tgmock = _THSrv3(("127.0.0.1", 0), _BotOk)
+    FIXTURE_PORTS.add(_tgmock.server_port)
     _th3.Thread(target=_tgmock.serve_forever, daemon=True).start()
 
     _ctmp = Path(_tf3.mkdtemp(prefix="p3_community_"))
@@ -4459,6 +4475,7 @@ def main() -> int:
         _srv.bust_discussions_cache()
         _srv.bust_replies_cache()
         _tgmock.shutdown()
+        FIXTURE_PORTS.discard(_tgmock.server_port)
         _shutil.rmtree(_ctmp, ignore_errors=True)
 
     _bytes_end2 = _prod_secrets.read_bytes() if _prod_secrets.exists() else b""
@@ -4646,11 +4663,44 @@ def main() -> int:
                   f"got {s1}/{s2}/{s3} {str(b1)[:60]} {str(b2)[:60]} "
                   f"{str(b3)[:60]}")
 
+    return summary()
+
+
+def summary() -> int:
     print(f"\n{len(PASS)} pass · {len(FAIL)} fail")
     if FAIL:
         print("failed: " + ", ".join(FAIL))
     return 1 if FAIL else 0
 
 
+def main() -> int:
+    import argparse
+
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--live-read-only", metavar="URL",
+                        help="only GET health and console address on an explicit IPv4 loopback console")
+    args = parser.parse_args()
+    if args.live_read_only is None:
+        # Keep the original checkout untouched even without Python's -B flag.
+        saved = sys.dont_write_bytecode
+        sys.dont_write_bytecode = True
+        try:
+            from web_console_p3_fixture import launch
+        finally:
+            sys.dont_write_bytecode = saved
+        return launch()
+    base = args.live_read_only
+    if not re.fullmatch(r"http://127\.0\.0\.1:[1-9][0-9]{0,4}/?", base):
+        parser.error("--live-read-only requires http://127.0.0.1:PORT")
+    port = int(base.rstrip("/").rsplit(":", 1)[1])
+    if port > 65535 or port == 3460:
+        parser.error("--live-read-only requires a console port")
+    live_probe(base.rstrip("/"))
+    return summary()
+
+
 if __name__ == "__main__":
-    sys.exit(main())
+    try:
+        sys.exit(main())
+    except KeyboardInterrupt:
+        sys.exit(130)

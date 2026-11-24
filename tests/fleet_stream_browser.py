@@ -99,6 +99,58 @@ def stream_page(browser, history=HISTORY, plans=PLANS, *, lang="en", width=320):
     return page, calls, writes, errors
 
 
+def check_settings_queue(browser):
+    page, _, writes, errors = stream_page(browser)
+    go = page.locator("#fleetGoApprovals")
+    expect(go).to_be_visible()
+    held = []
+    plans_url = f"{ORIGIN}/api/fleet/plans"
+    page.route(plans_url, lambda route: held.append(route))
+    with page.expect_request(plans_url):
+        go.click()
+    empty = page.locator("#fleetPlanEmpty")
+    unavailable = page.locator("#fleetPlanUnavailable")
+    actions = page.locator("#fleetPlanList [data-fplan-decide]")
+    status = page.locator("#fleetPlanMsg")
+    refresh = page.locator("#fleetPlanRefresh")
+    expect(refresh).to_be_visible()
+    expect(empty).to_be_hidden()
+    expect(unavailable).to_be_hidden()
+    expect(actions).to_have_count(0)
+    held.pop().fulfill(json=PLANS)
+    expect(actions).to_have_count(2)
+    page.unroute(plans_url)
+
+    # A recorded decision refreshes automatically. Preserve its receipt while
+    # dropping stale rows, even if the failed response contains a plans array.
+    page.evaluate("localStorage.setItem('aidog_token', 'fixture-token')")
+    decision_url = plans_url + "/plan-pending"
+    page.route(decision_url, lambda route: route.fulfill(json={"ok": True}))
+    page.route(plans_url, lambda route: route.fulfill(status=503, json=PLANS))
+    with page.expect_request(decision_url) as decision:
+        page.locator('#fleetPlanList [data-fplan-decide="reject"]').click()
+    assert decision.value.method == "POST" and decision.value.post_data_json == {"action": "reject"}
+    expect(unavailable).to_be_visible()
+    expect(empty).to_be_hidden()
+    expect(actions).to_have_count(0)
+    expect(status).to_have_text("✓ recorded")
+
+    page.unroute(plans_url)
+    page.route(plans_url, lambda route: route.fulfill(json={"plans": []}))
+    refresh.click()
+    expect(empty).to_be_visible()
+    expect(unavailable).to_be_hidden()
+    expect(status).to_have_text("✓ recorded")
+    page.unroute(plans_url)
+    page.route(plans_url, lambda route: route.fulfill(json={"plans": [], "note": "fixture failure"}))
+    refresh.click()
+    expect(unavailable).to_be_visible()
+    expect(empty).to_be_hidden()
+    expect(status).to_have_text("✓ recorded")
+    assert not writes and not errors, (writes, errors)
+    page.close()
+
+
 def main():
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(
@@ -168,8 +220,9 @@ def main():
         expect(page.locator("#fleetList")).to_contain_text("No clone runs recorded.")
         expect(page.locator("#fleetGoApprovals")).to_be_hidden()
         assert not writes and not errors, (writes, errors)
+        check_settings_queue(browser)
         browser.close()
-    print("PASS: Stream fleet cards, independent snapshots, narrow layouts, and existing sign-off navigation")
+    print("PASS: Stream fleet cards, independent snapshots, narrow layouts, and approval queue recovery")
 
 
 if __name__ == "__main__":

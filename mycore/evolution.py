@@ -329,6 +329,24 @@ def _mutation_lock(target: Path | str, repo: Path = REPO):
             pass
 
 
+def mutation_lock(target: Path | str, repo: Path = REPO):
+    """The cross-process mutation lock that guards ONE artifact file.
+
+    The PUBLIC handle on `_mutation_lock`: a writer OUTSIDE this module
+    that touches the SAME artifact must take the SAME lock — one
+    implementation, one lock inode, one bounded wait, one fail-closed
+    result. The console's backup restore writes the learned-memory file
+    (a whole-file write) while `/learn` appends to it (a read-append-
+    write); without the shared lock the two could interleave and one
+    write could erase the other. Reusing this lock is what makes them
+    mutually exclusive — a second implementation would be a second
+    lock inode and would NOT exclude anything.
+
+    Raises EvolutionLockError (an OSError) when the lock cannot be taken
+    within the bounded wait, or when the host has no POSIX flock."""
+    return _mutation_lock(target, repo)
+
+
 # ------------------------------------------------------------ settings -----
 def validate_evolution_settings(doc) -> tuple[dict, list[str]]:
     """Strict validation for the settings `evolution` partition (all-or-
@@ -490,15 +508,13 @@ def learn_memory(text: str, *, now: float | None = None,
     errs = lint_memory(text)
     if errs:
         return LearnResult(ok=False, path=None, errors=sorted(errs))
-    if memforget.is_suppressed(memforget.CHANNEL_LEARNED, text, repo=repo):
-        return LearnResult(ok=False, path=None, errors=["source-suppressed"],
-                           prescreen=["this source is suppressed — the "
-                                      "tombstone ledger refuses a new "
-                                      "admission of it"])
     bnow = _bnow(now if now is not None else time.time())
     target = learned_memory_path(repo)
     try:
         with _mutation_lock(target, repo):
+            if memforget.is_suppressed(memforget.CHANNEL_LEARNED, text, repo=repo):
+                return LearnResult(ok=False, path=None, errors=["source-suppressed"],
+                                   prescreen=["this source is suppressed"])
             try:
                 existing = target.read_text(encoding="utf-8")
             except OSError:
@@ -522,6 +538,9 @@ def learn_memory(text: str, *, now: float | None = None,
                                       encoding="utf-8")
             except OSError:
                 return LearnResult(ok=False, path=None, errors=["io"])
+    except memforget.LedgerUnavailable:
+        return LearnResult(ok=False, path=None, errors=["suppression-unavailable"],
+                           prescreen=[memforget.LEDGER_UNAVAILABLE])
     except EvolutionLockError as exc:
         return LearnResult(ok=False, path=None, errors=["io"],
                            prescreen=[f"the learned-memory lock is "

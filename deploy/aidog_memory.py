@@ -32,6 +32,11 @@ through the tombstone ledger (mycore/memforget.py) BEFORE it is written,
 so a source the owner suppressed cannot come back through a sync. The
 external source home keeps its original bytes — it is the owner's own
 copy, and only the product-side copy is filtered.
+
+Profile isolation: the curated slots are read through the ACTIVE PROFILE
+(lib/profile_paths.py), the same seam the console and mycore/profiling.py
+use, so a named profile syncs ITS OWN curated memory and never the
+repository's. See curated_slots() for the one narrow fallback.
 """
 from __future__ import annotations
 
@@ -118,6 +123,72 @@ def resolve_memory_home() -> tuple[Path, str]:
 
 DST, DST_SOURCE = resolve_memory_home()
 BUDGETS = {"MEMORY.md": 2200, "USER.md": 1375}
+
+
+# ------------------------------------------------------- profile seam -----
+# The curated slots live under the ACTIVE PROFILE's body root (car F), so
+# a named profile has its OWN memory. This module resolves them through the
+# SAME seam the rest of the product uses (lib/profile_paths.py), instead of
+# the fixed <repo>/overlay/memory path it used to hard-code — that fixed
+# path made a named profile read the REPOSITORY's curated slots, which is
+# an isolation break (the profile's memory is built from another profile's
+# files).
+#
+# WHY A LOADER AND NOT A PLAIN IMPORT: this script is executed from a
+# COPIED deploy/ tree by the portability test (tests/memory_persist_p4.py
+# copies deploy/*.py into a throwaway tree with no lib/ at all), so a plain
+# `from lib import profile_paths` would raise there. The loader reads the
+# file by path and degrades to None; only the default profile keeps the
+# historical fixed-path behaviour. Loading by path also avoids a half-imported `lib`
+# package from ANOTHER tree leaking into this one.
+
+
+def profile_paths_module():
+    """The profile seam (lib/profile_paths.py), or None when it is absent.
+
+    Lazy and fail-soft, like memforget_module(): the deploy scripts stay
+    import-safe and cheap, and a deploy tree without a kernel is a
+    supported shape. None means "the profile seam is not available here"."""
+    path = REPO / "lib" / "profile_paths.py"
+    if not path.is_file():
+        return None
+    try:
+        import importlib.util  # noqa: PLC0415
+        spec = importlib.util.spec_from_file_location("aidog_profile_paths",
+                                                      path)
+        if spec is None or spec.loader is None:
+            return None
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+    except Exception:  # noqa: BLE001 — no seam, no crash
+        return None
+
+
+def curated_slots() -> tuple[Path, Path, str]:
+    """(MEMORY slot, USER slot, source label) — the ACTIVE PROFILE's slots.
+
+    The slots resolve through the ACTIVE PROFILE (the profile seam), so a
+    named profile syncs ITS OWN curated memory and never the repository's.
+
+    FALLBACK (and only this): when the profile seam cannot be imported —
+    a copied deploy/ tree with no lib/ at all — the script keeps its
+    historical behaviour and reads the fixed repository path
+    <repo>/overlay/memory/*. The fallback is deliberately narrow: it
+    applies ONLY to the default profile when the seam is unavailable.
+    Any nonblank AIDOG_PROFILE requires a working seam, and invalid names
+    are then refused by the seam itself."""
+    pp = profile_paths_module()
+    if pp is None:
+        if os.environ.get("AIDOG_PROFILE", "").strip():
+            raise ValueError("a named profile requires the profile resolver")
+        return (REPO / "overlay" / "memory" / "MEMORY_curated.md",
+                REPO / "overlay" / "memory" / "USER_curated.md",
+                "fixed repository path (the profile seam is not importable "
+                "here)")
+    mem, usr = pp.memory_slots(REPO)
+    return mem, usr, "the active profile's curated slots"
 
 
 # ------------------------------------------------------- memory suppression --
@@ -231,25 +302,49 @@ def copy_store(src, dst, tombstones):
 def load_suppression():
     """(tombstone set, note) for the active profile.
 
-    An empty set is the normal state — nothing was forgotten. When the
-    ledger cannot be loaded the note says so plainly: a suppression must
-    never fail a sync or an import, and it must never fail silently
-    either."""
+    An empty set means nothing was forgotten. None means the ledger is
+    unavailable and the caller must withhold product memory writes."""
     mf = memforget_module()
     if mf is None:
         return None, ("suppression unavailable: the tombstone ledger could "
-                      "not be loaded here — nothing was filtered")
+                      "not be loaded here — memory writes withheld")
     try:
         return mf.load_set(), ""
-    except Exception:  # noqa: BLE001 — a broken ledger never fails a sync
+    except Exception:  # noqa: BLE001 — the caller reports and refuses the copy
         return None, ("suppression unavailable: the tombstone ledger could "
-                      "not be read here — nothing was filtered")
+                      "not be read here — memory writes withheld")
+
+
+def _missing_slot(path) -> int:
+    """A curated slot that this profile does not have: report it, skip it.
+
+    A named profile whose body was never seeded has no curated memory; the
+    archive copy of the pi-side source still lands, and the honest line
+    says which slot was not refreshed. Nothing is invented and nothing
+    crashes."""
+    print(f"curated slot not present for this profile: {Path(path).name} "
+          "— the slot was not refreshed")
+    return 0
 
 
 def sync() -> int:
     if not str(SRC) or not (SRC / "MEMORY.md").is_file():
         print("memory source not configured — create deploy/memory_sources.local "
               "(see memory_sources.example)")
+        return 1
+    # The curated slots come from the ACTIVE PROFILE (the profile seam), so
+    # a named profile syncs ITS OWN memory and never the repository's. An
+    # invalid profile name is refused (fail-closed): it must never fall
+    # through to another profile's memory.
+    try:
+        mem_slot, user_slot, slot_source = curated_slots()
+    except Exception as e:  # noqa: BLE001 — type name only
+        print(f"the active profile is not usable — refusing to sync "
+              f"(profile error: {type(e).__name__})")
+        return 1
+    tombstones, note = load_suppression()
+    if tombstones is None:
+        print(note)
         return 1
     # write-path safety: a fresh machine has no home yet — create it (parents)
     # instead of failing; this is the ONLY place the product materializes DST.
@@ -263,7 +358,6 @@ def sync() -> int:
     # tombstone ledger before it is written, so a suppressed source cannot
     # come back through a sync. The external source home keeps its original
     # bytes — it is the owner's own copy, and it is never edited here.
-    tombstones, note = load_suppression()
     dropped = 0
     dropped += copy_store(SRC / "MEMORY.md", DST / "ARCHIVE" / "MEMORY_full.md",
                           tombstones)
@@ -274,17 +368,20 @@ def sync() -> int:
     if (PERSONA / "profile.md").is_file():
         # persona is not a memory store: the ledger has no channel for it
         shutil.copy2(PERSONA / "profile.md", DST / "ARCHIVE" / "USER_full.md")
-    dropped += copy_store(REPO / "overlay/memory/MEMORY_curated.md",
-                          DST / "MEMORY.md", tombstones)
-    dropped += copy_store(REPO / "overlay/memory/USER_curated.md",
-                          DST / "USER.md", tombstones)
+    for slot, target in ((mem_slot, DST / "MEMORY.md"),
+                         (user_slot, DST / "USER.md")):
+        if not Path(slot).is_file():
+            _missing_slot(slot)
+            continue
+        dropped += copy_store(slot, target, tombstones)
     (DST / "SNAPSHOT_INFO.md").write_text(
         "# Snapshot provenance\n"
         f"- Source: pi-side project memory (authoritative, one-way snapshot)\n"
-        f"- Top slots curated from repo overlay/memory/*_curated.md; full text in ARCHIVE/\n"
+        f"- Top slots curated from {slot_source}; full text in ARCHIVE/\n"
         f"- Refresh: python3 {REPO}/deploy/aidog_memory.py sync\n"
         f"- Synced (UTC): {datetime.now(timezone.utc).isoformat(timespec='seconds')}\n"
     )
+    print(f"curated slots: {slot_source}")
     print(f"suppression: {dropped} entr(ies) suppressed by the tombstone "
           "ledger (nothing deleted)")
     if note:

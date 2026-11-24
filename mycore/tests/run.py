@@ -9689,8 +9689,15 @@ def test_profiles() -> None:
               and sch.default_jobs_path() == legacy_state / "cron_jobs.json"
               and ev.default_state_path(REPO)
               == legacy_state / "evolution_state.json")
-        check("profile: default settings read point unchanged",
-              ev.load_settings_file(REPO) != {})   # repo web/settings.json is real
+        # Exercise the default resolver without relying on operator settings.
+        with tempfile.TemporaryDirectory() as settings_dir:
+            repo = Path(settings_dir)
+            (repo / "web").mkdir()
+            path = repo / "web" / "settings.json"
+            missing = ev.load_settings_file(repo)
+            path.write_text('{"sound":true}', encoding="utf-8")
+            check("profile: default settings read point unchanged",
+                  missing == {} and ev.load_settings_file(repo) == {"sound": True})
 
         # ------------------------------------- 2. profile relocates every seam
         with tempfile.TemporaryDirectory(prefix="aidog_profiles_") as td:
@@ -13730,7 +13737,9 @@ def test_wave3() -> None:
 
         def do_GET(self):  # noqa: N802
             if _Probe.delay:
-                time.sleep(_Probe.delay)
+                from time import sleep
+                sleep(_Probe.delay)
+                return  # the caller has already timed out
             self.send_response(_Probe.status)
             self.send_header("Content-Length", "2")
             self.end_headers()
@@ -13784,8 +13793,7 @@ def test_wave3() -> None:
         row = (r[1] or [{}])[0] if isinstance(r[1], list) else {}
         check("X5 route: timeout -> ok false + exception class, capped",
               r[0] == 200 and row.get("ok") is False
-              and isinstance(row.get("error_class"), str)
-              and bool(row["error_class"])
+              and row.get("error_class") == "TimeoutError"
               and row.get("latency_ms", 10 ** 9) < 2000
               and SENT_QUERY not in json.dumps(r), str(r))
         _Probe.delay = 0.0
@@ -18859,10 +18867,14 @@ def test_agent_plan() -> None:
         out = reg.dispatch("settings", {"action": "list"})
         check("agentplan: tool list returns the plan rows",
               "pending" in out and "plans" in out, out[:80])
-        out = reg.dispatch("settings", {"action": "get",
-                                        "keys": ["mycore.model"]})
+        from unittest.mock import patch
+        fixture_settings = Path(tmp) / "settings.json"
+        fixture_settings.write_text('{"mycore":{"model":"fixture","extra":true}}',
+                                    encoding="utf-8")
+        with patch("lib.profile_paths.settings_path", return_value=fixture_settings):
+            out = reg.dispatch("settings", {"action": "get", "keys": ["mycore.model"]})
         check("agentplan: tool get returns the filtered value",
-              "mycore.model" in out, out[:80])
+              _json.loads(out) == {"mycore.model": "fixture"}, out[:80])
         out = reg.dispatch("settings", {"action": "get",
                                         "keys": ["no.such.key"]})
         check("agentplan: tool get omits an absent key honestly",
@@ -20724,11 +20736,24 @@ def test_fleet() -> None:
 
         check("fleet: the sniff read model is still registered",
               callable(getattr(_web_srv, "collect_sniff", None)))
+        # The console resolves its state root on import. Start it under the
+        # same explicit root as the service, independent of earlier imports.
+        import subprocess
+        probe = subprocess.run(
+            [sys.executable, "-c",
+             "import os, sys\n"
+             "from pathlib import Path\n"
+             "from mycore import fleet\n"
+             "from mycore.service import state_dir\n"
+             "from web.server import MYCORE_STATE_DIR\n"
+             "expected = Path(os.environ['AIDOG_MC_STATE']) / 'fleet'\n"
+             "sys.exit(0 if fleet.activate() == state_dir() / 'fleet' == "
+             "MYCORE_STATE_DIR / 'fleet' == expected else 1)"],
+            cwd=REPO, env={**os.environ, "AIDOG_MC_STATE": td}, timeout=30)
         check("fleet: service and console use the same state/fleet directory",
               "fleet_mod.activate(state / \"fleet\")" in Path(
                   REPO, "mycore/service.py").read_text(encoding="utf-8")
-              and _web_srv.MYCORE_STATE_DIR / "fleet"
-                  == fleet.pp.state_dir(REPO) / "fleet")
+              and probe.returncode == 0)
 
         # Console STOP is a local event, not the shared TG/service counter.
         from mycore import leash as _leash
@@ -20982,12 +21007,43 @@ def test_fleetplan() -> None:
 
             # approving lets the dispatch through, and the approval is used up
             pid = plans[0]["id"]
-            plan, err = fp.decide(pid, "approve")
+            preview = fp.owner_preview(pid)
+            check("fleetplan: unreviewed decision is refused",
+                  fp.decide(pid, "approve")[0] is None and preview is not None)
+            plan, err = fp.decide(pid, "approve", preview["digest"])
             check("fleetplan: the owner approves a pending plan",
                   plan is not None and plan["status"] == "approved"
                   and err == "", str(plan)[:120])
-            sub.run_tasks([{"task": "write it", "role": "implementer"}], reg,
-                          ["write_file"], chat, 300, approval_id=pid)
+            from unittest.mock import patch
+            from concurrent.futures import ThreadPoolExecutor
+            task = {"task": "write it", "role": "implementer"}
+
+            def attempt(tasks=None, registry=reg, tools=None, **kwargs):
+                try:
+                    return sub.run_tasks(tasks or [task], registry,
+                                         tools or ["write_file"], chat, 300,
+                                         approval_id=pid, **kwargs)
+                except sub.ToolError:
+                    return None
+
+            changed = [attempt([{**task, "task": "write something else"}]),
+                       attempt([{**task, "role": ""}]),
+                       attempt(registry=build_registry(allowed_roots=[td + "/other"])),
+                       attempt(tools=["write_file", "edit_file"]),
+                       attempt(run_deadline=0)]
+            check("fleetplan: changed briefs, roots, tools, invalid role, and deadline confer no claim",
+                  changed == [None] * 5 and fp.get_plan(pid)["status"] == "approved")
+            with patch.object(sub.fleetgate, "resolve_mode", return_value="enforce"), \
+                    patch.object(sub.fleetgate, "band_for", return_value={"ceiling": 1}):
+                check("fleetplan: enforced scheduling preserves the approval",
+                      attempt([task, task]) is None and fp.get_plan(pid)["status"] == "approved")
+            with patch.object(fp, "_save", side_effect=OSError("fixture")):
+                check("fleetplan: failed claim persistence permits zero dispatches",
+                      attempt() is None and fp.get_plan(pid)["status"] == "approved")
+            with ThreadPoolExecutor(max_workers=8) as pool:
+                results = list(pool.map(lambda _: attempt(), range(8)))
+            check("fleetplan: only one concurrent dispatch runs",
+                  sum(result is not None for result in results) == 1)
             check("fleetplan: an approved plan authorizes exactly one dispatch",
                   (fp.get_plan(pid) or {}).get("status") == "consumed")
             refused2 = ""
@@ -20998,6 +21054,16 @@ def test_fleetplan() -> None:
                 refused2 = str(e)
             check("fleetplan: a consumed approval does not authorize a second "
                   "dispatch", "not valid" in refused2, refused2[:120])
+
+            p = fp.propose(preview["preview"])
+            fp.decide(p["id"], "approve", p["digest"])
+            with patch.object(fp.time, "time", return_value=p["expires_at"]):
+                check("fleetplan: expired approval is refused",
+                      not fp.consume(p["id"], p["preview"]))
+            p = fp.propose(preview["preview"])
+            fp.decide(p["id"], "reject")
+            check("fleetplan: rejected approval is refused",
+                  not fp.consume(p["id"], p["preview"]))
 
             # the plain delegate path keeps its shipped contract by default
             plain = ""
@@ -21014,9 +21080,36 @@ def test_fleetplan() -> None:
             row = fp.public_row({"id": "fx", "status": "pending",
                                  "patch": "SECRET", "desc": "d"})
             check("fleetplan: the console row carries no internals",
-                  "patch" not in row and set(row) == {
+                  "patch" not in row and not row["desc"] and set(row) == {
                       "id", "ts", "status", "fleet", "clones", "tools",
                       "desc", "decided_at"}, str(sorted(row)))
+            from web import server as ws
+            store = Path(td) / fp.STATE_FILE
+            marker = "private-fleet-test-marker"
+            legacy = {"id": "f123-abcd", "status": "approved", "ts": 123,
+                      "decided_at": 124.5, "fleet": "f123", "clones": 1,
+                      "tools": ["write_file"], "desc": marker}
+            store.write_text(json.dumps([legacy]), encoding="utf-8")
+            payload, status = ws.collect_fleet_plans()
+            check("fleetplan: legacy metadata stays readable with its excerpt hidden",
+                  status == 200 and payload["plans"] == [{**legacy, "desc": ""}])
+
+            corrupt = {"invalid JSON": "[", "invalid root": "{}"}
+            for field, value in (("id", [marker]), ("status", [marker]),
+                                 ("ts", {"note": marker}), ("decided_at", [marker]),
+                                 ("fleet", {"name": marker}), ("clones", [marker]),
+                                 ("tools", ["write_file", {"name": marker}]),
+                                 ("tools", marker), ("clones", True), ("ts", False),
+                                 ("decided_at", float("nan"))):
+                invalid = {**legacy, "id": "f456-bcde", field: value}
+                corrupt[f"{field} as {type(value).__name__}"] = json.dumps([legacy, invalid])
+            for case, contents in corrupt.items():
+                store.write_text(contents, encoding="utf-8")
+                payload, status = ws.collect_fleet_plans()
+                check(f"fleetplan: {case} makes the whole queue unavailable",
+                      status == 503 and payload.get("unavailable") is True
+                      and payload.get("plans") == [] and bool(payload.get("error"))
+                      and marker not in json.dumps(payload))
         finally:
             os.environ["AIDOG_MC_STATE"] = _SUITE_STATE
 
@@ -22195,6 +22288,45 @@ def test_pipeline() -> None:
           str(sdoc["suppressed"][:2]))
 
 
+def test_unavailable_forget_ledger() -> None:
+    from unittest.mock import patch
+    from mycore import assembly, evolution, memforget as mf, memoryview, session
+    with tempfile.TemporaryDirectory() as td:
+        state = Path(td)
+        curated = state / "MEMORY_curated.md"
+        curated.write_text("## Fixture\nA private synthetic memory.\n", encoding="utf-8")
+        with patch.dict(os.environ, {"AIDOG_MC_STATE": td}):
+            ledger = mf.ledger_path()
+            check("ledger: absence is known empty", not mf.load_set())
+            mf.forget(mf.CHANNEL_SESSION, "synthetic transcript")
+            original = ledger.read_bytes()
+            check("ledger: valid rows load", len(mf.load_set().ids) == 1)
+            with patch.object(mf.os, "open", side_effect=PermissionError):
+                check("ledger: warm cache still requires opening the ledger",
+                      not session.message_suppression(state / "sessions").available)
+            ledger.write_bytes(original + b"{broken}\n")
+            mf.invalidate_cache()
+            check("ledger: cold corrupt view withholds curated memory",
+                  memoryview.collect(body=state).get("suppression") == "unavailable"
+                  and "synthetic memory" not in assembly._read_memory_slot(curated))
+            check("ledger: corrupt state withholds session rows",
+                  not session.visible_session_messages([{"role": "user", "content": "sample"}],
+                                                       directory=state / "sessions"))
+            check("ledger: corrupt state refuses learned admission",
+                  "suppression-unavailable" in evolution.learn_memory(
+                      "A short synthetic project observation.").errors)
+            before = ledger.read_bytes()
+            try:
+                mf.forget(mf.CHANNEL_SESSION, "another synthetic transcript")
+            except mf.LedgerUnavailable:
+                check("ledger: corrupt state refuses append", ledger.read_bytes() == before)
+            else:
+                check("ledger: corrupt state refuses append", False)
+            ledger.write_bytes(original)
+            check("ledger: valid bytes recover availability",
+                  session.message_suppression(state / "sessions").available)
+
+
 def test_memforget() -> None:
     """Memory suppression, stage 1 — the durable tombstone ledger.
 
@@ -22652,7 +22784,7 @@ def test_memory_forget_api() -> None:
             check("forget-api: the preview carries exactly the contracted "
                   "keys",
                   set(payload) == {"slot", "title", "channel", "source_id",
-                                   "entries", "affects", "limits"},
+                                   "revision", "entries", "affects", "limits"},
                   str(sorted(payload)))
             blob = json.dumps(payload, ensure_ascii=False)
             check("forget-api: the preview carries no excerpt, no path and no "
@@ -22677,7 +22809,20 @@ def test_memory_forget_api() -> None:
                   f"code={code} payload={payload}")
 
             # -------------------------------------------- 4. the forget itself --
-            payload, code = ws.apply_memory_forget("memory", "Facts")
+            preview = ws.collect_memory_forget_preview("memory", "Facts")[0]
+            target = mem_dir / "MEMORY_curated.md"
+            target.write_text(memory_text + "\nChanged after preview.\n", encoding="utf-8")
+            stale, stale_code = ws.apply_memory_forget(
+                "memory", "Facts", preview["source_id"], preview["revision"])
+            check("forget-api: a stale preview cannot write",
+                  stale_code == 409 and not mf.ledger_path().exists(), str(stale))
+            target.write_text(memory_text + "\n## facts\nAnother entry.\n", encoding="utf-8")
+            ambiguous, ambiguous_code = ws.collect_memory_forget_preview("memory", "Facts")
+            check("forget-api: duplicate headings are ambiguous",
+                  ambiguous_code != 200 and "ambiguous" in ambiguous.get("error", ""))
+            target.write_text(memory_text, encoding="utf-8")
+            payload, code = ws.apply_memory_forget(
+                "memory", "Facts", preview["source_id"], preview["revision"])
             check("forget-api: the forget answers ok with the id, the channel "
                   "and the already flag",
                   code == 200 and payload.get("ok") is True
@@ -22735,12 +22880,15 @@ def test_memory_forget_api() -> None:
                   coverage[:120])
 
             # --------------------------------- 7. idempotence + a second source --
-            payload, code = ws.apply_memory_forget("memory", "Facts")
+            payload, code = ws.apply_memory_forget(
+                "memory", "Facts", preview["source_id"], preview["revision"])
             check("forget-api: repeating the forget is a no-op that reports "
                   "already",
                   code == 200 and payload.get("already") is True
                   and len(mf.load_rows()) == 1, str(payload)[:160])
-            payload, code = ws.apply_memory_forget("memory", "Notes")
+            note_preview = ws.collect_memory_forget_preview("memory", "Notes")[0]
+            payload, code = ws.apply_memory_forget(
+                "memory", "Notes", note_preview["source_id"], note_preview["revision"])
             titles = [e["title"] for s in mv.collect(REPO)["slots"]
                       for e in s["entries"]]
             check("forget-api: a second source keeps working",
@@ -22758,7 +22906,11 @@ def test_memory_forget_api() -> None:
                                                  "memory_view": False,
                                                  "profile_coverage": False},
                   str(payload)[:200])
-            payload, code = ws.apply_memory_forget("learned", "2026-01-02 (learn)")
+            learned_preview = ws.collect_memory_forget_preview(
+                "learned", "2026-01-02 (learn)")[0]
+            payload, code = ws.apply_memory_forget(
+                "learned", "2026-01-02 (learn)", learned_preview["source_id"],
+                learned_preview["revision"])
             joined = "\n".join(m["content"] for m in build_system_stack())
             check("forget-api: the forgotten learned entry left the prompt "
                   "injection",
@@ -22773,8 +22925,7 @@ def test_memory_forget_api() -> None:
             check("forget-api: the default profile's state root was never "
                   "written",
                   not (REPO / "data" / "mycore_service" / "memforget").exists(),
-                  str(sorted(p.name for p in
-                             (REPO / "data" / "mycore_service").iterdir()))[:200])
+                  "unexpected default-profile suppression directory")
     finally:
         for k in keys:
             os.environ.pop(k, None)
@@ -23902,6 +24053,7 @@ def main() -> int:
         test_activity_baseline,
         test_exchange_scope,
         test_pipeline_brain,
+        test_unavailable_forget_ledger,
         test_memforget,
         test_memory_forget_api,
         test_profiling_forget,

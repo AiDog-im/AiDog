@@ -470,7 +470,7 @@
           </div>
           <!-- bot block: token / allowlist presence + format chips, service
                state and the restart action (confirm -> POST restart -> poll) -->
-          <div style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);">
+          <div id="actService" style="margin-top:14px;padding-top:10px;border-top:1px dashed var(--line);">
             <div class="ctl-row token-row" style="margin-bottom:6px;">
               <label data-i18n="act.bot">Bot & Service</label>
               <span class="stat-note" id="actBotState" style="margin-top:0;"></span>
@@ -2267,7 +2267,8 @@
             <h2 data-i18n="fplan.sec">Clone fleet approvals</h2>
             <div class="stat-note" data-i18n="fplan.hint">a delegated fleet that may write waits for you here — approving it authorizes that one dispatch, nothing else</div>
             <div id="fleetPlanList"></div>
-            <div class="stat-note" id="fleetPlanEmpty" data-i18n="fplan.empty">no fleets waiting</div>
+            <div class="stat-note" id="fleetPlanEmpty" data-i18n="fplan.empty" hidden>no fleets waiting</div>
+            <div class="stat-note" id="fleetPlanUnavailable" role="status" hidden></div>
             <div class="ctl-actions">
               <button class="btn" id="fleetPlanRefresh" type="button"
                       data-i18n="fplan.refresh">REFRESH</button>

@@ -91,7 +91,8 @@ def fake_repo(root: Path, with_kernel: bool = True) -> Path:
     way). `with_kernel=False` builds the degraded shape: a deploy tree with
     no kernel at all — the product must degrade honestly, never crash."""
     (root / "deploy").mkdir(parents=True, exist_ok=True)
-    for name in ("aidog_persist.py", "aidog_memory.py", "check_publish.py"):
+    # Use the shipped scripts only, including in the development checkout.
+    for name in ("aidog_persist.py", "aidog_memory.py"):
         shutil.copy2(REPO / "deploy" / name, root / "deploy" / name)
     if with_kernel:
         (root / "mycore").mkdir(exist_ok=True)
@@ -256,6 +257,20 @@ def test_sync_filters_every_product_copy(t: Path) -> None:
     repo = t / "repo_sync"
     fake_repo(repo)
     write_overlay(repo)
+    # The sync reads the ACTIVE PROFILE's curated slots (a named profile
+    # must never be served the repository's), so the profile's own slots
+    # carry the content here — and the repository's overlay carries
+    # DIFFERENT text, so the test can prove which one was the source.
+    home = t / "home_sync"
+    profile_slots = home / "profiles" / "supptest" / "body" / "memory"
+    profile_slots.mkdir(parents=True, exist_ok=True)
+    (profile_slots / "MEMORY_curated.md").write_text(
+        "# MEMORY (curated, profile)\n\n"
+        f"## Secret note\n{SUPPRESSED}\n\n"
+        f"## Kept note\n{KEPT}\n", encoding="utf-8")
+    (profile_slots / "USER_curated.md").write_text(
+        "# USER (profile)\n\n## Kept user\nthe profile user text\n",
+        encoding="utf-8")
     src = t / "sync_src"
     src.mkdir()
     (src / "MEMORY.md").write_text(
@@ -263,7 +278,7 @@ def test_sync_filters_every_product_copy(t: Path) -> None:
         f"## Secret note\n{SUPPRESSED}\n\n"
         f"## Kept note\n{KEPT}\n", encoding="utf-8")
     dst = t / "sync_dst"
-    env = env_for(state, t / "home_sync",
+    env = env_for(state, home,
                   {"AIDOG_MEMORY_SRC": str(src), "AIDOG_MEMORY_HOME": str(dst)})
     rc, so = run(repo / "deploy" / "aidog_memory.py", ["sync"], env)
     check("sync exit 0", rc == 0, so[:500])
@@ -282,11 +297,51 @@ def test_sync_filters_every_product_copy(t: Path) -> None:
     check("the curated slot copy is filtered",
           curated.is_file() and SUPPRESSED not in curated.read_text(encoding="utf-8"),
           curated.read_text(encoding="utf-8")[:200] if curated.is_file() else "missing")
+    check("the copy came from the ACTIVE PROFILE's slots, not the repository's",
+          curated.is_file() and KEPT in curated.read_text(encoding="utf-8")
+          and "the curated text the owner kept" not in curated.read_text(encoding="utf-8"),
+          curated.read_text(encoding="utf-8")[:200] if curated.is_file() else "missing")
     check("the external source keeps its original bytes",
           SUPPRESSED in (src / "MEMORY.md").read_text(encoding="utf-8"),
           "the source file must never be edited")
     check("sync writes no tombstone file into the memory home",
           not (dst / "memforget").exists())
+
+    # --- the default profile reads the repository's curated slots -------
+    dflt_repo = t / "repo_sync_default"
+    fake_repo(dflt_repo)
+    write_overlay(dflt_repo)
+    dflt_src = t / "sync_src_default"
+    dflt_src.mkdir()
+    (dflt_src / "MEMORY.md").write_text(
+        "# MEMORY (pi-side authority)\n\n## Kept note\n" + KEPT + "\n",
+        encoding="utf-8")
+    dflt_dst = t / "sync_dst_default"
+    dflt_env = env_for(state, t / "home_sync_default",
+                       {"AIDOG_MEMORY_SRC": str(dflt_src),
+                        "AIDOG_MEMORY_HOME": str(dflt_dst)})
+    dflt_env.pop("AIDOG_PROFILE", None)
+    dflt_env.pop("AIDOG_PROFILES_DIR", None)
+    rc, so = run(dflt_repo / "deploy" / "aidog_memory.py", ["sync"], dflt_env)
+    dflt_curated = dflt_dst / "MEMORY.md"
+    check("the default profile syncs the repository's curated slots",
+          rc == 0 and dflt_curated.is_file()
+          and "the curated text the owner kept" in dflt_curated.read_text(encoding="utf-8"),
+          so[-300:] if rc != 0 else
+          (dflt_curated.read_text(encoding="utf-8")[:200] if dflt_curated.is_file() else "missing"))
+
+
+    # An unavailable resolver must never turn a named sync into a default sync.
+    seam = repo / "lib" / "profile_paths.py"
+    seam.unlink()
+    for case in ("missing", "broken"):
+        if case == "broken":
+            seam.write_text("raise ImportError('fixture')\n", encoding="utf-8")
+        refused_dst = t / f"sync_refused_{case}"
+        rc, so = run(repo / "deploy" / "aidog_memory.py", ["sync"],
+                     {**env, "AIDOG_MEMORY_HOME": str(refused_dst)})
+        check(f"named sync refuses a {case} profile resolver before writing",
+              rc == 1 and "refusing to sync" in so and not refused_dst.exists(), so)
 
 
 def test_the_local_ledger_alone_is_enough(t: Path) -> None:
@@ -349,9 +404,7 @@ def test_the_same_machine_import_is_idempotent(t: Path, tarball: Path) -> None:
           "could not be merged" not in so, so[-400:])
 
 
-def test_a_broken_ledger_never_fails_the_import(t: Path, tarball: Path) -> None:
-    """A ledger that cannot be written must not fail the import."""
-    """A ledger that cannot be written must not fail the import."""
+def test_a_broken_ledger_blocks_import(t: Path, tarball: Path) -> None:
     script = fake_repo(t / "repo_broken")
     broken = t / "broken_state"
     broken.write_text("this is a file, not a state root\n", encoding="utf-8")
@@ -361,14 +414,11 @@ def test_a_broken_ledger_never_fails_the_import(t: Path, tarball: Path) -> None:
     rc, so = run(script, ["import", str(tarball), "--dest-profile", str(dest),
                            "--source-home", str(source_home),
                            "--persona-home", str(t / "persona_broken")], env)
-    check("import exit 0 even when the ledger cannot be written", rc == 0,
-          so[:600])
-    check("the import restored the memory files anyway",
-          (dest / "memories" / "MEMORY.md").is_file())
-    check("the import says the merge could not be persisted",
-          "could not be merged" in so, so[-500:])
-    check("the import keeps its exit-0 contract",
-          "import ok:" in so, so[-500:])
+    check("broken state blocks import", rc == 1, so[:600])
+    check("the product destination is untouched", not dest.exists())
+    check("the import reports unavailable suppression",
+          "suppression unavailable" in so, so[-500:])
+    check("the external destination is untouched", not source_home.exists())
 
 
 def test_a_missing_ledger_module_degrades_honestly(t: Path, tarball: Path) -> None:
@@ -381,13 +431,12 @@ def test_a_missing_ledger_module_degrades_honestly(t: Path, tarball: Path) -> No
     rc, so = run(script, ["import", str(tarball), "--dest-profile", str(dest),
                            "--source-home", str(t / "source_nokernel"),
                            "--persona-home", str(t / "persona_nokernel")], env)
-    check("import exit 0 without the suppression module", rc == 0, so[:600])
+    check("missing suppression module blocks import", rc == 1, so[:600])
     check("the import says the suppression was unavailable",
           "suppression unavailable" in so, so[-500:])
-    check("the import still restored the files",
-          (dest / "memories" / "MEMORY.md").is_file())
-    check("nothing was silently filtered",
-          "nothing was filtered" in so, so[-500:])
+    check("missing module leaves the destination untouched", not dest.exists())
+    check("refusal reports withheld memory writes",
+          "memory writes withheld" in so, so[-500:])
 
 
 def test_the_product_tree_is_untouched(before: dict) -> None:
@@ -447,7 +496,7 @@ def main() -> int:
         test_the_local_ledger_alone_is_enough(t)
         test_the_same_machine_import_is_idempotent(t, tarball)
         test_sync_filters_every_product_copy(t)
-        test_a_broken_ledger_never_fails_the_import(t, tarball)
+        test_a_broken_ledger_blocks_import(t, tarball)
         test_a_missing_ledger_module_degrades_honestly(t, tarball)
     test_the_product_tree_is_untouched(before)
 

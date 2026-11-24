@@ -1,69 +1,54 @@
 name: public-leak-guard
 
-# Layer 3 of the desensitization anti-recurrence mechanism (owner decree
-# 2026-10-28). Layers 1 and 2 live in the development repository and stop an
-# accidental push from there; this workflow is the backstop for everything
-# those layers cannot see — a web-UI edit, a contributor push, a forced update.
-#
-# Every push re-scans the pushed tree with fragment-assembled signatures
-# (.github/scripts/leak_scan.py). On a hit the job:
-#   1. records the finding in the step summary (file + pattern class + SHA —
-#      the matched text itself is never reproduced anywhere);
-#   2. opens an alert issue with the same limited detail;
-#   3. force-pushes the previous clean commit back onto main, so the leaked
-#      tree stops being the checked-out state.
-# Pushes made with the workflow token never re-trigger this workflow, so the
-# rollback cannot loop.
-
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
-  contents: write
-  issues: write
+  contents: read
 
 jobs:
   scan:
+    if: github.repository == 'AiDog-im/AiDog' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the pushed history
+      - name: Check out the exact public revision
+        id: checkout
         uses: actions/checkout@v4
+        continue-on-error: true
         with:
-          fetch-depth: 0
+          ref: ${{ github.sha }}
+          persist-credentials: false
 
-      - name: Scan the tree
+      - name: Scan the exported tree
+        if: steps.checkout.outcome == 'success'
         id: scan
-        run: python3 .github/scripts/leak_scan.py
+        run: |
+          rc=0
+          python3 .github/scripts/leak_scan.py || rc=$?
+          echo "code=$rc" >> "$GITHUB_OUTPUT"
 
-      - name: Alert (finding recorded without reproducing the value)
-        if: failure()
+      - name: Report result for this revision
+        if: always()
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          CHECKOUT: ${{ steps.checkout.outcome }}
+          SCAN_CODE: ${{ steps.scan.outputs.code }}
         run: |
-          {
-            echo "## Leak guard tripped"
-            echo ""
-            echo "- commit: ${GITHUB_SHA}"
-            echo "- repository: ${GITHUB_REPOSITORY}"
-            echo "- detail: see the failed *Scan the tree* step — matched text"
-            echo "  is deliberately not reproduced here, an alert would simply"
-            echo "  re-publish what the guard exists to remove."
-            echo "- action: main is rolled back to the previous clean commit"
-            echo "- next: this repository is a generated export — changes are"
-            echo "  made in the private development repository and re-exported"
-            echo "  there by its maintainer, never edited here"
-          } >> "${GITHUB_STEP_SUMMARY}"
-          gh issue create \
-            --title "leak guard tripped at ${GITHUB_SHA}" \
-            --body-file "${GITHUB_STEP_SUMMARY}" || true
-
-      - name: Roll back to the previous clean commit
-        if: failure()
-        run: |
-          if git rev-parse --verify HEAD~1 >/dev/null 2>&1; then
-            git push --force origin HEAD~1:main
+          if [ "$CHECKOUT" != success ]; then
+            verdict='Checkout failed'
           else
-            echo "no previous commit to roll back to" >> "${GITHUB_STEP_SUMMARY}"
+            case "$SCAN_CODE" in
+              0) verdict=Clean ;;
+              3) verdict='Confirmed finding. Exporter review required' ;;
+              *) verdict='Scanner failed' ;;
+            esac
+          fi
+          printf '## %s
+
+Commit: \x60%s\x60
+' "$verdict" "$GITHUB_SHA" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$verdict" != Clean ]; then
+            echo "::error::$verdict ($GITHUB_SHA)"
+            exit 1
           fi

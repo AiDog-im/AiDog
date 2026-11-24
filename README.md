@@ -16,8 +16,8 @@
 <p align="center">
   <a href="https://github.com/AiDog-im/AiDog/releases"><img src="https://img.shields.io/github/v/tag/AiDog-im/AiDog?sort=semver&style=flat-square" alt="latest release"></a>
   <a href="https://aidog.im"><img src="https://img.shields.io/badge/website-aidog.im-2892ff?style=flat-square" alt="website"></a>
-  <img src="https://img.shields.io/badge/core_tests-3005%2F3005-brightgreen?style=flat-square" alt="core tests 3005/3005">
-  <img src="https://img.shields.io/badge/console_smoke-610%2F610-brightgreen?style=flat-square" alt="console smoke 610/610">
+  <img src="https://img.shields.io/badge/core_tests-3036%2F3036-brightgreen?style=flat-square" alt="core tests 3036/3036">
+  <img src="https://img.shields.io/badge/console_smoke-619%2F619-brightgreen?style=flat-square" alt="console smoke 619/619">
   <img src="https://img.shields.io/badge/permanently-free-ff6f00?style=flat-square" alt="permanently free">
 </p>
 
@@ -58,7 +58,7 @@ run locally, and its console listens on `127.0.0.1` only.) It is built around th
   No vector store you cannot read or audit.
 - **A self-developed core.** The runtime kernel (`mycore`) is written from
   scratch in this repository — an honest function-calling loop with explicit
-  stop reasons, **53 modules ≈ 32.4k LOC, 3,005 tests**, and zero upstream
+  stop reasons, **54 modules ≈ 33.7k LOC, 3,036 tests**, and zero upstream
   dependencies after the core swap. Swap the kernel, never swap "me".
 
 It talks to you over **Telegram**, a **loopback web console**, a
@@ -107,7 +107,7 @@ model key (or use the zero-key trial path) and the whole product activates.
 
 |  | Capability | What it provides |
 |---|---|---|
-| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 53 modules, 3,005 tests, zero upstream |
+| 🧬 | **Self-developed core** | `mycore`: FC loop with honest stop reasons, fail-closed service, watchdog, doctor health gate — 54 modules, 3,036 tests, zero upstream |
 | 🎭 | **Constitution persona** | `SOUL.md` first in the system stack; red lines and tone enforced every reply, not sampled from a persona prompt |
 | 🧠 | **Curated memory** | Bounded Markdown budgets + archive tiers + digital-memory protocol; `memory` suite 58/58 |
 | 🧩 | **Skills + deterministic router** | `SKILL.md` frontmatter (industry-standard fields), route pre-filter picks TOP3 *before* any body loads — 37/37 |
@@ -242,8 +242,8 @@ Every release is cut only after these run green on a clean tree:
 
 | Suite | Result |
 |---|---|
-| `mycore` core suite | **3005/3005** |
-| Console smoke (live HTTP) | **610/610** (on a provisioned install — needs `secrets.env`; a bare clone skips it honestly) |
+| `mycore` core suite | **3036/3036** |
+| Console smoke (live HTTP) | **619/619** (disposable offline console with local model and speech fixtures) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |
 | Setup wizard | **123/123** |
@@ -256,8 +256,8 @@ Every release is cut only after these run green on a clean tree:
 Catalog scope: **30 registered tools** · **9 exchange venues** · **28
 real-machine E2E suites** — all green.
 
-Locale packs: `en` (default) + `zh`, **1945 keys** each, parity lint in CI;
-the marketing site ships its own **382-key** bilingual pack.
+Locale packs: `en` (default) + `zh`, **1951 keys** each, parity lint in CI;
+the marketing site ships its own **416-key** bilingual pack.
 
 ## Documentation
 

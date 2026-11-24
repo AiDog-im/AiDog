@@ -151,6 +151,7 @@ class Tool:
 class ToolRegistry:
     def __init__(self) -> None:
         self._tools: dict[str, Tool] = {}
+        self.fleet_scope: tuple[tuple[str, ...], str] | None = None
         # Turn binding (car 2-D6): loop.run_turn records the chat callable +
         # budget of the ACTIVE turn so meta-tools (delegate) can reach the
         # model connection without holding credentials themselves. Written at
@@ -180,10 +181,19 @@ class ToolRegistry:
         roots/state closures) — the car 2-D6 sub-agent isolation primitive.
         Unknown names are skipped here; callers validate honestly first."""
         out = ToolRegistry()
+        out.fleet_scope = self.fleet_scope
         for n in names:
             if n in self._tools:
                 out._tools[n] = self._tools[n]
         return out
+
+    def pin_fleet_shell(self, spec: str) -> None:
+        """Use the reviewed backend, rather than hot-switching mid-fleet."""
+        if "run_bash" in self._tools:
+            tool = self._tools.pop("run_bash")
+            self.register(tool.name, tool.description, tool.parameters,
+                          lambda command, timeout=BASH_TIMEOUT: _run_bash(
+                              command, timeout, shell_spec=spec))
 
     def bind_turn(self, chat: Callable[..., dict] | None,
                   budget: int | None = None,
@@ -373,6 +383,8 @@ def protected_write_reason(p: Path) -> str | None:
     """Refusal text when the resolved path `p` may not be written by the
     structured path tools, else None. Called by write_file/edit_file and the
     ACP fs proxy (defense in depth on top of resolve_inside)."""
+    if p.name == "fleet_plans.json" or p.name.startswith(".fleet_plans-"):
+        return "fleet plans are writable only through the approval store"
     for root, reason in _protected_writes():
         try:
             if p == root or root in p.parents:
@@ -404,7 +416,8 @@ def protected_write_reason(p: Path) -> str | None:
 
 
 def _is_secret_store(p: Path) -> bool:
-    return p.name == SECRET_STORE_NAME
+    return (p.name in (SECRET_STORE_NAME, "fleet_plans.json")
+            or p.name.startswith(".fleet_plans-"))
 
 
 def _read_file(path: str, offset: int = 0, limit: int = 200,
@@ -578,7 +591,8 @@ def _dangerous_shell_reason(command: str) -> str:
 
 
 def _run_bash(command: str, timeout: int = BASH_TIMEOUT,
-              roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS) -> str:
+              roots: tuple[str, ...] | list[str] = DEFAULT_ALLOWED_ROOTS,
+              *, shell_spec: str | None = None) -> str:
     """Run one shell command on the configured terminal backend (settings
     mycore.shell; default local, repo root). Output capped; honest on failure.
 
@@ -598,7 +612,7 @@ def _run_bash(command: str, timeout: int = BASH_TIMEOUT,
             "command.")
     from . import terminal  # local import: tools stays import-light (browser pattern)
     try:
-        backend = terminal.parse(_shell_spec())
+        backend = terminal.parse(_shell_spec() if shell_spec is None else shell_spec)
     except ValueError as e:
         raise ToolError(f"mycore.shell: {e}") from None
     try:
@@ -1620,6 +1634,12 @@ def build_registry(allowed_roots: tuple[str, ...] | list[str] | None = None,
     else:
         roots = DEFAULT_ALLOWED_ROOTS + _settings_extra_roots()
     r = ToolRegistry()
+    try:
+        roots = tuple(str(Path(root).resolve()) for root in roots)
+        r.fleet_scope = (roots, str(Path(state_dir or pp.state_dir(REPO)).resolve()))
+    except (OSError, ValueError, RuntimeError):
+        # The ordinary registry stays available; gated writes need a scope.
+        pass
     r.register("read_file", "Read a text file with line numbers.",
                {"type": "object", "properties": {
                    "path": _STR, "offset": _INT,
