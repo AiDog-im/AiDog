@@ -969,13 +969,30 @@ def cmd_update(args: argparse.Namespace) -> int:
     return subprocess.call(argv)
 
 
+def cmd_boot(args: argparse.Namespace) -> int:
+    """`aidog start | status | stop` — delegate to deploy/boot_services.sh,
+    the single runtime entry point (tmux sessions: console + chat service +
+    watchdog). `start` is idempotent and self-checks the console entry point:
+    a dead/hung session is recycled, a wedged process we own is restarted,
+    a FOREIGN process on the port is reported and never killed. The
+    dispatcher never re-implements the script's grammar; the exit code is
+    propagated (0 = all green)."""
+    import subprocess
+    boot_sh = Path(__file__).resolve().parent / "boot_services.sh"
+    verb = getattr(args, "boot_cmd", None) or "start"
+    argv = ["bash", str(boot_sh), verb]
+    argv.extend(getattr(args, "rest", None) or [])
+    return subprocess.call(argv)
+
+
 def build_parser() -> argparse.ArgumentParser:
     ap = argparse.ArgumentParser(
         prog="aidog",
         description="I'm AiDog CLI: setup (one-command install/verify), "
-                    "doctor/update ops dispatch, plus memory portability — "
-                    "export / import / list manifest-based memory bundles "
-                    "(private memory repo transport).")
+                    "start/status/stop runtime, doctor/update ops dispatch, "
+                    "plus memory portability — export / import / list "
+                    "manifest-based memory bundles (private memory repo "
+                    "transport).")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     s = sub.add_parser("setup", help="interactive setup wizard (fill credential slots, validate, boot); --check status only, --yes non-interactive installer")
@@ -1010,6 +1027,17 @@ def build_parser() -> argparse.ArgumentParser:
     u.add_argument("rest", nargs=argparse.REMAINDER,
                    help="further flags, forwarded verbatim")
     u.set_defaults(func=cmd_update)
+
+    for verb, help_text in (
+        ("start", "start the runtime (console + chat service + watchdog) "
+                  "with self-check and console self-repair; idempotent"),
+        ("status", "report runtime status (exit 0 = all green)"),
+        ("stop", "stop the runtime sessions (maintenance)"),
+    ):
+        bp = sub.add_parser(verb, help=help_text)
+        bp.add_argument("rest", nargs=argparse.REMAINDER,
+                        help="extra arguments, forwarded verbatim")
+        bp.set_defaults(func=cmd_boot, boot_cmd=verb)
 
     sc = sub.add_parser("secrets",
                         help="E2 static encryption of secrets.env (opt-in, "

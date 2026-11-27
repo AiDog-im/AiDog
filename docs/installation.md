@@ -214,7 +214,7 @@ and exits `2` — that is an honest "no brain configured yet", not a crash.
 |---|---|
 | Re-verify any time | `aidog setup --check` (read-only) or `aidog setup --yes` (boot + verify) |
 | Health report | `python3 deploy/aidog_doctor.py` (exit 0 = no FAIL) |
-| Stop / start runtime | `bash deploy/boot_services.sh stop` / `start` (or `status`) |
+| Stop / start runtime | `aidog stop` / `aidog start` (or `aidog status`; same script: `deploy/boot_services.sh`) — `start` is idempotent and self-checks the console, recycling a dead session or reporting a foreign port holder (never kills it) |
 | Check for a new version | `python3 deploy/aidog_update.py check` (console shows an upgrade banner too) |
 | Apply an update | `python3 deploy/aidog_update.py apply` (refuses with uncommitted changes, by design) |
 | Talk to your bot | Telegram: send `/start` to your bot, then chat |

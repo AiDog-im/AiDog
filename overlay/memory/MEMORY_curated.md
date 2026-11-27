@@ -13,7 +13,7 @@
 - Chain phase two: /agent/v1 + the official SDK signer + a human gate; the on-chain constitution and the local constitution are mapped onto each other
 
 ## Persona and business
-- Before publishing any external text, read the <redacted> store and run voice_lint; the banned-word list and the scrubbing red lines are in force
+- Before publishing any external text, consult the owner-managed persona store (see `MEMORY_PERSONA` in `deploy/memory_sources.local`) and apply the owner's external-voice review; the banned-word list and the scrubbing red lines are in force
 - Business lines: <redacted>
 - Trigger words for the daily / weekly / monthly review → `scripts/reflect.py --daily` emits the data skeleton, the prose is written by a human
 - Every conclusion carries its source; the ledger is written by scripts, never out of memory

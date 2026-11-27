@@ -444,6 +444,51 @@ def test_dispatch_flags(t: Path) -> None:
           not (t2 / "deploy" / "install.marker").exists())
 
 
+def test_boot_dispatch(base: Path) -> None:
+    """`aidog start | status | stop` dispatch (2026-11-27: one unified entry
+    on every install). The fake repo's stub boot_services.sh records its argv
+    and honors FAKE_RC — the same FORWARDING contract as doctor/update: verb
+    shape + exit-code propagation, grammar stays in the script."""
+    t = make_repo(sub(base, "boot"))
+    boot = t / "deploy" / "boot_services.sh"
+    boot.write_text(
+        '#!/usr/bin/env bash\n'
+        'echo "$@" > "$(dirname "$0")/boot.marker"\n'
+        'exit "${FAKE_RC:-0}"\n', encoding="utf-8")
+    marker = t / "deploy" / "boot.marker"
+
+    rc, out = run(persist_py(t), ["--help"])
+    check("aidog --help lists start + status + stop",
+          rc == 0 and all(v in out for v in ("start", "status", "stop")),
+          out[:300])
+
+    def marker_text() -> str:
+        return marker.read_text(encoding="utf-8").strip() if marker.exists() else "missing"
+
+    rc, _ = run(persist_py(t), ["start"])
+    check("`aidog start` delegates to boot_services.sh start (exit 0)",
+          rc == 0 and marker_text() == "start", marker_text())
+    marker.unlink(missing_ok=True)
+    rc, _ = run(persist_py(t), ["status"])
+    check("`aidog status` forwards the status verb",
+          rc == 0 and marker_text() == "status", marker_text())
+    marker.unlink(missing_ok=True)
+    rc, _ = run(persist_py(t), ["stop"])
+    check("`aidog stop` forwards the stop verb",
+          rc == 0 and marker_text() == "stop", marker_text())
+    marker.unlink(missing_ok=True)
+    rc, _ = run(persist_py(t), ["start"], extra_env={"FAKE_RC": "7"})
+    check("`aidog start` propagates the target's exit code (7 -> 7)",
+          rc == 7, f"rc={rc}")
+    marker.unlink(missing_ok=True)
+    rc, _ = run(persist_py(t), ["start", "extra-arg"])
+    check("extra non-flag args travel verbatim to the script",
+          rc == 0 and marker_text() == "start extra-arg", marker_text())
+    rc, out = run(persist_py(t), ["start", "--flag"])
+    check("flag-style args are refused with usage (these verbs take none)",
+          rc == 2 and "unrecognized arguments" in out, f"rc={rc}")
+
+
 def test_ops_dispatch(base: Path) -> None:
     """`aidog doctor` / `aidog update` dispatch (owner 2026-11-10: README and
     docs advertise both commands, so the dispatcher must make that true).
@@ -693,6 +738,7 @@ def main() -> int:
         test_region_prompt_and_check(base)
         test_dispatch_flags(base)
         test_ops_dispatch(base)
+        test_boot_dispatch(base)
         test_url_userinfo_guard()
 
         test_local_model_detected_adopt(base)

@@ -20,6 +20,14 @@
 #   boot_services.sh status     # report session/process/endpoint state
 #   boot_services.sh stop       # stop all three sessions (maintenance)
 #
+# The `aidog` CLI exposes the same three verbs (`aidog start|status|stop`)
+# as the single human entry point. `start` self-checks the console entry
+# point and repairs it (see repair_web below): a dead/hung session is
+# recycled, a wedged process we own is restarted, and a FOREIGN process on
+# the port is reported, never killed. Test seams (read-only defaults):
+#   AIDOG_BOOT_SETTLE_SEC  settle time before self-verify (default 6)
+#   AIDOG_REPAIR_GRACE     seconds a slow console gets before recycling (15)
+#
 # English comments per repo i18n policy.
 set -u
 
@@ -42,6 +50,13 @@ fi
 #   transition (shim present) = current behavior: source it, run gw/wd.
 #   post (shim deleted)       = gw/wd retired; no upstream facts are sourced,
 #                               GW_PATTERN/GWLOG stay empty (see guards below).
+# python3 is a hard requirement (shq above, web_up below): fail honestly and
+# early rather than shell-quoting with a missing interpreter.
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "boot_services: FAIL - python3 not found on PATH (install Python 3 first)" >&2
+  exit 1
+fi
+
 if [ -f "$REPO/deploy/upstream_shim.env" ]; then
   PHASE=transition
   # shellcheck source=upstream_shim.env
@@ -115,10 +130,85 @@ log() { printf '[%s] %s\n' "$(date '+%F %T')" "$*"; }
 session_exists() { tmux has-session -t "$1" 2>/dev/null; }
 
 web_up() {
+  # Probe OUR endpoint, not just port 80-style liveness: a foreign server
+  # squatting on the port must never count as "console up".
   python3 - "$WEB_PORT" <<'PY' >/dev/null 2>&1
 import sys, urllib.request
-urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/", timeout=3).read(64)
+urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/api/health", timeout=3).read(64)
 PY
+}
+
+ensure_tmux() {
+  command -v tmux >/dev/null 2>&1 && return 0
+  log "tmux not found - bootstrapping user-space tmux (no admin rights needed)"
+  bash "$REPO/deploy/bootstrap_tmux.sh" || true
+  if [ -x "$HOME/.local/bin/tmux" ]; then PATH="$HOME/.local/bin:$PATH"; export PATH; fi
+  command -v tmux >/dev/null 2>&1
+}
+
+web_port_pid() {  # pid listening on $WEB_PORT (best effort; empty = none/unknown)
+  local out=""
+  if command -v ss >/dev/null 2>&1; then
+    out=$(ss -ltnpH "sport = :$WEB_PORT" 2>/dev/null | grep -o 'pid=[0-9]*' | head -n1 | cut -d= -f2)
+  fi
+  if [ -z "$out" ] && command -v lsof >/dev/null 2>&1; then
+    out=$(lsof -nP -iTCP:$WEB_PORT -sTCP:LISTEN -t 2>/dev/null | head -n1)
+  fi
+  printf '%s' "$out"
+}
+
+is_our_console_pid() {  # ours = argv names server.py AND cwd is <repo>/web
+  local pid=$1 cwd cmd
+  [ -r "/proc/$pid/cmdline" ] || return 1   # no /proc (macOS): never kill what we cannot identify
+  cmd=$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null)
+  case "$cmd" in *server.py*) ;; *) return 1 ;; esac
+  cwd=$(readlink "/proc/$pid/cwd" 2>/dev/null || true)
+  [ "$cwd" = "$REPO/web" ]
+}
+
+wait_web() {  # $1 = seconds to keep trying (each probe costs at most 3s)
+  local deadline=$(( $(date +%s) + ${1:-0} ))
+  while [ "$(date +%s)" -lt "$deadline" ]; do
+    web_up && return 0
+    sleep 1
+  done
+  web_up
+}
+
+repair_web() {
+  # Self-check + self-repair for the CONSOLE entry point (`aidog start`,
+  # install, boot). Bounded and honest: a foreign process on the port is
+  # reported, never killed; only our own session / our own server.py are
+  # recycled. Every branch says what it did.
+  local holder grace="${AIDOG_REPAIR_GRACE:-15}"
+  log "aidog_web: console self-check failed - repairing"
+  holder=$(web_port_pid)
+  if [ -n "$holder" ] && ! is_our_console_pid "$holder"; then
+    log "aidog_web: port $WEB_PORT is held by ANOTHER process (pid $holder) - NOT killed; stop it yourself or set AIDOG_WEB_PORT"
+    return 1
+  fi
+  if [ -n "$holder" ]; then
+    log "aidog_web: wedged console process (pid $holder) - stopping it"
+    kill "$holder" 2>/dev/null || true
+    sleep 1
+  elif session_exists aidog_web; then
+    log "aidog_web: session alive but nothing is listening - recycling"
+    tmux kill-session -t aidog_web 2>/dev/null || true
+    sleep 1
+  fi
+  start_web
+  if wait_web "$grace"; then log "aidog_web: console is up"; return 0; fi
+  # one more recycle round (a half-dead session can survive one restart)
+  if session_exists aidog_web; then
+    log "aidog_web: still down - recycling once more"
+    tmux kill-session -t aidog_web 2>/dev/null || true
+    sleep 1
+    start_web
+    wait_web 12 && { log "aidog_web: console is up"; return 0; }
+  fi
+  log "aidog_web: console still down - last lines of $WEB_LOG:"
+  tail -n 5 "$WEB_LOG" 2>/dev/null | sed -E 's/((Bearer|token|TOKEN|PAT|SECRET|PASSWORD)[=: ]+)[A-Za-z0-9._~+/-]{8,}/\1REDACTED/g' >&2 || true
+  return 1
 }
 
 start_gw() {
@@ -226,6 +316,7 @@ start_mwd() {
 
 status() {
   local rc=0 s
+  command -v tmux >/dev/null 2>&1 || { echo "❌ tmux missing (bootstrap failed)"; return 1; }
   for s in aidog_gw aidog_wd aidog_web aidog_mwd; do
     if [ "$PHASE" = post ] && { [ "$s" = aidog_gw ] || [ "$s" = aidog_wd ]; }; then
       # P5-5: gw/wd sessions must be GONE post-swap — lingering = leftover.
@@ -256,18 +347,21 @@ status() {
 case "${1:-start}" in
   start)
     log "boot_services: ensuring AiDog runtime sessions"
+    ensure_tmux || { log "boot_services: FAIL - tmux unavailable (bootstrap failed)"; exit 1; }
     inject_proxy
     start_gw; start_wd; start_web; start_svc; start_mwd
     # Give slow starts (gateway Telegram connect) a moment, then self-verify.
-    sleep 6
+    sleep "${AIDOG_BOOT_SETTLE_SEC:-6}"
+    if ! web_up; then repair_web || true; fi
     if status; then
       log "boot_services: all green"
+      log "console: http://127.0.0.1:$WEB_PORT/"
     else
       log "boot_services: FAIL - some services did not come up"
       exit 1
     fi
     ;;
-  status) status ;;
+  status) ensure_tmux >/dev/null 2>&1 || { echo "❌ tmux missing (bootstrap failed)"; return 1; }; status ;;
   stop)
     for s in aidog_mwd aidog_svc aidog_web aidog_wd aidog_gw; do
       session_exists "$s" && { tmux kill-session -t "$s"; log "$s: stopped"; }

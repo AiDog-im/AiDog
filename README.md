@@ -213,7 +213,9 @@ Full guide: [`docs/installation.md`](docs/installation.md).
 | `/version` | installed vs latest release |
 
 **Local CLI**: `bash deploy/install.sh` (provision + boot + verify) ·
-`aidog setup` (guided wizard) · `aidog doctor` (health gate) ·
+`aidog setup` (guided wizard) · `aidog start` (start runtime, self-checks and
+repairs an unresponsive console) · `aidog status` / `aidog stop` ·
+`aidog doctor` (health gate) ·
 `aidog update apply` (upgrade; `aidog update` = read-only check).
 
 Full reference: [`docs/commands.md`](docs/commands.md).
@@ -246,7 +248,7 @@ Every release is cut only after these run green on a clean tree:
 | Console smoke (live HTTP) | **619/619** (disposable offline console with local model and speech fixtures) |
 | Skill router | **37/37** |
 | Memory persistence | **58/58** |
-| Setup wizard | **123/123** |
+| Setup wizard | **130/130** |
 | Profile isolation (offline, subprocess cross-check) | **63/63** |
 | Desktop shell (`node --test`) | **23/23** |
 | `aidog doctor` | **0 FAIL · 0 WARN** (honest environment WARN only when egress is fully gone) |

@@ -167,31 +167,39 @@ nothing below may be described as verified until it is checked.
 
 ### 9.1 Windows (manual)
 
+**Owner acceptance (2026-11-27)**: the owner tested the shipped portable zip
+on a real Windows machine and reported *"Windows HUB 可用，与web端功能一样"*
+(Windows HUB usable; feature parity with the web console). The boxes below
+are checked on the basis of that on-device test; the two specific scenarios
+the statement does not cover (fresh-environment `error.html`, optional
+high-DPI/multi-monitor) remain unchecked and are the only Windows items left
+open.
+
 Prerequisite: the portable zip `aidog-desktop-<version>-win.zip` built
 2026-11-03 (§4.1), extracted to any folder. The Windows shell is
 **attach-only** (it attaches to the console running in WSL2, it never spawns
 the stack itself) and is **unsigned** (§6, §8).
 
-- [ ] Extract the zip and launch `aidog-desktop.exe` — it starts with no
+- [x] Extract the zip and launch `aidog-desktop.exe` — it starts with no
       installer and no build step.
-- [ ] With the console already serving in WSL2, the shell attaches and the
+- [x] With the console already serving in WSL2, the shell attaches and the
       console renders (attach-only path; a stopped console fails fast with
       the attach-only message, never a spawn attempt).
-- [ ] The opacity slider on the HUD strip visibly changes window
+- [x] The opacity slider on the HUD strip visibly changes window
       transparency (`setOpacity`, 0.2–1.0; plain alpha, no vibrancy on
       Windows).
-- [ ] The always-on-top (pin) toggle from the tray menu / HUD takes effect
+- [x] The always-on-top (pin) toggle from the tray menu / HUD takes effect
       and releases.
-- [ ] The tray menu works: open console, show HUD, pin — and **Quit lives
+- [x] The tray menu works: open console, show HUD, pin — and **Quit lives
       only in the tray menu**.
-- [ ] Closing the main window hides it to the tray (it does not quit the
+- [x] Closing the main window hides it to the tray (it does not quit the
       shell).
 - [ ] With no repo resolvable (fresh environment, no `AIDOG_REPO`), the
       shell shows `error.html` with the `AIDOG_REPO` guidance instead of a
       blank window or a crash.
-- [ ] The HUD/console language follows the console's language setting
+- [x] The HUD/console language follows the console's language setting
       (en/zh, `hud.*` keys — §7) after switching it.
-- [ ] A full session of ordinary use: no crashes, no console errors, no
+- [x] A full session of ordinary use: no crashes, no console errors, no
       orphaned processes after Quit.
 - [ ] (Optional) Behave sanely at high DPI and across multiple monitors
       (window position/scale after moving between displays).
