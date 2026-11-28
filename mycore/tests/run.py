@@ -3543,6 +3543,26 @@ print("OK" if res.ok else "NO " + ",".join(res.errors))
                 os.environ["AIDOG_MC_STATE"] = saved_state
 
 
+def _no_wd_chat_slot():
+    """Context manager masking ONLY the MYCORE_WD_CHAT secrets slot.
+
+    "No delivery target configured" assertions must hold on a machine where
+    the owner HAS configured watchdog alerts (the slot lives in the real
+    secrets.env, which these tests must not depend on either way). The
+    process env still wins — it is read before the slot — and every other
+    slot resolves normally.
+    """
+    from unittest.mock import patch
+    from mycore import envslots
+
+    real = envslots.slot_value
+
+    def _masked(name, path=None):
+        return "" if name == envslots.WD_CHAT_SLOT else real(name, path)
+
+    return patch.object(envslots, "slot_value", _masked)
+
+
 def test_scheduler() -> None:
     """Phase B2 natural-language cron: spec grammar, due matrix, registry
     persistence, the `cron` tool, and the /cron service leg — all offline
@@ -3904,7 +3924,8 @@ def test_scheduler() -> None:
             _os.environ.pop("MYCORE_WD_CHAT", None)
             fake.sends.clear()
             svc._cron_check = 0.0
-            svc._maybe_fire_cron()
+            with _no_wd_chat_slot():
+                svc._maybe_fire_cron()
             check("cron: no target at all -> log-only, never an error",
                   fake.sends == [] and "delivered=none" in svc.log.read_text())
             check("cron: log-only fire still marks the job",
@@ -6419,7 +6440,8 @@ def test_channels_service() -> None:
             sch.save_jobs(reg4, jl)
             chan4.send_ok = False
             svc4._cron_check = 0.0
-            svc4._maybe_fire_cron()
+            with _no_wd_chat_slot():
+                svc4._maybe_fire_cron()
             check("channels svc: failed channel send falls back to log-only",
                   "delivered=none" in svc4.log.read_text()
                   and "CHANNEL_SEND_FAIL" in svc4.log.read_text(),
@@ -6434,7 +6456,8 @@ def test_channels_service() -> None:
                            origin="carrier:C9", now=clock[0] - 120)
             sch.save_jobs(reg4, jl)
             svc4._cron_check = 0.0
-            svc4._maybe_fire_cron()
+            with _no_wd_chat_slot():
+                svc4._maybe_fire_cron()
             check("channels svc: unknown cron route -> log-only, no crash",
                   "delivered=none" in svc4.log.read_text())
 
@@ -12936,9 +12959,10 @@ def test_mission() -> None:
                   ms.load(reg_path)["last_tick"] == clock[0])
 
             # four-tier delivery fallback, same chain as the cron leg
+            with _no_wd_chat_slot():
+                no_target = svc._mission_deliver({"origin": None}, "nobody-here")
             check("mission leg: no channel at all -> log-only, no raise",
-                  svc._mission_deliver({"origin": None}, "nobody-here")
-                  == "none")
+                  no_target == "none")
             fake.sends.clear()
             check("mission leg: origin chat uses the shared chain",
                   svc._mission_deliver({"origin": 424242}, "origin-ping")
@@ -14561,6 +14585,14 @@ def test_delta2() -> None:
               r[0] == 200 and r[1]["count"] == 2
               and r[1]["search"]["method"] == "fts5"
               and r[1]["search"]["fallback"] is False, str(r)[:160])
+        check("delta2 GET /api/sessions?q= -> message-level cross-session "
+              "recall rides along (batch 4 item 1)",
+              r[0] == 200 and isinstance(r[1].get("messages"), dict)
+              and r[1]["messages"].get("method") == "fts5"
+              and r[1]["messages"].get("count") >= 1
+              and r[1]["messages"].get("suppression") == "ok"
+              and all("text" in h for h in r[1]["messages"].get("hits") or []),
+              str(r)[:260])
         r = call("_handle_sessions_get", "/api/sessions?q=" + "x" * 300)
         check("delta2 GET /api/sessions: oversized q -> 400", r[0] == 400)
         r = call("_handle_sessions_get", "/api/sessions?limit=0")
@@ -22680,6 +22712,374 @@ except mf.MemforgetError as exc:
                 os.environ[k] = saved[k]
 
 
+def test_memorylog() -> None:
+    """Memory revision timeline (batch 4-3) — side-band, bounded, supremacy.
+
+    Design authority: docs/design/memory_timeline_design.md.
+
+    Covered: a learn appends a record that carries NO text and never
+    touches the memory file; the read face groups per entry and returns a
+    bounded newest-first slice; a forgotten entry's history never appears
+    (both suppression rules, plus a tombstoned VERSION inside a visible
+    entry); an unverifiable ledger is fail-closed (an explicit
+    unavailable, never an empty answer); profiles never read each other's
+    timelines; the retention cap drops the OLDEST records and counts them;
+    the console backup restore records exactly the entries it changed and
+    never records a section the suppression filter removed; an unwritable
+    timeline never fails the write that asked for a record; a read
+    creates nothing."""
+    from mycore import memorylog as ml
+    from mycore import memforget as mf
+    from mycore import memoryview as mv
+    from mycore import evolution as ev
+    from web import server as ws
+
+    keys = ("AIDOG_PROFILE", "AIDOG_PROFILES_DIR", "AIDOG_MC_STATE")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _env(state=None, profile=None, profiles=None) -> None:
+        for k in keys:
+            os.environ.pop(k, None)
+        if state is not None:
+            os.environ["AIDOG_MC_STATE"] = str(state)
+        if profiles is not None:
+            os.environ["AIDOG_PROFILES_DIR"] = str(profiles)
+        if profile is not None:
+            os.environ["AIDOG_PROFILE"] = str(profile)
+
+    def _repo(root: Path, memory: str = "# Facts\n\nthe owner prefers local tools\n",
+              user: str = "# Profile\n\nwrites in Chinese\n") -> Path:
+        repo = Path(root) / "repo"
+        mem_dir = repo / "overlay" / "memory"
+        mem_dir.mkdir(parents=True, exist_ok=True)
+        (mem_dir / "MEMORY_curated.md").write_text(memory, encoding="utf-8")
+        (mem_dir / "USER_curated.md").write_text(user, encoding="utf-8")
+        return repo
+
+    try:
+        # -------------------------------- 1. a learn records, without text --
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = _repo(td)
+            res = ev.learn_memory("the deploy pipeline runs on fridays",
+                                  repo=repo)
+            records, dropped = ml.load_records(state=td)
+            check("memorylog: a learn appends one timeline record",
+                  res.ok and len(records) == 1 and dropped == 0
+                  and records[0]["slot"] == "learned"
+                  and records[0]["op"] == "learn", str(records)[:160])
+            learned_text = (repo / "overlay" / "memory" /
+                            "EVOLUTION_learned.md").read_text(encoding="utf-8")
+            stored_title = next(line[3:].strip() for line in
+                                learned_text.splitlines()
+                                if line.startswith("## "))
+            check("memorylog: the record names the entry as the file stores it",
+                  records[0]["title"] == stored_title
+                  and stored_title.endswith("(learn)"),
+                  records[0]["title"])
+            check("memorylog: the record carries the opaque facts only",
+                  set(records[0]) == {"ts", "slot", "title", "op", "id",
+                                      "digest"}
+                  and re.fullmatch(r"src_[0-9a-f]{32}", records[0]["id"])
+                  and re.fullmatch(r"[0-9a-f]{32}", records[0]["digest"]),
+                  str(sorted(records[0])))
+            raw = ml.timeline_path(state=td).read_text(encoding="utf-8")
+            check("memorylog: the timeline never stores the entry text",
+                  "fridays" not in raw and "LEARNED MEMORY" not in raw,
+                  raw[:120])
+            check("memorylog: the timeline lives in the profile state, never "
+                  "beside the memory",
+                  ml.timeline_path(state=td).parent == Path(td) / "memorylog"
+                  and not any(p.name.startswith("timeline") for p in
+                              (repo / "overlay" / "memory").iterdir()))
+            again = ev.learn_memory("the deploy pipeline runs on fridays",
+                                    repo=repo)
+            check("memorylog: a duplicate learn adds no revision",
+                  again.ok and len(ml.load_records(state=td)[0]) == 1)
+            learned_path = repo / "overlay" / "memory" / "EVOLUTION_learned.md"
+            before = learned_path.read_bytes()
+            ml.record_entry("learned", stored_title, "learn", "other body",
+                            repo=repo, state=td)
+            check("memorylog: recording never touches the memory file",
+                  learned_path.read_bytes() == before)
+
+        # ------------------------------- 2. the read face: grouped + bounded --
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = _repo(td)
+            total = ml.READ_PER_ENTRY + 5
+            for i in range(total):
+                ml.record_entry("memory", "Facts", "restore", f"version {i}",
+                                repo=repo, state=td, now=float(i))
+            ml.record_entry("memory", "Ghost", "restore", "ghost body",
+                            repo=repo, state=td, now=99.0)
+            out = ml.timeline(repo=repo, state=td)
+            check("memorylog: the read face groups the records per entry",
+                  len(out["entries"]) == 1
+                  and out["entries"][0]["title"] == "Facts"
+                  and out["entries"][0]["slot"] == "memory",
+                  str(out)[:160])
+            check("memorylog: revisions count every visible record",
+                  out["entries"][0]["revisions"] == total,
+                  str(out["entries"][0]["revisions"]))
+            check("memorylog: a read face returns a bounded newest-first slice",
+                  len(out["entries"][0]["records"]) == ml.READ_PER_ENTRY
+                  and out["truncated"] is True
+                  and out["entries"][0]["records"][0]["op"] == "restore",
+                  str(out["entries"][0]["records"][:2]))
+            check("memorylog: a title the current file does not hold never "
+                  "appears",
+                  all(e["title"] != "Ghost" for e in out["entries"]))
+            # rule 3: a tombstoned VERSION leaves a still-visible entry
+            mf.forget(mf.CHANNEL_CURATED_MEMORY, "version 1", state=td)
+            out = ml.timeline(repo=repo, state=td)
+            check("memorylog: a tombstoned version disappears from a visible "
+                  "entry",
+                  out["entries"][0]["revisions"] == total - 1
+                  and all(r["digest"] != mf.digest_of("version 1")
+                          for r in out["entries"][0]["records"]),
+                  str(out["entries"][0]["revisions"]))
+
+        # ------------------------- 3. suppression supremacy (forget) ---------
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = _repo(td)
+            ev.learn_memory("a private observation about the owner", repo=repo)
+            records = ml.load_records(state=td)[0]
+            title = records[0]["title"]
+            out = ml.timeline(repo=repo, state=td)
+            check("memorylog: a recorded entry's history is visible while "
+                  "the entry is",
+                  len(out["entries"]) == 1
+                  and out["entries"][0]["slot"] == "learned",
+                  str(out)[:160])
+            mf.forget_entry(repo / "overlay" / "memory" /
+                            "EVOLUTION_learned.md", title,
+                            repo=repo, state=td)
+            out = ml.timeline(repo=repo, state=td)
+            blob = json.dumps(out, ensure_ascii=False)
+            check("memorylog: a forgotten entry's history never appears",
+                  out["entries"] == [] and title not in blob
+                  and "private observation" not in blob, blob[:200])
+            check("memorylog: the forget never rewrites the side-band log",
+                  len(ml.load_records(state=td)[0]) == 1)
+            # the curated twin: the CONSOLE view carries history, then loses it
+            mem_path = repo / "overlay" / "memory" / "MEMORY_curated.md"
+            ml.record_slot_write(
+                "memory", "# Facts\n\nolder wording\n",
+                mem_path.read_text(encoding="utf-8"), "restore",
+                repo=repo, state=td)
+            view = mv.collect(repo)
+            facts = [e for s in view["slots"] for e in s["entries"]
+                     if e["title"] == "Facts"]
+            check("memorylog: the console view carries the bounded history",
+                  len(facts) == 1 and facts[0]["revisions"] == 1
+                  and facts[0]["history"][0]["op"] == "restore"
+                  and set(facts[0]["history"][0]) == {"ts", "op", "id",
+                                                      "digest"},
+                  str(facts)[:200])
+            check("memorylog: an entry without revisions carries no history "
+                  "key",
+                  all("history" not in e for s in view["slots"]
+                      for e in s["entries"] if e["revisions"] == 0))
+            mf.forget_entry(mem_path, "Facts", repo=repo, state=td)
+            view = mv.collect(repo)
+            check("memorylog: the console view drops the forgotten entry AND "
+                  "its history",
+                  all(e["title"] != "Facts" for s in view["slots"]
+                      for e in s["entries"]),
+                  str(view)[:200])
+
+        # --------------------------------- 4. fail-closed on the ledger ------
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = _repo(td)
+            ml.record_entry("memory", "Facts", "restore", "some wording",
+                            repo=repo, state=td)
+            led = Path(td) / "memforget" / "tombstones.jsonl"
+            led.parent.mkdir(parents=True, exist_ok=True)
+            led.mkdir()          # a directory is not a valid ledger
+            mf.invalidate_cache()
+            raised = False
+            try:
+                ml.timeline(repo=repo, state=td)
+            except mf.LedgerUnavailable:
+                raised = True
+            check("memorylog: an unverifiable ledger withholds the timeline "
+                  "(fail-closed, never an empty answer)", raised)
+            raised = False
+            try:
+                ml.history_for_view(None, {"memory": {"Facts"}}, [])
+            except mf.LedgerUnavailable:
+                raised = True
+            check("memorylog: history without a verified snapshot fails "
+                  "closed", raised)
+            view = mv.collect(repo)
+            check("memorylog: the console view reports the ledger as "
+                  "unavailable, not as an empty memory",
+                  view.get("suppression") == "unavailable"
+                  and view.get("note") == mf.LEDGER_UNAVAILABLE
+                  and "history_dropped" not in view, str(view)[:160])
+            payload = ws.collect_memory()
+            check("memorylog: the API face passes the fail-closed answer "
+                  "through",
+                  payload.get("suppression") == "unavailable",
+                  str(payload)[:160])
+
+        # ------------------------------------- 5. profiles stay isolated ------
+        with tempfile.TemporaryDirectory() as ta, \
+                tempfile.TemporaryDirectory() as tb:
+            repo_a = _repo(Path(ta))
+            repo_b = _repo(Path(tb))
+            ml.record_entry("memory", "Facts", "restore", "alpha wording",
+                            repo=repo_a, state=ta, now=1.0)
+            out_a = ml.timeline(repo=repo_a, state=ta)
+            out_b = ml.timeline(repo=repo_b, state=tb)
+            check("memorylog: a profile never sees another profile's timeline",
+                  len(out_a["entries"]) == 1 and out_b["entries"] == []
+                  and ml.load_records(state=tb)[0] == [],
+                  str(out_b)[:160])
+            check("memorylog: each state root owns its own timeline file",
+                  ml.timeline_path(state=ta) != ml.timeline_path(state=tb)
+                  and ml.timeline_path(state=ta).is_file()
+                  and not ml.timeline_path(state=tb).exists())
+
+        # ----------------------------- 6. retention: drop oldest, counted -----
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = _repo(td)
+            old_entry, old_total = ml.MAX_PER_ENTRY, ml.MAX_TOTAL
+            try:
+                ml.MAX_PER_ENTRY = 3
+                for i in range(6):
+                    ml.record_entry("memory", "Facts", "restore",
+                                    f"take {i}", repo=repo, state=td,
+                                    now=float(i))
+                records, dropped = ml.load_records(state=td)
+                check("memorylog: the per-entry cap keeps the newest records "
+                      "and drops the oldest",
+                      len(records) == 3 and dropped == 3
+                      and [r["digest"] for r in records]
+                      == [mf.digest_of(f"take {i}") for i in (3, 4, 5)],
+                      str([r["digest"][:6] for r in records]))
+                out = ml.timeline(repo=repo, state=td)
+                check("memorylog: the dropped count is persisted and reported "
+                      "on read",
+                      out["dropped"] == 3
+                      and out["entries"][0]["revisions"] == 3,
+                      str(out["dropped"]))
+                ml.MAX_TOTAL = 5
+                for i in range(10):
+                    ml.record_entry("memory", f"Head {i}", "restore", "x",
+                                    repo=repo, state=td)
+                records, dropped = ml.load_records(state=td)
+                check("memorylog: the total cap bounds the log and counts "
+                      "every drop",
+                      len(records) == 5 and dropped == 11,
+                      f"kept={len(records)} dropped={dropped}")
+                check("memorylog: the persisted meta line carries the counter",
+                      ml.timeline_path(state=td).read_text(
+                          encoding="utf-8").splitlines()[0]
+                      == json.dumps({"dropped": 11, "kind": "meta"},
+                                    sort_keys=True))
+            finally:
+                ml.MAX_PER_ENTRY, ml.MAX_TOTAL = old_entry, old_total
+
+        # --------------- 7. the console restore records what it changed -------
+        with tempfile.TemporaryDirectory() as td:
+            profiles = Path(td) / "profiles"
+            mem_dir = profiles / "alpha" / "body" / "memory"
+            mem_dir.mkdir(parents=True)
+            state = Path(td) / "state"
+            state.mkdir()
+            (mem_dir / "MEMORY_curated.md").write_text(
+                "# Facts\n\nthe owner prefers local tools\n", encoding="utf-8")
+            (mem_dir / "USER_curated.md").write_text(
+                "# Profile\n\nwrites in Chinese\n", encoding="utf-8")
+            _env(state=state, profiles=profiles, profile="alpha")
+            restored = ("# Facts\n\nthe owner now prefers local tools\n"
+                        "# Notes\n\na new entry\n")
+            out = ws.backup_apply_memory({"MEMORY_curated.md": restored})
+            records = ml.load_records(state=state)[0]
+            check("memorylog: a restore records exactly the entries it changed",
+                  out.get("failed") == [] and len(records) == 2
+                  and all(r["op"] == "restore" and r["slot"] == "memory"
+                          for r in records), str(out)[:160] + str(records)[:80])
+            out = ws.backup_apply_memory({"MEMORY_curated.md": restored})
+            check("memorylog: a restore that changed nothing records nothing",
+                  out.get("failed") == []
+                  and len(ml.load_records(state=state)[0]) == 2,
+                  str(out)[:160])
+            check("memorylog: the restore wrote exactly the payload bytes "
+                  "(the log added none)",
+                  (mem_dir / "MEMORY_curated.md").read_bytes()
+                  == restored.encode("utf-8"))
+            view = ws.collect_memory()
+            facts = [e for s in view["slots"] for e in s["entries"]
+                     if e["title"] == "Facts"]
+            check("memorylog: the API carries the per-entry revision count "
+                  "and its bounded history",
+                  len(facts) == 1 and facts[0]["revisions"] == 1
+                  and facts[0]["history"][0]["op"] == "restore"
+                  and set(facts[0]["history"][0]) == {"ts", "op", "id",
+                                                      "digest"}
+                  and view.get("history_dropped") == 0
+                  and view.get("history_truncated") is False,
+                  str(facts)[:200])
+            # a section the restore FILTERED must never ADD a timeline record
+            mf.forget_entry(mem_dir / "MEMORY_curated.md", "Notes",
+                            state=state)
+            before = len(ml.load_records(state=state)[0])
+            out = ws.backup_apply_memory({"MEMORY_curated.md": restored})
+            records = ml.load_records(state=state)[0]
+            check("memorylog: a section the suppression filter removed never "
+                  "enters the timeline",
+                  out.get("failed") == [] and len(records) == before,
+                  str(records)[:200])
+            view = ws.collect_memory()
+            check("memorylog: a forgotten section's old records stay on disk "
+                  "but never surface",
+                  all(e["title"] != "Notes" for s in view["slots"]
+                      for e in s["entries"])
+                  and all(g["title"] != "Notes" for g in
+                          ml.timeline(state=state)["entries"]),
+                  str(view)[:200])
+
+        # --------------------------- 8. an unwritable log never fails a write --
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = _repo(td)
+            ml.timeline_path(state=td).mkdir(parents=True)  # jsonl = a dir
+            res = ev.learn_memory("a learn that must land anyway", repo=repo)
+            check("memorylog: an unwritable timeline never fails the write "
+                  "that asked for a record",
+                  res.ok and "a learn that must land anyway" in
+                  (repo / "overlay" / "memory" /
+                   "EVOLUTION_learned.md").read_text(encoding="utf-8"),
+                  str(res.errors))
+            check("memorylog: an unwritable log reads as empty, never a crash",
+                  ml.load_records(state=td) == ([], 0)
+                  and ml.timeline(repo=repo, state=td)["entries"] == [])
+
+        # ------------------------------------- 9. a read creates nothing ------
+        with tempfile.TemporaryDirectory() as td:
+            _env(state=td)
+            repo = _repo(td)
+            fresh = Path(td) / "never-used"
+            out = ml.timeline(repo=repo, state=fresh)
+            check("memorylog: reading a timeline that does not exist creates "
+                  "nothing",
+                  out["entries"] == [] and out["dropped"] == 0
+                  and not (fresh / "memorylog").exists()
+                  and ml.load_records(state=fresh) == ([], 0),
+                  str(out)[:160])
+    finally:
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
+
 def test_memory_forget_api() -> None:
     """The owner-facing forget control — the API half (stage 2).
 
@@ -23739,8 +24139,9 @@ def test_session_forget_read_paths() -> None:
                   SECRET not in blob and ASSISTANT in blob and SURVIVOR in blob,
                   blob[:200])
             check("read-paths: the console history shape is unchanged",
-                  set(hist) == {"messages", "count", "context"}
+                  set(hist) == {"messages", "count", "context", "has_more"}
                   and isinstance(hist.get("count"), int)
+                  and isinstance(hist.get("has_more"), bool)
                   and all(set(m) == {"id", "role", "content"}
                           for m in hist.get("messages") or []),
                   str(sorted(hist))[:160])
@@ -23955,6 +24356,1061 @@ def test_session_forget_read_paths() -> None:
                 os.environ[k] = saved[k]
 
 
+def test_cross_session_recall() -> None:
+    """Batch 4 item 1 — cross-session, cross-slot FTS5 recall (`mycore.recall`).
+
+    The seven contract legs: a hit spanning several sessions AND dates with
+    recency breaking a BM25 tie, a Chinese (no-space-script) hit, a
+    suppressed source that NEVER comes back, a ledger that cannot be read ->
+    FAIL-CLOSED with zero hits, a corrupt index -> rebuilt and still
+    suppressing, no FTS5 build -> an honest labelled substring degradation
+    that keeps the filter, and a profile that never sees another profile's
+    transcripts or memory. Plus the read-only and state-root hygiene."""
+    from mycore import memforget as mf
+    from mycore import recall as rc
+    from mycore import session as ss
+
+    keys = ("AIDOG_PROFILE", "AIDOG_PROFILES_DIR", "AIDOG_MC_STATE")
+    saved = {k: os.environ.get(k) for k in keys}
+
+    def _env(state=None, profile=None, profiles=None) -> None:
+        for k in keys:
+            os.environ.pop(k, None)
+        if state is not None:
+            os.environ["AIDOG_MC_STATE"] = str(state)
+        if profiles is not None:
+            os.environ["AIDOG_PROFILES_DIR"] = str(profiles)
+        if profile is not None:
+            os.environ["AIDOG_PROFILE"] = profile
+
+    def _mk(path: Path, msgs: list) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(json.dumps(m, ensure_ascii=False)
+                                  for m in msgs) + "\n", encoding="utf-8")
+
+    # fixture text: the Chinese pair is written as escapes so the source
+    # language lint stays clean (the repo rule: CJK only in locale packs).
+    ZH = ("\u4eca\u5929\u5929\u6c14\u4e0d\u9519 \u5929\u6c14\u9884\u62a5"
+          "\u8bf4\u660e\u5929\u6709\u96e8")
+    ZH_Q = "\u5929\u6c14"
+    SECRET = "the secret launch code is hunter2"
+    SURVIVOR = "the unrelated release notes mention version 5"
+    ARCHIVE = "the release notes for quokka shipped"
+    CHECK = "the deployment checklist mentions quokka"
+    SYM = "!!! special punctuation !!!"
+    SLOT = "the owner prefers compact answers"
+    LEARNED = "the deploy runs the gate suite first"
+    BETA_MEM = "beta only memory about zebras"
+    now = 1_800_000_000.0
+    day = 86400.0
+
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            profiles = Path(td) / "profiles"
+            alpha, beta = profiles / "alpha", profiles / "beta"
+            state, beta_state = alpha / "state", beta / "state"
+            sdir, beta_sdir = state / "sessions", beta_state / "sessions"
+            for d in (sdir / "archive", beta_sdir):
+                d.mkdir(parents=True)
+            mem_a, mem_b = alpha / "body" / "memory", beta / "body" / "memory"
+            mem_a.mkdir(parents=True)
+            mem_b.mkdir(parents=True)
+
+            _mk(sdir / "web.jsonl", [
+                {"meta": {"created": 1.0}},
+                {"role": "user", "content": SECRET, "ts": now - day},
+                {"role": "assistant", "content": "acknowledged", "ts": now - day},
+                {"role": "user", "content": SURVIVOR, "ts": now - 3 * day}])
+            _mk(sdir / "archive" / "old.jsonl",
+                [{"role": "user", "content": ARCHIVE, "ts": now - 30 * day}])
+            _mk(sdir / "zh.jsonl",
+                [{"role": "user", "content": ZH, "ts": now - 2 * day}])
+            _mk(sdir / "new.jsonl",
+                [{"role": "user", "content": CHECK, "ts": now - day}])
+            _mk(sdir / "mid.jsonl",
+                [{"role": "user", "content": CHECK, "ts": now - 40 * day}])
+            _mk(sdir / "sym.jsonl",
+                [{"role": "user", "content": SYM, "ts": now - day}])
+            _mk(beta_sdir / "web.jsonl",
+                [{"role": "user", "content": SECRET, "ts": now - day}])
+
+            (mem_a / "MEMORY_curated.md").write_text(
+                "# Preferences\n" + SLOT + "\n", encoding="utf-8")
+            (mem_a / "USER_curated.md").write_text(
+                "# Notes\nnothing to see here\n", encoding="utf-8")
+            (mem_a / "EVOLUTION_learned.md").write_text(
+                "## 2026-11-27 (learn)\n" + LEARNED + "\n", encoding="utf-8")
+            (mem_b / "MEMORY_curated.md").write_text(
+                "# Beta\n" + BETA_MEM + "\n", encoding="utf-8")
+            (mem_b / "EVOLUTION_learned.md").write_text(
+                "## 2026-11-26 (learn)\n" + LEARNED + "\n", encoding="utf-8")
+
+            _env(state=state, profiles=profiles, profile="alpha")
+            sources_before = {p: p.read_bytes()
+                              for p in list(sdir.rglob("*.jsonl"))
+                              + list(mem_a.glob("*.md"))}
+
+            # ------------------------------------ 0. the happy path + id ---
+            out = rc.recall("secret launch code", now=now)
+            hit_id = ss.message_source_id({"role": "user", "content": SECRET})
+            check("recall: a query matches a message and names it with the "
+                  "same opaque source id the forget control addresses",
+                  out.get("method") == "fts5" and out.get("suppression") == "ok"
+                  and out.get("count") >= 1
+                  and any(h.get("source_id") == hit_id for h in out["hits"]),
+                  str(out)[:240])
+
+            # ------------------------- 1. cross-session + recency ordering --
+            out = rc.recall("release notes", now=now)
+            sids = {h.get("session") for h in out["hits"]}
+            check("recall: one query hits messages across several sessions "
+                  "and dates",
+                  out.get("method") == "fts5" and out.get("count") >= 2
+                  and "web" in sids and "archive/old" in sids,
+                  str(sorted(x for x in sids if x)) + str(out.get("count")))
+            out = rc.recall("deployment checklist", now=now)
+            ids = [h.get("session") for h in out["hits"]]
+            check("recall: identical relevance is ordered by recency "
+                  "(newest first)", ids[:2] == ["new", "mid"], str(ids))
+            out = rc.recall("release notes", now=now, limit=1)
+            check("recall: the read face is bounded and says so",
+                  len(out["hits"]) == 1 and out["truncated"] is True
+                  and out["count"] >= 2 and out["limit"] == 1, str(out)[:200])
+
+            # --------------------------------------------- 2. Chinese ------
+            out = rc.recall(ZH_Q, now=now)
+            joined = "".join(h.get("text", "") for h in out["hits"])
+            check("recall: a Chinese query hits a Chinese transcript through "
+                  "FTS5 (no-space-script phrase)",
+                  out.get("method") == "fts5" and out.get("count") >= 1
+                  and any(h.get("session") == "zh" for h in out["hits"])
+                  and ZH_Q in joined, str(out)[:240])
+
+            # ------------------------- 3. suppression: never a hit ----------
+            ok = rc.recall("secret launch code", now=now)["count"] >= 1
+            mf.forget(mf.CHANNEL_SESSION, SECRET)
+            out = rc.recall("secret launch code", now=now)
+            check("recall: a forgotten transcript message is NEVER a hit",
+                  ok and out.get("count") == 0 and out.get("hits") == []
+                  and SECRET not in json.dumps(out, ensure_ascii=False),
+                  str(out)[:240])
+            out = rc.recall("release notes", now=now)
+            check("recall: an unrelated message still recalls after a forget",
+                  out.get("count") >= 2, str(out)[:200])
+            mf.forget(mf.CHANNEL_CURATED_MEMORY, SLOT)
+            out = rc.recall("compact answers", now=now)
+            check("recall: a forgotten memory entry is NEVER a hit",
+                  out.get("count") == 0
+                  and SLOT not in json.dumps(out, ensure_ascii=False),
+                  str(out)[:200])
+            out = rc.recall("gate suite", now=now)
+            check("recall: the other memory slots still recall",
+                  out.get("count") >= 1
+                  and any(h.get("slot") == "EVOLUTION_learned.md"
+                          for h in out["hits"]), str(out)[:200])
+
+            # ------------------------- 4. the ledger fails CLOSED ----------
+            ledger = mf.ledger_path()
+            raw = ledger.read_bytes()
+            ledger.write_bytes(raw + b"{broken}\n")
+            mf.invalidate_cache()
+            out = rc.recall("release notes", now=now)
+            out2 = rc.recall("secret launch code", now=now)
+            check("recall: an unreadable ledger FAILS CLOSED — zero hits, "
+                  "never an empty set",
+                  out.get("suppression") == "unavailable"
+                  and out.get("hits") == [] and out.get("count") == 0
+                  and out.get("reason") == "suppression_unavailable"
+                  and out.get("note") == mf.LEDGER_UNAVAILABLE, str(out)[:240])
+            check("recall: the fail-closed answer carries no source text",
+                  out2.get("count") == 0 and out2.get("hits") == []
+                  and out2.get("suppression") == "unavailable"
+                  and SECRET not in json.dumps(out2, ensure_ascii=False),
+                  str(out2)[:200])
+            ledger.write_bytes(raw)
+            mf.invalidate_cache()
+            out = rc.recall("release notes", now=now)
+            check("recall: a readable ledger restores the read face",
+                  out.get("suppression") == "ok" and out.get("count") >= 2,
+                  str(out)[:200])
+
+            # ------------------------- 5. corrupt index -> rebuild ---------
+            idx = state / "recall_index.sqlite3"
+            check("recall: the index lives in the profile STATE root and "
+                  "never inside sessions/",
+                  idx.is_file() and not (sdir / "recall_index.sqlite3").exists(),
+                  str(sorted(p.name for p in sdir.iterdir())))
+            idx.write_bytes(b"corrupt-index-not-a-database")
+            out = rc.recall("secret launch code", now=now)
+            check("recall: a corrupt index rebuilds and the suppression still "
+                  "holds",
+                  out.get("method") == "fts5" and out.get("count") == 0
+                  and SECRET not in json.dumps(out, ensure_ascii=False),
+                  str(out)[:200])
+            out = rc.recall("release notes", now=now)
+            check("recall: after the rebuild a live query still answers "
+                  "honestly",
+                  out.get("method") == "fts5" and out.get("count") >= 2,
+                  str(out)[:200])
+
+            # a LOCKED index degrades honestly and is never destroyed —
+            # lock contention must not turn into a destructive rebuild
+            import sqlite3 as _sqlite3
+            real_attempt = rc._attempt
+
+            def _busy(index_path, sources, expr, budget):
+                raise _sqlite3.OperationalError("database is locked")
+
+            rc._attempt = _busy
+            try:
+                out = rc.recall("release notes", now=now)
+                out2 = rc.recall("secret launch code", now=now)
+            finally:
+                rc._attempt = real_attempt
+            check("recall: a locked index degrades honestly, keeps filtering "
+                  "and never destroys a healthy index",
+                  out.get("method") == "substring"
+                  and out.get("reason") == "index_busy"
+                  and out.get("count") >= 2 and idx.is_file()
+                  and out2.get("count") == 0
+                  and SECRET not in json.dumps(out2, ensure_ascii=False),
+                  str(out)[:200] + str(out2)[:120])
+
+            # ------------------------- 6. no FTS5 -> honest degradation -----
+            avail = rc._FTS5_AVAILABLE
+            rc._FTS5_AVAILABLE = False
+            try:
+                out = rc.recall("release notes", now=now)
+                out2 = rc.recall("secret launch code", now=now)
+            finally:
+                rc._FTS5_AVAILABLE = avail
+            check("recall: without an FTS5 build the face degrades to a "
+                  "LABELLED substring pass",
+                  out.get("method") == "substring"
+                  and out.get("fallback") is True
+                  and out.get("reason") == "fts5_unavailable"
+                  and out.get("count") >= 2, str(out)[:200])
+            check("recall: the degraded pass applies the SAME suppression "
+                  "filter",
+                  out2.get("count") == 0
+                  and SECRET not in json.dumps(out2, ensure_ascii=False),
+                  str(out2)[:200])
+            out = rc.recall("!!!", now=now)
+            check("recall: a query nothing can be indexed degrades and still "
+                  "matches",
+                  out.get("method") == "substring"
+                  and out.get("reason") == "unindexable_query"
+                  and out.get("count") >= 1, str(out)[:200])
+
+            # ------------------------- 7. profile isolation ---------------
+            _env(state=beta_state, profiles=profiles, profile="beta")
+            out = rc.recall("secret launch code", now=now)
+            check("recall: another profile's suppression never applies here",
+                  out.get("suppression") == "ok" and out.get("count") >= 1
+                  and all(h.get("session") == "web" for h in out["hits"]),
+                  str(out)[:200])
+            out = rc.recall("release notes", now=now)
+            check("recall: a profile never sees another profile's transcripts",
+                  out.get("count") == 0, str(out)[:200])
+            out = rc.recall("zebras", now=now)
+            check("recall: a profile recalls its OWN memory slot",
+                  out.get("count") >= 1
+                  and any(h.get("slot") == "MEMORY_curated.md"
+                          for h in out["hits"]), str(out)[:200])
+            out = rc.recall("gate suite", now=now)
+            check("recall: a profile never reads another profile's memory",
+                  out.get("count") == 1
+                  and all(h.get("slot") == "EVOLUTION_learned.md"
+                          for h in out["hits"]), str(out)[:200])
+            # a foreign sessions directory must NOT pull the active profile's
+            # memory into its results (the state-root guard)
+            out = rc.recall("gate suite", directory=sdir, now=now)
+            check("recall: a sessions directory outside the active profile "
+                  "contributes transcripts only (no foreign memory)",
+                  out.get("count") == 0, str(out)[:200])
+
+            # the DEFAULT profile (no AIDOG_PROFILE / AIDOG_PROFILES_DIR) is
+            # the common install shape: the slot seam must resolve, not raise
+            _env(state=state, profiles=None, profile=None)
+            out = rc.recall("zzz-no-such-recall-token", now=now)
+            check("recall: the default profile resolves its memory slots "
+                  "without a seam error",
+                  out.get("suppression") == "ok"
+                  and out.get("method") in ("fts5", "substring")
+                  and out.get("count") == 0, str(out)[:200])
+
+            # ------------------------- 8. hygiene --------------------------
+            _env(state=state, profiles=profiles, profile="alpha")
+            rc.recall("release notes", now=now)
+            check("recall: every source file is byte-identical after the read "
+                  "face ran (read-only)",
+                  all(p.read_bytes() == b for p, b in sources_before.items()),
+                  "a source file changed")
+            check("recall: the production state was never written",
+                  not (REPO / "data" / "mycore_service" /
+                       "recall_index.sqlite3").exists()
+                  and not (REPO / "data" / "mycore_service" /
+                           "memforget").exists(), "production state written")
+    finally:
+        mf.invalidate_cache()
+        for k in keys:
+            os.environ.pop(k, None)
+            if saved[k] is not None:
+                os.environ[k] = saved[k]
+
+
+def _steer_tool_exchange_intact(msgs: list[dict]) -> bool:
+    """No row may sit between an assistant's tool_calls row and ITS results:
+    the steering merge only ever happens at an iteration boundary, so a tool
+    exchange is never split by an injected instruction."""
+    i = 0
+    while i < len(msgs):
+        m = msgs[i] if isinstance(msgs[i], dict) else {}
+        calls = m.get("tool_calls") or []
+        if m.get("role") == "assistant" and calls:
+            for j in range(len(calls)):
+                if i + 1 + j >= len(msgs) \
+                        or msgs[i + 1 + j].get("role") != "tool":
+                    return False
+            i += len(calls)
+        i += 1
+    return True
+
+
+def test_queue_steering() -> None:
+    """Queueing steering (batch 4-2) — the run does not stop, the
+    instruction does not wait for the turn to end.
+
+    The seven contract points: (1) a queued instruction merges into the LIVE
+    run at its next iteration boundary and never inside a tool exchange;
+    (2) the queue is bounded and every over-bound answer is an honest
+    refusal; (3) a restart neither loses nor re-runs an item; (4) the
+    suppression invariant — refused at admission AND dropped at the merge,
+    so a forgotten source can never come back through the queue; (5) an
+    unreadable ledger fails CLOSED on both paths; (6) STOP and a held gate
+    leave the queue untouched; (7) a short turn is unchanged. Plus
+    cross-key / cross-profile isolation and uid idempotency."""
+    from pathlib import Path as _Path
+    from mycore import memforget as mf
+    from mycore import session as ss
+    from mycore.steer import MAX_CHARS, MAX_ITEMS, SteerError, SteerQueue
+
+    key = "console:web.jsonl"
+
+    def state_root(td: str) -> _Path:
+        root = _Path(td)
+        (root / "sessions").mkdir(parents=True, exist_ok=True)
+        return root
+
+    def queue(root: _Path) -> SteerQueue:
+        return SteerQueue(state=root, directory=root / "sessions")
+
+    # -------------------------------------------- 1. bounds + honest refusals
+    with tempfile.TemporaryDirectory() as td:
+        root = state_root(td)
+        q = queue(root)
+        a = q.enqueue(key, "idempotent instruction", uid="upd-1")
+        b = q.enqueue(key, "idempotent instruction", uid="upd-1")
+        check("steer: a redelivered admission is answered once (uid idempotency)",
+              a["id"] == b["id"] and b.get("dup") is True
+              and len(q.pending(key)) == 1, str(b))
+        for i in range(1, MAX_ITEMS):
+            info = q.enqueue(key, f"instruction {i}")
+        check("steer: admission reports the live depth against the bound",
+              info["n"] == MAX_ITEMS and info["max"] == MAX_ITEMS
+              and len(q.pending(key)) == MAX_ITEMS, str(info))
+        try:
+            q.enqueue(key, "one too many")
+            full = "accepted"
+        except SteerError as e:
+            full = e.code
+        check("steer: a full queue REFUSES honestly (never a silent drop)",
+              full == "full" and len(q.pending(key)) == MAX_ITEMS, full)
+        try:
+            q.enqueue(key, "x" * (MAX_CHARS + 1))
+            toolong = "accepted"
+        except SteerError as e:
+            toolong = e.code
+        check("steer: an over-long instruction is refused, never truncated",
+              toolong == "too_long"
+              and not any(i["text"].startswith("x" * 100)
+                          for i in q.pending(key)), toolong)
+
+        # cross-key isolation: one session never counts against another
+        other = "tg:4242"
+        q.enqueue(other, "other session instruction")
+        check("steer: items are keyed per session (one session never counts "
+              "against another)",
+              len(q.pending(key)) == MAX_ITEMS and len(q.pending(other)) == 1)
+        taken_other = q.take(other)
+        check("steer: a run only takes its OWN key's items",
+              [i["text"] for i in taken_other] == ["other session instruction"]
+              and len(q.pending(key)) == MAX_ITEMS
+              and all(not i.get("dropped") for i in taken_other))
+        q.commit(taken_other)
+        check("steer: commit empties only what it was given",
+              q.pending(other) == [] and len(q.pending(key)) == MAX_ITEMS)
+
+    # ------------------------------------ 2. the merge into a LIVE run ------
+    class MidRunChat(ScriptedChat):
+        """The owner types WHILE the model works: the item lands after
+        iteration 1's drain, so iteration 2 is the first call that sees it."""
+
+        def __init__(self, script, queue_obj, session_key, item):
+            super().__init__(script)
+            self.q = queue_obj
+            self.k = session_key
+            self.item = item
+
+        def chat(self, messages, tools=None, **kw):
+            if self.calls == 0:            # first model call, mid-turn
+                self.q.enqueue(self.k, self.item)
+            return super().chat(messages, tools, **kw)
+
+    with tempfile.TemporaryDirectory() as td:
+        root = state_root(td)
+        q = queue(root)
+        item = "also update the README while you work"
+        chat = MidRunChat([
+            fake_response(calls=[("read_file", {"path": "/no/such/steer-probe"})]),
+            fake_response(text="done with it."),
+        ], q, key, item)
+        taken: list[dict] = []
+        events: list[tuple] = []
+
+        def sink() -> list[str]:
+            items = q.take(key)
+            taken.extend(items)
+            return [i["text"] for i in items if not i.get("dropped")]
+
+        msgs = [{"role": "user", "content": "start the long task"}]
+        res = run_turn(msgs, chat.chat, build_registry(), steer=sink,
+                       on_event=lambda k_, d: events.append((k_, d)))
+        check("steer: a queued instruction merges into the LIVE run",
+              res.stop == "final"
+              and sum(1 for m in msgs if m.get("content") == item) == 1,
+              res.stop)
+        check("steer: the model does not see it before it was queued",
+              not any(m.get("content") == item for m in chat.seen[0])
+              and any(m.get("content") == item for m in chat.seen[1]))
+        check("steer: the merge is announced to the observer",
+              [d for k_, d in events if k_ == "steer"] == [{"count": 1}],
+              str(events))
+        check("steer: the merge never splits a tool exchange",
+              _steer_tool_exchange_intact(msgs))
+        q.commit(taken)
+        check("steer: a committed item leaves the queue (nothing runs twice)",
+              q.pending(key) == [] and q.take(key) == [])
+
+    # ------------------------------------------ 3. restart: no loss, no dup -
+    with tempfile.TemporaryDirectory() as td:
+        root = state_root(td)
+        q1 = queue(root)
+        q1.enqueue(key, "persisted instruction")
+        q1.enqueue(key, "never landed instruction")
+        first = q1.take(key)               # a run took both, then it died
+        check("steer: a taken item stays on disk (inflight, not forgotten)",
+              len(first) == 2 and q1.pending(key) == [])
+        q1.enqueue(key, "still waiting instruction")   # pending survives
+        q2 = queue(root)                   # a brand-new object over the file
+        check("steer: pending items survive a restart (the queue is on disk)",
+              [i["text"] for i in q2.pending(key)]
+              == ["still waiting instruction"])
+        decided = q2.recover(key, ["persisted instruction"])
+        check("steer: recovery commits what the transcript holds and releases "
+              "what it does not",
+              decided == 2
+              and [i["text"] for i in q2.pending(key)]
+              == ["never landed instruction", "still waiting instruction"])
+        left = q2.take(key)
+        check("steer: a restart neither loses nor re-runs an item",
+              [i["text"] for i in left]
+              == ["never landed instruction", "still waiting instruction"])
+        q2.commit(left)
+        q3 = queue(root)
+        q3.recover(key, ["never landed instruction", "persisted instruction",
+                         "still waiting instruction"])
+        check("steer: recovery is idempotent (a second restart decides nothing "
+              "twice)", q3.take(key) == [] and q3.pending(key) == [])
+
+    # --------------------------------- 4. the suppression invariant (D31) ---
+    with tempfile.TemporaryDirectory() as td:
+        root = state_root(td)
+        q = queue(root)
+        secret = "the secret launch code is hunter2"
+        mf.forget(mf.CHANNEL_SESSION,
+                  ss.message_identity({"role": "user", "content": secret}),
+                  state=root)
+        try:
+            q.enqueue(key, secret)
+            code = "accepted"
+        except SteerError as e:
+            code = e.code
+        check("steer: a suppressed source is REFUSED at admission (fail-closed)",
+              code == "suppressed" and q.pending(key) == [], code)
+
+        # forgotten WHILE it waited: dropped at the merge, never injected
+        later = "forgotten while it waited in the queue"
+        q.enqueue(key, later)
+        mf.forget(mf.CHANNEL_SESSION,
+                  ss.message_identity({"role": "user", "content": later}),
+                  state=root)
+        decided: list[dict] = []
+
+        def drop_sink() -> list[str]:
+            items = q.take(key)
+            decided.extend(items)
+            return [i["text"] for i in items if not i.get("dropped")]
+
+        msgs = [{"role": "user", "content": "go"}]
+        chat = ScriptedChat([fake_response(text="ok")])
+        run_turn(msgs, chat.chat, build_registry(), steer=drop_sink)
+        check("steer: an instruction forgotten WHILE queued is dropped at the "
+              "merge and never reaches the model",
+              len(decided) == 1 and decided[0].get("dropped") is True
+              and all(m.get("content") != later for m in msgs)
+              and all(m.get("content") != later for m in chat.seen[0]))
+        check("steer: a dropped item leaves no residue in the queue",
+              q.pending(key) == [] and q.remaining(key) == 0)
+
+    # ---------------------------------- 5. an unreadable ledger fails closed -
+    with tempfile.TemporaryDirectory() as td:
+        root = state_root(td)
+        q = queue(root)
+        q.enqueue(key, "queued while the ledger was healthy")
+        mf.ledger_dir(state=root).mkdir(parents=True, exist_ok=True)
+        mf.ledger_path(state=root).write_bytes(b"{broken}\n")
+        mf.invalidate_cache()
+        try:
+            q.enqueue(key, "one more")
+            refused = "accepted"
+        except SteerError as e:
+            refused = e.code
+        check("steer: an unreadable ledger REFUSES admission (never treated "
+              "as an empty set)", refused == "ledger_unavailable", refused)
+        try:
+            q.take(key)
+            merged = "merged"
+        except SteerError as e:
+            merged = e.code
+        check("steer: an unreadable ledger REFUSES the merge and keeps the "
+              "item queued",
+              merged == "ledger_unavailable" and q.remaining(key) == 1, merged)
+        msgs = [{"role": "user", "content": "go"}]
+        chat = ScriptedChat([fake_response(text="ok")])
+        res = run_turn(msgs, chat.chat, build_registry(),
+                       steer=lambda: [i["text"] for i in q.take(key)])
+        check("steer: a queue the loop cannot verify injects NOTHING and "
+              "never breaks the turn",
+              res.stop == "final"
+              and all(m.get("content") != "queued while the ledger was "
+                                          "healthy" for m in msgs))
+        mf.invalidate_cache()
+
+    # --------------------------------------- 6. STOP and a held gate --------
+    with tempfile.TemporaryDirectory() as td:
+        root = state_root(td)
+        q = queue(root)
+        q.enqueue(key, "steer me mid-run")
+        msgs = [{"role": "user", "content": "go"}]
+        chat = ScriptedChat([fake_response(text="never")])
+        res = run_turn(msgs, chat.chat, build_registry(),
+                       should_stop=lambda: True,
+                       steer=lambda: [i["text"] for i in q.take(key)])
+        check("steer: STOP aborts BEFORE the merge — the item stays queued",
+              res.stop == "aborted" and q.remaining(key) == 1
+              and all(m.get("content") != "steer me mid-run" for m in msgs),
+              res.stop)
+        held = [True]
+
+        def gated() -> list[str]:
+            if held[0]:                     # leash.gate() refused the turn
+                return []
+            return [i["text"] for i in q.take(key)]
+
+        msgs2 = [{"role": "user", "content": "go again"}]
+        chat2 = ScriptedChat([fake_response(text="still ok")])
+        run_turn(msgs2, chat2.chat, build_registry(), steer=gated)
+        check("steer: a held (paused/budget) run takes NO instruction",
+              q.remaining(key) == 1
+              and all(m.get("content") != "steer me mid-run" for m in msgs2))
+        held[0] = False
+        msgs3 = [{"role": "user", "content": "go third"}]
+        chat3 = ScriptedChat([fake_response(text="ok now")])
+        run_turn(msgs3, chat3.chat, build_registry(), steer=gated)
+        check("steer: the same instruction merges once the gate reopens",
+              sum(1 for m in msgs3
+                  if m.get("content") == "steer me mid-run") == 1
+              and q.remaining(key) == 0)
+
+    # -------------------------------------- 7. a short turn is untouched ----
+    events: list[tuple] = []
+    chat = ScriptedChat([fake_response(text="pong")])
+    msgs = [{"role": "user", "content": "ping"}]
+    res = run_turn(msgs, chat.chat, build_registry(),
+                   on_event=lambda k_, d: events.append((k_, d)))
+    check("steer: a short turn without a queue is unchanged",
+          res.stop == "final" and res.iterations == 1 and len(msgs) == 2
+          and "steer" not in [k_ for k_, _ in events]
+          and chat.calls == 1, res.stop)
+    with tempfile.TemporaryDirectory() as td:
+        root = state_root(td)
+        q = queue(root)
+        calls = {"n": 0}
+
+        def empty() -> list[str]:
+            calls["n"] += 1
+            return q.take(key)
+
+        chat = ScriptedChat([fake_response(text="pong")])
+        msgs = [{"role": "user", "content": "ping"}]
+        res = run_turn(msgs, chat.chat, build_registry(), steer=empty)
+        check("steer: an empty queue costs no message, no event and no file",
+              res.stop == "final" and calls["n"] == 1 and len(msgs) == 2
+              and not q.path.exists(), str(q.path))
+
+    # --------------------------------- 8. one queue per profile ------------
+    with tempfile.TemporaryDirectory() as ta, tempfile.TemporaryDirectory() as tb:
+        alpha, beta = state_root(ta), state_root(tb)
+        queue(alpha).enqueue(key, "alpha only instruction")
+        check("steer: the queue lives in the ACTIVE profile's state root "
+              "(a profile never sees another's items)",
+              len(queue(alpha).pending(key)) == 1
+              and queue(beta).pending(key) == []
+              and queue(alpha).path.name == "steer_queue.json"
+              and str(alpha) in str(queue(alpha).path))
+
+
+# ------------------------------------- batch 4 item 4: the perf trio ------
+def _seed_transcript(path: Path, triples: int) -> None:
+    """A realistic console transcript written through the REAL Session
+    writer: `triples` x (user, assistant, tool) = 3*triples message rows
+    (tool rows consume an id, exactly like a live run's tool turns)."""
+    from mycore.session import Session
+    path.parent.mkdir(parents=True, exist_ok=True)
+    s = Session.create(path, meta={"model": "m"})
+    rows: list[dict] = []
+    for i in range(triples):
+        rows.append({"role": "user", "content": f"q{i}"})
+        rows.append({"role": "assistant", "content": f"a{i}"})
+        rows.append({"role": "tool", "content": f"t{i}",
+                     "tool_call_id": "call_1"})
+    s.append_many(rows)
+
+
+def test_history_paging() -> None:
+    """Batch 4 item 4 (bounded history): GET /api/chat/history serves the
+    transcript as PAGES with absolute ids, and suppression holds on every
+    page. Offline: temp state dir (ledger + sessions under one
+    AIDOG_MC_STATE), a seeded 300-row transcript, loopback HTTP only.
+
+    Locks:
+      * a page walk yields every visible row exactly once, ascending, each
+        page within `limit`, `has_more` exact (False only at the oldest row);
+      * ids stay the FILE's own indices (tool rows consume one) whatever
+        page a row came from — rewind/fork handles never move;
+      * bad limit/before raise ValueError, and the HTTP edge answers 400
+        with a detail instead of silently clamping;
+      * a forgotten row never appears on ANY page (D31) — plus the MUTATION
+        (visibility guard bypassed) that makes it appear, proving the guard
+        is the wall and not the fixture;
+      * an unreadable ledger fails closed on a paged request too;
+      * a read never rewrites the transcript."""
+    from mycore import memforget as mf
+    from mycore.session import Session, message_identity
+    from web import server as ws
+
+    saved = {"state": os.environ.get("AIDOG_MC_STATE"),
+             "dirs": ws.chat_sessions_dir}
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            state = Path(td) / "state"
+            sessions = state / "sessions"
+            sessions.mkdir(parents=True)
+            os.environ["AIDOG_MC_STATE"] = str(state)
+            ws.chat_sessions_dir = lambda: sessions   # type: ignore[assignment]
+            mf.invalidate_cache()
+            active = sessions / "web.jsonl"
+            _seed_transcript(active, 100)             # 300 rows
+            full = Session(active).load()
+            visible = [i for i, m in enumerate(full)
+                       if m["role"] in ("user", "assistant")]
+            before_bytes = active.read_bytes()
+            check("paging: seeded transcript + visible id list",
+                  len(full) == 300 and len(visible) == 200,
+                  f"{len(full)} rows / {len(visible)} visible")
+
+            # ---------------- 1. the page walk --------------------------
+            seen_pages: list[list[int]] = []
+            page_counts: list[int] = []
+            cursor: int | None = None
+            walks = 0
+            while True:
+                h = ws.chat_history(limit=25, before=cursor)
+                walks += 1
+                ids = [m["id"] for m in h["messages"]]
+                check(f"paging: page {walks} is bounded, ordered and counted",
+                      len(ids) <= 25 and ids == sorted(set(ids))
+                      and h["count"] == len(ids)
+                      and isinstance(h["has_more"], bool)
+                      and isinstance(h.get("context"), dict),
+                      f"{len(ids)} ids {ids[:6]}")
+                seen_pages.append(ids)
+                page_counts.append(len(ids))
+                if not h["has_more"]:
+                    break
+                if not ids or walks > 40:
+                    check("paging: the walk terminates", False, str(walks))
+                    break
+                cursor = ids[0]
+            flat = [i for page in reversed(seen_pages) for i in page]
+            check("paging: every visible row exactly once, oldest to newest",
+                  flat == visible, f"{len(flat)} vs {len(visible)}")
+            check("paging: every page sits strictly before the previous one",
+                  all(max(b) < min(a) for a, b in zip(seen_pages,
+                                                      seen_pages[1:])
+                      if a and b), str([p[:2] for p in seen_pages]))
+            check("paging: has_more is exact (False only at the oldest row)",
+                  page_counts[-1] > 0 and walks == (len(visible) + 24) // 25,
+                  f"{walks} pages, counts {page_counts[:3]}…{page_counts[-1:]}")
+            h0 = ws.chat_history(limit=25)
+            check("paging: the newest page keeps the file's own absolute ids",
+                  [m["id"] for m in h0["messages"]] == visible[-25:],
+                  str([m["id"] for m in h0["messages"]][:8]))
+
+            # ---------------- 2. bounds and refusals --------------------
+            h = ws.chat_history(limit=25, before=0)
+            check("paging: before=0 is an empty page, not an error",
+                  h["messages"] == [] and h["count"] == 0
+                  and h["has_more"] is False, str(h)[:120])
+            h = ws.chat_history(limit=25, before=10 ** 9)
+            check("paging: a before past the end still answers the newest page",
+                  [m["id"] for m in h["messages"]] == visible[-25:],
+                  str(len(h["messages"])))
+            for bad in (0, -1, 501, True, "25", 1.5):
+                try:
+                    ws.chat_history(limit=bad)
+                    check(f"paging: limit={bad!r} refused", False, "accepted")
+                except ValueError:
+                    check(f"paging: limit={bad!r} refused", True)
+                except Exception as e:   # noqa: BLE001 — must be ValueError
+                    check(f"paging: limit={bad!r} refused", False,
+                          type(e).__name__)
+            for bad in (-1, True, "25", 1.5):
+                try:
+                    ws.chat_history(limit=25, before=bad)
+                    check(f"paging: before={bad!r} refused", False, "accepted")
+                except ValueError:
+                    check(f"paging: before={bad!r} refused", True)
+                except Exception as e:   # noqa: BLE001 — must be ValueError
+                    check(f"paging: before={bad!r} refused", False,
+                          type(e).__name__)
+
+            # ---------------- 3. the HTTP contract ----------------------
+            import threading as _threading
+            import urllib.error
+            import urllib.request
+            from http.server import ThreadingHTTPServer
+            srv = ThreadingHTTPServer(("127.0.0.1", 0), ws.Handler)
+            _threading.Thread(target=srv.serve_forever, daemon=True).start()
+            base = f"http://127.0.0.1:{srv.server_address[1]}"
+
+            def get(url_path: str):
+                try:
+                    with urllib.request.urlopen(base + url_path,
+                                                timeout=20) as resp:
+                        return resp.status, json.loads(resp.read().decode())
+                except urllib.error.HTTPError as e:
+                    raw = e.read().decode()
+                    try:
+                        return e.code, json.loads(raw)
+                    except ValueError:
+                        return e.code, raw
+            try:
+                s, body = get("/api/chat/history?limit=25&before=1000000000")
+                check("paging http: a paged GET answers 200 with the newest page",
+                      s == 200 and isinstance(body, dict)
+                      and body.get("count") == 25,
+                      f"{s} {str(body)[:90]}")
+                s, body = get(f"/api/chat/history?limit=25&before={visible[1]}")
+                check("paging http: ?before pages backwards to one row",
+                      s == 200 and isinstance(body, dict)
+                      and body.get("count") == 1
+                      and body.get("has_more") is False,
+                      f"{s} {str(body)[:90]}")
+                for q in ("?limit=abc", "?limit=0", "?limit=501",
+                          "?before=-1", "?before=x", "?before=1.5"):
+                    s, body = get("/api/chat/history" + q)
+                    check(f"paging http: {q} -> 400 with a detail",
+                          s == 400 and isinstance(body, dict)
+                          and bool(body.get("details")),
+                          f"{s} {str(body)[:90]}")
+            finally:
+                srv.shutdown()
+                srv.server_close()
+
+            # ---------------- 4. suppression on every page --------------
+            forgotten_id = next(i for i, m in enumerate(full)
+                                if m.get("content") == "q50")
+            res = mf.forget(mf.CHANNEL_SESSION,
+                            message_identity({"role": "user",
+                                              "content": "q50"}),
+                            state=state, scope=mf.SCOPE_SESSION)
+            check("paging: the transcript forget lands",
+                  res.get("ok") is True, str(res)[:160])
+            leaked: list[int] = []
+            after_pages: list[list[int]] = []
+            cursor = None
+            while True:
+                h = ws.chat_history(limit=25, before=cursor)
+                ids = [m["id"] for m in h["messages"]]
+                after_pages.append(ids)
+                for m in h["messages"]:
+                    if m.get("content") == "q50":
+                        leaked.append(m["id"])
+                if not h["has_more"] or not ids:
+                    break
+                cursor = ids[0]
+            after_ids = [i for page in reversed(after_pages) for i in page]
+            check("paging: a forgotten row never appears on any page (D31)",
+                  leaked == [], str(leaked))
+            check("paging: the forgotten id leaves, every other id stays",
+                  after_ids == [i for i in visible if i != forgotten_id],
+                  f"forgotten={forgotten_id} got {after_ids[:6]}")
+
+            # MUTATION (red -> green): bypass the visibility guard and the
+            # forgotten row MUST come back — that is the leak this test
+            # exists to catch, and it proves the fixture is capable of
+            # failing. Restore the guard and it is gone again (green).
+            saved_vis = ws.message_is_visible
+            ws.message_is_visible = lambda m, s: True   # type: ignore[assignment]
+            try:
+                h = ws.chat_history(limit=25, before=forgotten_id + 1)
+                red = any(m["id"] == forgotten_id for m in h["messages"])
+            finally:
+                ws.message_is_visible = saved_vis       # type: ignore[assignment]
+            check("paging MUTATION: with the visibility guard bypassed the "
+                  "forgotten row leaks (the guard is the wall)",
+                  red is True, str(red))
+            h = ws.chat_history(limit=25, before=forgotten_id + 1)
+            check("paging GREEN: guard restored -> the row is gone again",
+                  all(m["id"] != forgotten_id for m in h["messages"]),
+                  str([m["id"] for m in h["messages"]][:8]))
+
+            # ---------------- 5. fail-closed on a paged request ----------
+            ledger = mf.ledger_path(state=state)
+            ledger.parent.mkdir(parents=True, exist_ok=True)
+            ledger.write_text("{not json\n", encoding="utf-8")
+            mf.invalidate_cache()
+            for kwargs in ({"limit": 25}, {"limit": 25, "before": 150}):
+                h = ws.chat_history(**kwargs)
+                check(f"paging: an unreadable ledger fails closed "
+                      f"({'+'.join(sorted(kwargs))})",
+                      h.get("messages") == [] and h.get("count") == 0
+                      and h.get("suppression") == "unavailable"
+                      and h.get("note"), str(h)[:180])
+            try:
+                ledger.unlink()
+            except OSError:
+                pass
+            mf.invalidate_cache()
+
+            # ---------------- 6. a read is a read -----------------------
+            check("paging: the transcript is never rewritten by a read",
+                  active.read_bytes() == before_bytes, "bytes changed")
+    finally:
+        ws.chat_sessions_dir = saved["dirs"]           # type: ignore[assignment]
+        if saved["state"] is None:
+            os.environ.pop("AIDOG_MC_STATE", None)
+        else:
+            os.environ["AIDOG_MC_STATE"] = saved["state"]
+        mf.invalidate_cache()
+
+
+def test_append_no_reread() -> None:
+    """Batch 4 item 4 (item 3 of the trio): Session.append / append_many
+    stay O(1) writes — they never re-read the transcript. The assertion
+    counts the BYTES actually read from the session file during an append
+    (instrumented open) and compares them with the file's size; a full
+    re-read would show up as hundreds of kilobytes. Also pins that a page
+    read stays bounded, and that an append grows the file by exactly the
+    lines it wrote (no rewrite, prefix byte-identical)."""
+    import builtins
+    from mycore.session import READ_PAGE_CHUNK, Session, read_page
+
+    with tempfile.TemporaryDirectory() as td:
+        p = Path(td) / "web.jsonl"
+        s = Session.create(p, meta={"model": "m"})
+        rows: list[dict] = []
+        for i in range(1000):
+            rows.append({"role": "user", "content": f"q{i} " + "x" * 200})
+            rows.append({"role": "assistant", "content": f"a{i} " + "y" * 400})
+        s.append_many(rows)
+        size = p.stat().st_size
+        prefix = p.read_bytes()
+        check("append: a real-size transcript is on disk",
+              size > 200_000, f"{size} bytes")
+
+        reads: list[int] = []
+        real_open = builtins.open
+
+        def counting_open(file, mode="r", *args, **kwargs):
+            fh = real_open(file, mode, *args, **kwargs)
+            if str(file) == str(p) and "r" in mode:
+                orig = fh.read
+
+                def read(*a, _o=orig):
+                    data = _o(*a)
+                    reads.append(len(data) if isinstance(data, (bytes, str))
+                                 else 0)
+                    return data
+                fh.read = read
+            return fh
+
+        builtins.open = counting_open
+        try:
+            s.append({"role": "assistant", "content": "one more line"})
+            bytes_one = sum(reads)
+            reads.clear()
+            delta = [{"role": "assistant", "content": f"delta {i}"}
+                     for i in range(3)]
+            s.append_many(delta)
+            bytes_many = sum(reads)
+            reads.clear()
+            read_page(p, 25)
+            bytes_page = sum(reads)
+        finally:
+            builtins.open = real_open
+        grown = p.stat().st_size
+        tail_lines = p.read_bytes().splitlines()[-4:]
+
+        check("append: one append reads NO transcript bytes (O(1) write)",
+              bytes_one <= 8, f"{bytes_one} bytes read of {size}")
+        check("append: append_many reads NO transcript bytes (O(1) write)",
+              bytes_many <= 8, f"{bytes_many} bytes read of {size}")
+        check("append: growth is exactly the lines written (no rewrite)",
+              grown - size == sum(len(ln) + 1 for ln in tail_lines)
+              and p.read_bytes()[:size] == prefix,
+              f"{size} -> {grown}")
+        check("append: a newest page reads a bounded window, not the file",
+              0 < bytes_page <= 2 * READ_PAGE_CHUNK and bytes_page < size // 4,
+              f"{bytes_page} of {size} bytes")
+
+
+def test_warm_body_layer() -> None:
+    """Batch 4 item 4 (item 1 of the trio): the first chat is never
+    warm-up bound. The body layer's raw reads are cached per
+    (mtime_ns, size), while the suppression filter and the size cap still
+    run on EVERY build; warm_startup() primes the cache from a daemon
+    thread and writes nothing.
+
+    Locks: warm rebuild byte-identical, edit -> re-read, a tombstoned
+    memory entry leaves the very next build even though its bytes are
+    cached (D31 — the mutation this guards is caching the FILTERED text),
+    two bodies never share a cached entry (path-keyed, cross-profile), a
+    warm build opens ZERO body files, and warm_startup is read-only."""
+    from mycore import assembly, memforget as mf
+
+    saved_state = os.environ.get("AIDOG_MC_STATE")
+    try:
+        with tempfile.TemporaryDirectory() as td:
+            tdp = Path(td)
+            state = tdp / "state"
+            state.mkdir()
+            os.environ["AIDOG_MC_STATE"] = str(state)
+            mf.invalidate_cache()
+            cons = tdp / "SOUL.md"
+            cons.write_text("# SOUL v1", encoding="utf-8")
+            mem = tdp / "MEMORY_curated.md"
+            mem.write_text("# keep\n- stays\n# drop\n- goes\n",
+                           encoding="utf-8")
+            assembly.clear_read_cache()
+
+            cold = assembly.build_system_stack(cons, (mem,), learned_path=None)
+            warm = assembly.build_system_stack(cons, (mem,), learned_path=None)
+            check("warm: a warm rebuild is byte-identical to the cold one",
+                  cold == warm and len(assembly._read_cache) >= 2,
+                  f"{len(assembly._read_cache)} cached bodies")
+
+            cons.write_text("# SOUL v2 final", encoding="utf-8")
+            edited = assembly.build_system_stack(cons, (mem,),
+                                                 learned_path=None)
+            check("warm: an edited body file is re-read on the next build",
+                  any("# SOUL v2 final" in m["content"] for m in edited)
+                  and not any("# SOUL v1" in m["content"] for m in edited),
+                  str(edited[0]["content"])[:60])
+
+            text = mem.read_text(encoding="utf-8")
+            _pre, chunks = mf.split_sections(
+                text, *mf.levels_for(mf.CHANNEL_CURATED_MEMORY))
+            body = next(c["body"] for c in chunks if c["heading"] == "drop")
+            res = mf.forget(mf.CHANNEL_CURATED_MEMORY, body, state=state)
+            check("warm: the memory forget lands",
+                  res.get("ok") is True, str(res)[:160])
+            after = assembly.build_system_stack(cons, (mem,), learned_path=None)
+            joined = "\n".join(m["content"] for m in after)
+            check("warm: a tombstoned entry leaves the NEXT build even "
+                  "though its bytes are cached (D31)",
+                  "- goes" not in joined and "- stays" in joined,
+                  joined[:160])
+            check("warm: the cache stores RAW bytes — never the filtered "
+                  "result (the mutation this guards)",
+                  any("- goes" in entry[2]
+                      for entry in assembly._read_cache.values()),
+                  str(len(assembly._read_cache)))
+
+            other = tdp / "profileB" / "SOUL.md"
+            other.parent.mkdir()
+            other.write_text("# OTHER profile body", encoding="utf-8")
+            stack_b = assembly.build_system_stack(other, (mem,),
+                                                  learned_path=None)
+            stack_a = assembly.build_system_stack(cons, (mem,),
+                                                  learned_path=None)
+            check("warm: two bodies never share a cached entry "
+                  "(path-keyed, cross-profile)",
+                  any("# OTHER profile body" in m["content"]
+                      for m in stack_b)
+                  and any("# SOUL v2 final" in m["content"]
+                          for m in stack_a), "cross-profile bleed")
+
+            # warm_startup: primes, writes nothing, and afterwards a build
+            # opens ZERO body files (the first turn pays stats only).
+            sessions = state / "sessions"
+            sessions.mkdir()
+            session = sessions / "web.jsonl"
+            _seed_transcript(session, 4)
+            session_bytes = session.read_bytes()
+            files_before = sorted(str(p) for p in state.rglob("*"))
+            err = assembly.warm_startup(session_path=session)
+            files_after = sorted(str(p) for p in state.rglob("*"))
+            check("warm: warm_startup succeeds and writes nothing",
+                  err == "" and files_after == files_before
+                  and session.read_bytes() == session_bytes,
+                  f"err={err} {len(files_before)} -> {len(files_after)} files")
+
+            reads: list[str] = []
+            real_read_text = Path.read_text
+
+            def counting_read_text(self, *args, **kwargs):
+                if self in (cons, mem, other):
+                    reads.append(str(self))
+                return real_read_text(self, *args, **kwargs)
+            Path.read_text = counting_read_text   # type: ignore[method-assign]
+            try:
+                assembly.build_system_stack(cons, (mem,), learned_path=None)
+            finally:
+                Path.read_text = real_read_text   # type: ignore[method-assign]
+            check("warm: after warm-up the turn path opens NO body file",
+                  reads == [], str(reads))
+    finally:
+        assembly.clear_read_cache()
+        if saved_state is None:
+            os.environ.pop("AIDOG_MC_STATE", None)
+        else:
+            os.environ["AIDOG_MC_STATE"] = saved_state
+        mf.invalidate_cache()
+
+
 def main() -> int:
     # Car A (P8): per-suite accounting — every suite reports its own
     # pass/fail delta so a regression names its suite, not just a total.
@@ -24055,10 +25511,16 @@ def main() -> int:
         test_pipeline_brain,
         test_unavailable_forget_ledger,
         test_memforget,
+        test_memorylog,
         test_memory_forget_api,
         test_profiling_forget,
         test_session_forget,
         test_session_forget_read_paths,
+        test_cross_session_recall,
+        test_queue_steering,
+        test_history_paging,
+        test_append_no_reread,
+        test_warm_body_layer,
     ]
     rows = []
     for fn in suites:

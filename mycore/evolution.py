@@ -79,6 +79,7 @@ except ImportError:                   # mutation lock then fails CLOSED
 REPO = Path(__file__).resolve().parent.parent
 from lib import profile_paths as pp  # noqa: E402  (car F: per-profile body/state)
 from mycore import memforget  # noqa: E402  (memory suppression, D5)
+from mycore import memorylog  # noqa: E402  (batch 4-3: the revision timeline)
 
 BEIJING = timezone(timedelta(hours=8), "+08:00")   # fixed offset, no DST
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
@@ -526,7 +527,8 @@ def learn_memory(text: str, *, now: float | None = None,
             block = "\n- " + "\n  ".join(text.splitlines()) + "\n\n"
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
-                entry_head = f"## {bnow.date().isoformat()} (learn)\n"
+                entry_title = f"{bnow.date().isoformat()} (learn)"
+                entry_head = f"## {entry_title}\n"
                 if existing:
                     data = existing if existing.endswith("\n") else existing + "\n"
                     target.write_text(data + entry_head + block, encoding="utf-8")
@@ -538,6 +540,12 @@ def learn_memory(text: str, *, now: float | None = None,
                                       encoding="utf-8")
             except OSError:
                 return LearnResult(ok=False, path=None, errors=["io"])
+            # Batch 4-3 (memory timeline): the append IS a new version of
+            # this entry — record it in the side-band log. Fail-soft by
+            # contract (memorylog.record_entry never raises): the learn
+            # result never depends on the log.
+            memorylog.record_entry("learned", entry_title, "learn", text,
+                                   repo=repo, now=now)
     except memforget.LedgerUnavailable:
         return LearnResult(ok=False, path=None, errors=["suppression-unavailable"],
                            prescreen=[memforget.LEDGER_UNAVAILABLE])

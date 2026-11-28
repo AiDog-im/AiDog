@@ -1,5 +1,7 @@
 # Credentials never enter the repository
 secrets.env
+# backup / quarantine / temp artifacts of the E2 store (same sensitivity)
+secrets.env.*
 *.env
 !.env.example
 !secrets.env.example

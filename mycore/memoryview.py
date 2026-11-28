@@ -26,6 +26,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from mycore import memorylog
 from mycore import memforget
 
 MAX_ENTRIES = 200
@@ -106,6 +107,11 @@ def collect(repo: Path | None = None, query: str = "",
                 "local_only": True, "editable": False,
                 "suppression": "unavailable", "note": memforget.LEDGER_UNAVAILABLE}
     total = 0
+    # Batch 4-3 (memory timeline): the side-band revision records are read
+    # ONCE (read-only — an absent log creates nothing), then attached per
+    # entry below with the same suppression rules the view already applied.
+    history_records, history_dropped = memorylog.load_records(root)
+    history_truncated = False
     for label, path in (("memory", mem), ("user", usr)):
         text, error = _read(path)
         if error:
@@ -117,26 +123,45 @@ def collect(repo: Path | None = None, query: str = "",
         text = memforget.filter_slot(path, text, tombstones=snapshot)
         channel = memforget.channel_for_path(path)
         entries = _entries(text, channel)
+        # The history keys are the FULL headings of every entry the
+        # filtered read holds — captured BEFORE the query narrows the list,
+        # so a search never hides the provenance of an entry it shows.
+        history, hist_cut = memorylog.history_for_view(
+            snapshot, {label: {e["title"] for e in entries}},
+            history_records)
+        history_truncated = history_truncated or hist_cut
         total += len(entries)
         if q:
             entries = [e for e in entries
                        if q in e["title"].lower() or q in e["display"].lower()]
-        slots.append({
-            "slot": label,
-            "available": True,
-            "file": path.name,
-            "chars": len(text),
-            "entries": [{
+
+        def _view_entry(e: dict) -> dict:
+            """One entry as the API returns it: the browse facts plus the
+            bounded revision history (absent while there is none — a
+            response with nothing revised stays exactly as small as it
+            was)."""
+            payload = history.get((label, e["title"]))
+            out = {
                 "title": e["title"][:120],
                 "excerpt": e["display"][:MAX_EXCERPT],
                 "truncated": len(e["display"]) > MAX_EXCERPT,
                 "chars": len(e["display"]),
                 # The provenance of the entry: the admission channel (the
-                # store it lives in) and the opaque, deterministic id of the
-                # text it owns. No path, no credential, no new body text.
+                # store it lives in) and the opaque, deterministic id of
+                # the text it owns. No path, no credential, no new body text.
                 "channel": channel,
                 "source_id": e["source_id"],
-            } for e in entries[:MAX_ENTRIES]],
+                "revisions": payload["revisions"] if payload else 0,
+            }
+            if payload:
+                out["history"] = payload["records"]
+            return out
+        slots.append({
+            "slot": label,
+            "available": True,
+            "file": path.name,
+            "chars": len(text),
+            "entries": [_view_entry(e) for e in entries[:MAX_ENTRIES]],
             "entries_total": len(entries),
             "truncated": len(entries) > MAX_ENTRIES,
         })
@@ -147,6 +172,11 @@ def collect(repo: Path | None = None, query: str = "",
         "read_only": True,
         "local_only": True,
         "editable": False,
+        # Batch 4-3: how much revision history the side-band log has
+        # dropped (bounded retention, counted honestly) and whether a read
+        # face had to bound what it returned.
+        "history_dropped": history_dropped,
+        "history_truncated": history_truncated,
         "note": "the curated memory files are read-only here; editing and "
                 "archiving are a separate, human-approved action",
     }

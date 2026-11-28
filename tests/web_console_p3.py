@@ -612,6 +612,147 @@ def mutating_suite(*, report=True) -> int:
         check("POST /api/chat clear empties history",
               s == 200 and hist.get("count") == 0, str(hist)[:120])
 
+        # --- queueing steering (batch 4-2): a message for a RUNNING session
+        #     is admitted to the bounded queue and merged into that run —
+        #     never run concurrently over the same transcript. ---
+        import threading as _threading
+        from mycore import memforget as _mf
+        from mycore import session as _ss
+        _state = REPO / "data" / "mycore_service"
+        _sup = "the suppressed steering probe must never be queued"
+        _norm = "also say merged"
+        # A tombstone for `_sup`: the admission gate must refuse it (403)
+        # while the SAME run accepts the ordinary instruction (202).
+        _mf.forget(_mf.CHANNEL_SESSION,
+                   _ss.message_identity({"role": "user", "content": _sup}),
+                   state=_state)
+        _res: dict = {}
+
+        def _slow_turn():
+            _res["turn"] = post_sse(
+                "/api/chat", {"text": "Reply with exactly: HOLD-THE-RUN"},
+                token)
+
+        _th = _threading.Thread(target=_slow_turn)
+        _th.start()
+        _queued = None
+        _sup_status, _sup_body = 0, {}
+        _deadline = time.time() + 12
+        while time.time() < _deadline and _queued is None:
+            # The suppressed probe doubles as the liveness probe: it is
+            # never accepted either way, so a retry has no side effect.
+            _sup_status, _sup_body = post(
+                "/api/chat", {"text": _sup, "queue": True}, token)
+            if _sup_status == 403:
+                _s2, _b2 = post("/api/chat", {"text": _norm, "queue": True},
+                                token)
+                if _s2 == 202:
+                    _queued = _b2
+                break
+            if _sup_status != 409 or not (isinstance(_sup_body, dict)
+                                          and _sup_body.get("error")
+                                          == "no_active_run"):
+                break
+            time.sleep(0.1)
+        _th.join(timeout=180)
+        _s0, _ct0, _evs = _res.get("turn", (0, "", []))
+        check("steer: an ordinary instruction for a RUNNING session -> 202 "
+              "with the queue depth",
+              isinstance(_queued, dict) and _queued.get("queued") is True
+              and _queued.get("n") == 1 and _queued.get("max") == 5
+              and isinstance(_queued.get("id"), str), str(_queued))
+        check("steer: a suppressed instruction is refused at the HTTP edge "
+              "(403, honest detail)",
+              _sup_status == 403 and isinstance(_sup_body, dict)
+              and _sup_body.get("error") == "suppressed"
+              and _sup_body.get("details") ==
+              ["this message is suppressed and cannot be queued"],
+              f"got {_sup_status} {_sup_body}")
+        _steer = [d for e, d in _evs if e == "steer"]
+        check("steer: the running turn announces the merge on its OWN stream",
+              isinstance(_queued, dict) and any(
+                  any(isinstance(i, dict)
+                      and i.get("id") == _queued.get("id")
+                      and i.get("dropped") is False
+                      for i in (d.get("items") or []))
+                  for d in _steer), str(_steer))
+        s, hist = get("/api/chat/history")
+        _contents = [m.get("content") for m in hist.get("messages", [])]
+        check("steer: the queued instruction was merged AND persisted once",
+              s == 200 and _contents.count(_norm) == 1
+              and _sup not in _contents, str(_contents[-6:]))
+        _qpath = _state / "steer_queue.json"
+        try:
+            _doc = json.loads(_qpath.read_text(encoding="utf-8"))
+            _left = [i for i in _doc.get("items", []) if isinstance(i, dict)]
+        except Exception:  # noqa: BLE001 — no file at all = nothing left
+            _left = []
+        check("steer: nothing is left behind in the queue after the merge",
+              _left == [], str(_left))
+        s, body = post("/api/chat", {"action": "clear"}, token)
+        check("steer: the session is cleared again for the following legs",
+              s == 200 and isinstance(body, dict) and body.get("ok") is True,
+              f"got {s} {body}")
+        try:
+            _mf.ledger_path(state=_state).unlink()
+        except OSError:
+            pass
+        # A hand-off with NO run in flight is an honest refusal, not a
+        # second stream the caller did not ask for.
+        s, body = post("/api/chat", {"text": "stale busy flag",
+                                     "queue": True}, token)
+        check("steer: a queue hand-off with no run in flight -> 409",
+              s == 409 and isinstance(body, dict)
+              and body.get("error") == "no_active_run", f"got {s} {body}")
+
+        # --- turn-start drain: an item a previous run never got to is
+        #     prepended BEFORE the owner's own message, so the transcript
+        #     keeps its order and `ids.user` still points at the OWNER's row
+        #     (edit/fork must never rewind the queued one). ---
+        _leftover = "a leftover instruction from the previous run"
+        _owner = "Reply with exactly: leftover-ok"
+        _qpath = _state / "steer_queue.json"
+        _qpath.parent.mkdir(parents=True, exist_ok=True)
+        _qpath.write_text(json.dumps({"version": 1, "items": [
+            {"id": "feedbeef", "key": "console:web.jsonl",
+             "text": _leftover, "state": "pending", "ts": 0.0}]}),
+            encoding="utf-8")
+        s, ct, evs = post_sse("/api/chat", {"text": _owner}, token)
+        done = next((d for e, d in evs if e == "done"), {})
+        steer = [d for e, d in evs if e == "steer"]
+        check("steer: a leftover is announced and merged at turn start",
+              s == 200 and any(
+                  any(isinstance(i, dict) and i.get("id") == "feedbeef"
+                      and i.get("dropped") is False
+                      for i in (d.get("items") or []))
+                  for d in steer), str(steer))
+        check("steer: the queued row lands BEFORE the owner's own row",
+              done.get("stop") == "final"
+              and (done.get("ids") or {}).get("user") == 1
+              and (done.get("ids") or {}).get("assistant") == 2,
+              str(done.get("ids")))
+        s, hist = get("/api/chat/history")
+        _rows = [(m.get("role"), m.get("content"))
+                 for m in hist.get("messages", [])]
+        check("steer: transcript order is leftover, owner, answer",
+              s == 200 and _rows[:3] ==
+              [("user", _leftover), ("user", _owner),
+               ("assistant", "pong")], str(_rows[:3]))
+        try:
+            _doc = json.loads(_qpath.read_text(encoding="utf-8"))
+            _left = [i for i in _doc.get("items", []) if isinstance(i, dict)]
+        except Exception:  # noqa: BLE001 — no file at all = nothing left
+            _left = []
+        check("steer: the drained leftover is committed (no second run)",
+              _left == [], str(_left))
+        s, body = post("/api/chat", {"action": "clear"}, token)
+        check("steer: the session is cleared once more",
+              s == 200 and isinstance(body, dict) and body.get("ok") is True,
+              f"got {s} {body}")
+        # (The slot release is proven by the run above itself: had the claim
+        # leaked, that POST would have been queued — 202 — instead of
+        # running to a `done`.)
+
     # --- auth gate ---
     s, body = post("/api/settings", {"sound": True}, None)
     check("POST without token -> 401", s == 401, f"got {s}")

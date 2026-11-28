@@ -766,6 +766,21 @@ class ChatService:
         return leash.gate(self._settings_doc(), turns=turns)
 
     # -------------------------------------------------------------- loop ----
+    def _warm_body_layer(self) -> None:
+        """Batch 4 item 4: prime the body-layer read cache, the suppression
+        ledger snapshot and the model config resolution ONCE, off the first
+        turn's critical path. Read-only by contract: it opens files, never
+        writes settings, ledger rows or session lines, and a failure is one
+        sanitized log line (the exception class) — the first turn re-derives
+        everything itself, so warm-up can only ever make it faster."""
+        try:
+            from . import assembly
+            err = assembly.warm_startup()
+        except Exception as e:  # noqa: BLE001 — warm-up must never break boot
+            err = type(e).__name__
+        if err:
+            self.log.write("WARM_BODY", f"err={err}")
+
     def run(self, once: bool = False) -> int:
         """getUpdates loop with offset bookkeeping + bounded backoff.
 
@@ -784,6 +799,16 @@ class ChatService:
         tg_poll = self.tg.has_token and not self.channel_only
         self.log.write("LOOP_START", f"mode={'once' if once else 'poll'}"
                        f"{' channel-only' if not tg_poll else ''}")
+        # Batch 4 item 4: the first turn of a fresh service must not pay the
+        # body layer's cold read (~15ms of open+read+close, the largest
+        # synchronous cost on the turn's pre-model path). Off the critical
+        # path, on a daemon thread, and only for a run that actually serves
+        # (the --once tooling legs exit before it could matter); it writes
+        # nothing — a warm read cache is a performance artefact only, and
+        # every read path still applies suppression on its own.
+        if not once:
+            threading.Thread(target=self._warm_body_layer,
+                             daemon=True, name="warm-body").start()
         # Discoverability car: publish (or clear) the TG command menu ONCE,
         # before the first getUpdates — a settings edit applies on the next
         # service start. Guard + try/except both live here so no menu failure

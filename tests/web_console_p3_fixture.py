@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import wave
 
 
@@ -69,6 +70,11 @@ class ModelFixture(BaseHTTPRequestHandler):
         if self.path != "/v1/chat/completions":
             return self.send_error(404)
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        # Queueing steering (batch 4-2): a prompt carrying this marker makes
+        # the fixture hold the turn open, so a second POST can arrive while a
+        # run is genuinely in flight (the real product's long task).
+        if "HOLD-THE-RUN" in json.dumps(request.get("messages") or []):
+            time.sleep(3.0)
         body = json.dumps({"model": request["model"], "choices": [{
             "message": {"role": "assistant", "content": "pong"}, "finish_reason": "stop",
         }], "usage": {"prompt_tokens": 12, "completion_tokens": 1,

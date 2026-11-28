@@ -142,7 +142,7 @@ bot itself.
 | `bash deploy/install.sh` | One command: provision + boot + verify. Exit `0` ready · `2` credential/model slots still pending (fail-closed) · `1` hard failure. Idempotent — safe to re-run. |
 | `aidog setup` | Guided wizard that prompts only for slots still empty, hides input, validates every write, never echoes a value. Flags: `--check` (read-only report) · `--yes` (non-interactive) · `--no-boot` (provision without starting services). |
 | `aidog doctor` | Health gate — the checks every release runs green on. |
-| `aidog start` | Start the runtime (console + chat service + watchdog). Idempotent: already-running sessions are left alone. Self-checks the console entry point and repairs it — a dead/hung session is recycled, a wedged process we own is restarted, a FOREIGN process on the port is reported and never killed (set `AIDOG_WEB_PORT` to move). Exit 0 = all green. |
+| `aidog start` | Start the runtime (console + chat service + watchdog). Idempotent: already-running sessions are left alone. Self-checks the console entry point and repairs it — a dead/hung session is recycled, a wedged process we own is restarted, a FOREIGN process on the port is reported and never killed (set `AIDOG_WEB_PORT` to move), and after an update a console still running the OLD build is recycled so new code actually goes live (the running `/api/health` version is compared against the `VERSION` file). Exit 0 = all green. |
 | `aidog status` | Report runtime status (exit 0 = all green). |
 | `aidog stop` | Stop the runtime sessions (maintenance). |
 | `aidog update apply` | Upgrade: dirty-tree guard → fetch → fast-forward merge → service restart (forwards to `deploy/aidog_update.py`). Use `aidog update` for a read-only version-channel query. |

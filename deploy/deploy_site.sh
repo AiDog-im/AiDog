@@ -434,7 +434,7 @@ if grep -q "## Product" "$verify_dir/llms.txt" \
    && grep -q "nine venues" "$verify_dir/llms.txt" \
    && grep -q "prepare → human console approval → execute" "$verify_dir/llms.txt" \
    && grep -q "ACTIVATION card" "$verify_dir/llms.txt" \
-   && grep -q "3036/3036" "$verify_dir/llms.txt" \
+   && grep -q "3184/3184" "$verify_dir/llms.txt" \
    && grep -q "aidog.im/#capabilities" "$verify_dir/llms.txt"; then
   echo "DEPLOY_SITE: VERIFY OK /llms.txt facts (capabilities, web3 gate, activation, gates)"
 else

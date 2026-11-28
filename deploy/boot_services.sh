@@ -175,6 +175,52 @@ wait_web() {  # $1 = seconds to keep trying (each probe costs at most 3s)
   web_up
 }
 
+web_version() {
+  # The RUNNING build's version (module constant read at import) — empty
+  # when the console does not answer or exposes no version field.
+  python3 - "$WEB_PORT" <<'PY' 2>/dev/null
+import json, sys, urllib.request
+try:
+    with urllib.request.urlopen(f"http://127.0.0.1:{sys.argv[1]}/api/health", timeout=3) as response:
+        doc = json.load(response)
+    value = doc.get("version")
+    print(value if isinstance(value, str) else "")
+except Exception:
+    print("")
+PY
+}
+
+tree_version() {
+  [ -f "$REPO/VERSION" ] || return 0
+  tr -d '[:space:]' < "$REPO/VERSION"
+}
+
+sync_web_version() {
+  # After an update the console must run the NEW code: VERSION on disk vs
+  # the version the running build reported at import. A mismatch recycles
+  # OUR session once — never an external listener — then verifies. Returns 1
+  # only on a positively detected mismatch we could not fix, so the updater
+  # can no longer claim "restarted" while old code stays live.
+  local current wanted
+  current=$(web_version)
+  wanted=$(tree_version)
+  [ -n "$current" ] && [ -n "$wanted" ] || return 0   # unknown → do not guess
+  [ "$current" = "$wanted" ] && return 0
+  session_exists aidog_web || return 0                 # not our session → never touch
+  log "aidog_web: running $current but tree is $wanted - recycling to load the new code"
+  tmux kill-session -t aidog_web 2>/dev/null || true
+  sleep 1
+  start_web
+  wait_web 15 || { log "aidog_web: console did not come back after recycle"; return 1; }
+  current=$(web_version)
+  if [ "$current" = "$wanted" ]; then
+    log "aidog_web: now running $wanted"
+    return 0
+  fi
+  log "aidog_web: still reporting '${current:-unknown}' after recycle (tree $wanted)"
+  return 1
+}
+
 repair_web() {
   # Self-check + self-repair for the CONSOLE entry point (`aidog start`,
   # install, boot). Bounded and honest: a foreign process on the port is
@@ -353,11 +399,13 @@ case "${1:-start}" in
     # Give slow starts (gateway Telegram connect) a moment, then self-verify.
     sleep "${AIDOG_BOOT_SETTLE_SEC:-6}"
     if ! web_up; then repair_web || true; fi
-    if status; then
+    sync_rc=0
+    sync_web_version || sync_rc=$?
+    if status && [ "$sync_rc" -eq 0 ]; then
       log "boot_services: all green"
       log "console: http://127.0.0.1:$WEB_PORT/"
     else
-      log "boot_services: FAIL - some services did not come up"
+      log "boot_services: FAIL - some services did not come up, or the console is still on old code"
       exit 1
     fi
     ;;

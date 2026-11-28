@@ -894,12 +894,49 @@ def leg_telegram(report: Report, console: Console, secrets: Path) -> None:
         elif distinct is None:
             bits.append("no live-gateway token to compare against")
         report.add(section, "telegram.bot.config", PASS, "; ".join(bits))
-    report.add(section, "telegram.roundtrip", SKIP,
-               "needs the owner to send a message in the bot — the runner "
-               "never sends one")
+    status, detail = roundtrip_evidence(REPO)
+    report.add(section, "telegram.roundtrip", status, detail)
 
 
 # ------------------------------------------------------------- rendering ----
+
+def roundtrip_evidence(repo: Path) -> tuple[str, str]:
+    """(status, detail) proving the owner<->bot round trip — READ-ONLY.
+
+    The runner never sends a message (read-only contract), so the proof is
+    the product's own record of a completed turn: an inbound owner message
+    that produced an outbound reply. A watchdog `-> sent` line is reported
+    alongside because it proves the alert path uses the same delivery.
+    """
+    svc = repo / "data" / "mycore_service" / "service.log"
+    try:
+        lines = svc.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return SKIP, "no service log yet — send the bot a message first"
+    turns = [ln for ln in lines if " TURN_END " in ln]
+    if not turns:
+        return SKIP, "no completed turn in the service log yet — send the bot a message"
+    last = turns[-1]
+    stamp = last.split(" ", 1)[0][:19].replace("T", " ") if last[:4].isdigit() else "(no timestamp)"
+    chat = ""
+    m = re.search(r"chat=id:(\d+)", last)
+    if m:
+        chat = f"chat id **{m.group(1)[-2:]}**"      # last 2 digits only, never the full id
+    stop = (re.search(r"stop=(\w+)", last) or [None, "unknown"])[1] \
+        if re.search(r"stop=(\w+)", last) else "unknown"
+    detail = f"completed turn at {stamp} ({chat}, stop={stop}) from the service log"
+    wd = repo / "data" / "mycore_watchdog.log"
+    try:
+        wd_lines = wd.read_text(encoding="utf-8", errors="replace").splitlines()
+        sends = [ln for ln in wd_lines if ln.rstrip().endswith("-> sent")]
+        if sends:
+            detail += f"; alert path also sent ({len(sends)} line(s))"
+        elif any("log-only" in ln or "notify skipped" in ln for ln in wd_lines[-40:]):
+            detail += "; watchdog alert path still log-only"
+    except OSError:
+        pass
+    return PASS, detail
+
 
 def render_text(report: Report) -> str:
     """The human table."""

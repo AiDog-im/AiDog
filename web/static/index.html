@@ -59,6 +59,8 @@
     </div>
     <div class="head-right">
       <span class="clock" id="clock">--:--:--</span>
+      <button class="btn cmdk-btn" id="cmdkBtn" type="button"
+              data-i18n-t="cmdk.open" title="open the command palette">⌘K</button>
       <button class="btn" id="updateCheckBtn" type="button"
               data-i18n="upd.check">CHECK</button>
       <button class="btn" id="langBtn">ZH</button>
@@ -210,6 +212,16 @@
   </aside>
 
   <main class="main">
+    <!-- batch 4-5 (amber write target): the profile this console writes to
+         stays visible above every view — settings, memory and the chat
+         session all land in the ACTIVE profile, and the owner must see it
+         before a write, not after. Text is filled from /api/status
+         (statusData.profile) and re-painted on every status refresh. -->
+    <div class="write-banner" id="writeBanner" role="status">
+      <span class="wb-tag" data-i18n="wb.tag">WRITE TARGET</span>
+      <span class="wb-text" id="wbText"
+            data-i18n="wb.body">profile default — settings, memory, chat session and approvals are written here</span>
+    </div>
     <!-- OVERVIEW: service cards + usage + memory + channel + advisory -->
     <section class="view is-active" id="view-overview" data-view="overview">
       <div class="view-head">
@@ -2745,6 +2757,10 @@
      CONFIRM writes; cancelling writes nothing. No credential is rendered
      in this dialog — the access token stays inside the request header. -->
 <dialog id="memForgetDialog" class="mem-dialog" aria-labelledby="memForgetTitle">
+  <!-- mobile bottom-sheet grip (batch 4-5): the ONLY drag surface, so the
+       sheet can be swiped away without ever stealing a scroll or a click
+       from the confirm/cancel buttons. Hidden above 760px. -->
+  <div class="mem-grip" id="memGrip" aria-hidden="true"></div>
   <h2 id="memForgetTitle" data-i18n="memory.forget.title">Forget this memory?</h2>
   <div class="stat-note mem-dialog-sub"
        data-i18n="memory.forget.subtitle">Nothing is written until you confirm.</div>
@@ -2757,6 +2773,25 @@
             data-i18n="memory.forget.cancel">CANCEL</button>
   </div>
 </dialog>
+
+<!-- batch 4-5: Ctrl/Cmd+K command palette — native DOM, zero dependencies.
+     Focus stays in the input (combobox pattern): Arrow keys move
+     aria-activedescendant, Enter runs, Esc closes and returns focus to the
+     element that opened it, Tab is trapped inside the layer. -->
+<div class="cmdk-layer" id="cmdkLayer" hidden>
+  <div class="cmdk" role="dialog" aria-modal="true" aria-labelledby="cmdkTitle">
+    <div class="cmdk-head">
+      <span class="cmdk-title" id="cmdkTitle" data-i18n="cmdk.title">Command palette</span>
+      <span class="cmdk-kbd" aria-hidden="true">Esc</span>
+    </div>
+    <input id="cmdkInput" class="cmdk-input" type="text" role="combobox"
+           aria-expanded="true" aria-controls="cmdkList" aria-autocomplete="list"
+           autocomplete="off" spellcheck="false"
+           data-i18n-ph="cmdk.ph" placeholder="jump to a view, model or action…">
+    <ul id="cmdkList" class="cmdk-list" role="listbox" aria-labelledby="cmdkTitle"></ul>
+    <div class="cmdk-foot" id="cmdkFoot" data-i18n="cmdk.hint">↑ ↓ move · Enter run · Esc close</div>
+  </div>
+</div>
 
 <script src="/static/app.js"></script>
 </body>

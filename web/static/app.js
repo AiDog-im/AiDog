@@ -87,6 +87,8 @@ async function loadLang(lang) {
   });
   applyStaticText();
   renderStatus(); renderUsage(); renderSelf(selfData); renderVersion(); renderVoice();
+  renderWriteTarget();          // batch 4-5: the write destination re-translates
+  foldRepaint();                // batch 4-5: folded reasoning lines re-translate
   mediaLangRefresh();          // voice session + image badge texts follow too
   settingsRelang();            // rows built by JS keep their pack strings too
   renderExchange();            // venue rows / probe labels follow the language too
@@ -1487,6 +1489,37 @@ function exTick() {
 }
 
 /* ---------------------------------------------------------------- status -- */
+/* batch 4-5 (amber write target): the profile this console WRITES to stays
+   on screen above every view — settings, memory, the chat session and the
+   approval gates all land in the ACTIVE profile, so the owner reads it
+   BEFORE a write, not after. Text comes from /api/status (statusData.profile,
+   "" = default) and is repainted on every status refresh and language
+   switch; it is only rebuilt when the string actually changes, so the
+   role=status region never re-announces an unchanged destination. */
+function renderWriteTarget() {
+  const el = document.getElementById("wbText");
+  if (!el) return;
+  const p = (statusData && typeof statusData.profile === "string" &&
+             statusData.profile) ? statusData.profile : "default";
+  const tpl = t("wb.body",
+    "profile {p} — settings, memory, chat session and approvals are written here");
+  const at = tpl.indexOf("{p}");
+  const full = at >= 0 ? tpl.slice(0, at) + p + tpl.slice(at + 3) : tpl;
+  if (el.dataset.rendered === full) return;
+  el.textContent = "";
+  if (at < 0) {
+    el.textContent = full;
+  } else {
+    el.appendChild(document.createTextNode(tpl.slice(0, at)));
+    const b = document.createElement("span");
+    b.className = "wb-profile";
+    b.textContent = p;
+    el.appendChild(b);
+    el.appendChild(document.createTextNode(tpl.slice(at + 3)));
+  }
+  el.dataset.rendered = full;
+}
+
 function renderStatus() {
   if (!statusData) return;
   const panels = statusData.panels || [];
@@ -3804,9 +3837,12 @@ async function evoReflect() {
 
 /* --------------------------------------------------------------- chat ---- */
 let chatBusy = false;
-/* Prompt queue (car 4a-M3, client-only — the server still runs one turn at
-   a time): submissions during a streamed turn wait in an editable bar above
-   the input; the bar drains FIFO when the current turn finishes. Max 5. */
+/* Prompt queue (car 4a-M3): submissions made during a streamed turn join
+   the bar above the input instead of being refused. Client-owned items
+   dispatch FIFO when the turn finishes; items the SERVER took (batch 4-2
+   queueing steering) are merged into the RUNNING turn at its next
+   iteration boundary and settled there by a `steer` frame. Max 5 — the
+   server enforces the same bound on its side. */
 const CHAT_QUEUE_MAX = 5;
 let chatQueue = [];
 let chatQPending = false;        // head item in its dispatch flash (pending)
@@ -3824,7 +3860,7 @@ function chatBadge(live) {
   el.className = "chat-badge" + (live ? " live" : "");
 }
 
-function chatBubble(role, text, mid) {
+function chatBubble(role, text, mid, ref) {
   document.getElementById("chatEmpty")?.remove();
   const row = document.createElement("div");
   row.className = "chat-row " + role;
@@ -3857,17 +3893,80 @@ function chatBubble(role, text, mid) {
     t("chat.actForkHint", "branch a new session from this point")));
   row.appendChild(acts);
   const log = document.getElementById("chatLog");
-  log.appendChild(row);
+  // `ref` = an existing row to insert BEFORE (batch 4 item 4: older pages
+  // are prepended in ascending id order). Absent -> append, exactly as
+  // before, so every live turn still lands at the bottom.
+  if (ref && ref.parentNode === log) {
+    log.insertBefore(row, ref);
+  } else {
+    log.appendChild(row);
+  }
   log.scrollTop = log.scrollHeight;
   return b;
 }
 
-function chatToolLine(name) {   // tool activity as its own line above the live bubble
+/* --- batch 4-5 (3): ONE compact timeline line per turn -------------------
+   A tool call reaches the browser as TWO SSE frames (tool_call with
+   ok:null, then tool_result with ok:bool), so the old one-row-per-frame
+   rendering drew two rows per call. The timeline keeps a single line per
+   burst of consecutive tool frames and merges same-tool calls into
+   `name ×N` with an honest mark (✓ / ✗ / … while a call is in flight).
+   A text delta closes the burst, so each burst stays in step with the
+   narration around it. RENDER LAYER ONLY: frames, their order and every
+   `ids` identity stay exactly as they were. */
+let chatToolRun = null;           // {el, segs: Map} | null — the open burst
+
+function chatToolSegEl(name, s) {
+  const span = document.createElement("span");
+  span.className = "tl-seg";
+  span.textContent = name;
+  if (s.n > 1) {
+    const c = document.createElement("span");
+    c.className = "tl-n";
+    c.textContent = " ×" + s.n;
+    span.appendChild(c);
+  }
+  const mark = document.createElement("span");
+  const pending = Math.max(0, s.n - s.ok - s.bad);
+  if (s.ok && s.bad) {
+    mark.className = "tl-n";
+    mark.textContent = " ✓" + s.ok + " ✗" + s.bad;
+  } else if (s.bad) {
+    mark.className = "tl-bad";
+    mark.textContent = " ✗" + (s.bad > 1 ? s.bad : "");
+  } else if (pending) {
+    mark.className = "tl-n";
+    mark.textContent = " …";
+  } else {
+    mark.className = "tl-ok";
+    mark.textContent = " ✓";
+  }
+  span.appendChild(mark);
+  return span;
+}
+
+function chatToolTick(data) {
   const log = document.getElementById("chatLog");
-  const el = document.createElement("div");
-  el.className = "chat-tools-row";
-  el.textContent = "⚙ " + name;
-  log.insertBefore(el, log.lastElementChild);
+  if (!log) return;
+  const name = String(data.name || "?");
+  if (!chatToolRun || !chatToolRun.el.isConnected) {
+    const el = document.createElement("div");
+    el.className = "chat-tools-row chat-timeline";
+    log.insertBefore(el, log.lastElementChild);
+    chatToolRun = { el, segs: new Map() };
+  }
+  const run = chatToolRun;
+  let seg = run.segs.get(name);
+  if (!seg) { seg = { n: 0, ok: 0, bad: 0 }; run.segs.set(name, seg); }
+  const ok = data.ok;
+  if (ok === null || ok === undefined) seg.n += 1;      // the call frame
+  else if (ok) seg.ok += 1;                             // the result frame
+  else seg.bad += 1;
+  run.el.replaceChildren(...Array.from(run.segs,
+    ([nm, sg]) => chatToolSegEl(nm, sg)));
+  run.el.title = Array.from(run.segs, ([nm, sg]) =>
+    nm + ": " + sg.n + " call(s), " + sg.ok + " ok, " +
+    sg.bad + " failed").join(" · ");
   log.scrollTop = log.scrollHeight;
 }
 
@@ -3892,7 +3991,12 @@ function chatQueueRender() {
   if (!bar) return;
   bar.textContent = "";
   bar.hidden = chatQueue.length === 0;
-  chatQueue.forEach((text, i) => {
+  chatQueue.forEach((entry, i) => {
+    const text = typeof entry === "string" ? entry : (entry && entry.text) || "";
+    // An item the SERVER took (batch 4-2) is owned by the running turn: it
+    // is merged into that run, so Edit/Cancel here would be a lie — the bar
+    // only mirrors it until a `steer` frame settles it.
+    const srv = typeof entry === "object" && !!entry && !!entry.srv;
     const row = document.createElement("div");
     const pending = chatQPending && i === 0;
     row.style.cssText = "display:flex;align-items:center;gap:8px;" +
@@ -3902,7 +4006,7 @@ function chatQueueRender() {
     const label = document.createElement("span");
     label.style.cssText = "flex:1;min-width:0;overflow:hidden;" +
       "text-overflow:ellipsis;white-space:nowrap;color:var(--muted);";
-    label.textContent = (pending ? "⏳ " : (i + 1) + ". ") + text;
+    label.textContent = (pending ? "⏳ " : srv ? "⇪ " : (i + 1) + ". ") + text;
     row.appendChild(label);
     const mk = (txt, fn) => {
       const b = document.createElement("button");
@@ -3914,7 +4018,7 @@ function chatQueueRender() {
       b.addEventListener("click", fn);
       return b;
     };
-    if (!pending) {
+    if (!pending && !srv) {
       row.appendChild(mk(t("chat.qEdit", "Edit"), () => {
         const input = document.getElementById("chatInput");
         chatQueue.splice(i, 1);
@@ -3931,15 +4035,20 @@ function chatQueueRender() {
 }
 
 function chatQueueNext(flash) {
-  /* Dispatch the head item when idle. `flash` shows its brief pending state
-     before the turn starts (queued dispatches); an immediate submission
-     (queue was empty, turn idle) goes straight out — zero added latency. */
-  if (chatBusy || chatQPending || !chatQueue.length) return;
+  /* Dispatch the first item THIS client still owns when idle. An item the
+     server took is never re-sent: the running turn merged it, and one the
+     chain could not take rides the NEXT turn (the server prepends it and
+     settles the bar on that turn's `steer` frame) — re-sending it here
+     would run the same instruction twice. */
+  const ownIdx = () => chatQueue.findIndex(q => typeof q !== "object" || !q.srv);
+  if (chatBusy || chatQPending || ownIdx() < 0) return;
   const start = () => {
-    const text = chatQueue.shift();
+    const idx = ownIdx();
+    if (idx < 0) { chatQPending = false; chatQueueRender(); return; }
+    const entry = chatQueue.splice(idx, 1)[0];
     chatQPending = false;
     chatQueueRender();
-    chatTurn(text);
+    chatTurn(typeof entry === "string" ? entry : (entry && entry.text) || "");
   };
   if (flash) {
     chatQPending = true;
@@ -3948,6 +4057,91 @@ function chatQueueNext(flash) {
   } else {
     start();
   }
+}
+
+/* --- server-side queue hand-off (batch 4-2: queueing steering) ---------
+   While the server runs a turn on this session, a submission goes to the
+   QUEUE instead of racing the run: 202 + depth means the running turn will
+   merge it at its next iteration boundary; 409 no_active_run means this
+   client's busy flag was stale and the item goes back to the ordinary
+   local queue; any other refusal is the server's honest line and the text
+   is handed back to the input, exactly like a full local queue. */
+let chatQChain = Promise.resolve();
+
+function chatQueueGiveBack(text) {
+  const input = document.getElementById("chatInput");
+  if (input && !input.value) input.value = text;
+}
+
+function chatQueueSend(text) {
+  /* Serialised: hand-offs keep submission order even if the user types
+     faster than the POSTs return. */
+  chatQChain = chatQChain.then(() => chatQueueSendNow(text)).catch(() => {});
+  return chatQChain;
+}
+
+async function chatQueueSendNow(text) {
+  const token = localStorage.getItem(TOKEN_KEY) || "";
+  let res, body;
+  try {
+    res = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json",
+                 "Authorization": "Bearer " + token },
+      body: JSON.stringify({ text, queue: true }) });
+    body = await res.json().catch(() => ({}));
+  } catch (e) {
+    chatNote("err", t("chat.err", "stream failed — retry"));
+    chatQueueGiveBack(text);
+    return;
+  }
+  if (res.status === 202 && body.queued) {
+    chatQueue.push({ text, id: body.id || null, srv: true });
+    chatQueueRender();
+    const b = chatBubble("user", text);
+    if (b.parentElement && body.id) b.parentElement.dataset.qid = String(body.id);
+    chatNote("", t("chat.qQueued",
+      "queued {n}/{max} — it will join the running turn")
+      .replace("{n}", String(body.n)).replace("{max}", String(body.max)));
+    return;
+  }
+  if (res.status === 409 && body.error === "no_active_run") {
+    chatQueue.push({ text, srv: false });
+    chatQueueRender();
+    return;
+  }
+  chatNote("err", gateDetail(body));
+  chatQueueGiveBack(text);
+}
+
+function chatSteerNote(qid, text) {
+  const row = document.querySelector('.chat-row[data-qid="' + qid + '"]');
+  if (!row || row.querySelector('.chat-steer-note')) return;
+  const el = document.createElement("div");
+  el.className = "chat-steer-note";
+  el.style.cssText = "font-size:12px;color:var(--muted);padding:0 4px 2px;";
+  el.textContent = text;
+  row.appendChild(el);
+}
+
+function chatSteer(data) {
+  /* A `steer` frame from the RUNNING turn: it took the queued instructions,
+     or the queue dropped one that was forgotten while it waited (dropped
+     carries the id ONLY — a forgotten source is never echoed back). Drop
+     them from the bar and settle the transcript row. */
+  const items = (data && Array.isArray(data.items)) ? data.items : [];
+  const ids = items.filter(i => i && i.id).map(i => String(i.id));
+  if (ids.length) {
+    chatQueue = chatQueue.filter(q => !(q && q.srv && q.id &&
+      ids.indexOf(String(q.id)) >= 0));
+    chatQueueRender();
+  }
+  items.forEach(i => {
+    if (!i || !i.id) return;
+    chatSteerNote(String(i.id), i.dropped
+      ? t("chat.qDropped", "⊘ not delivered (suppressed)")
+      : t("chat.qMerged", "↳ merged into the running turn"));
+  });
 }
 
 /* --- MCP progress status line (car 4a-M3): transient, self-cleaning --- */
@@ -3980,15 +4174,133 @@ function chatProgress(data) {
   }, 2000);
 }
 
+/* --- batch 4 item 4: bounded history pages ------------------------------
+   The console never reads or draws a whole transcript. One page = HISTORY_PAGE
+   rows, the server answers `has_more` exactly, and older pages arrive one at
+   a time when the owner asks for them — a session of thousands of rows costs
+   the same first paint as a session of five. Ids stay the server's absolute
+   row indices, so edit/fork handles never move no matter which page a row
+   came from. */
+const HISTORY_PAGE = 40;             // rows per page (was: last 40 of 200)
+let chatHistOldest = null;           // absolute id of the oldest row drawn
+let chatHistHasMore = false;         // an older page really exists (server)
+let chatHistBusy = false;            // one page request at a time
+let chatHistGen = 0;                 // bumped when the transcript under the
+                                     // cursor is replaced (clear / open), so
+                                     // a page that was in flight can never
+                                     // be drawn into the WRONG session
+
+function chatMoreBar() {
+  let bar = document.getElementById("chatMore");
+  if (bar) return bar;
+  const log = document.getElementById("chatLog");
+  if (!log) return null;
+  bar = document.createElement("button");
+  bar.id = "chatMore";
+  bar.type = "button";
+  bar.className = "chat-more";
+  bar.hidden = true;
+  bar.addEventListener("click", () => { loadOlderHistory(); });
+  log.insertBefore(bar, log.firstChild);   // sticky at the top of the log
+  return bar;
+}
+
+function chatMorePaint() {
+  const bar = chatMoreBar();
+  if (!bar) return;
+  bar.hidden = !chatHistHasMore;
+  bar.disabled = chatHistBusy;
+  const key = chatHistBusy ? "chat.loadingOlder" : "chat.loadOlder";
+  bar.dataset.i18n = key;              // a language switch repaints it too
+  bar.textContent = t(key, chatHistBusy ? "loading older messages…"
+                                        : "load older messages");
+}
+
+/* The skeleton is the honest placeholder while a page is in flight: three
+   shimmer rows in the layout the answer will occupy, no text, no spinner
+   that could be mistaken for a reply. aria-hidden: it is decoration. */
+function chatSkeleton(on) {
+  const log = document.getElementById("chatLog");
+  if (!log) return;
+  const have = document.getElementById("chatSkeleton");
+  if (!on) {
+    if (have) have.remove();
+    return;
+  }
+  if (have) return;
+  const el = document.createElement("div");
+  el.id = "chatSkeleton";
+  el.className = "chat-skeleton";
+  el.setAttribute("aria-hidden", "true");
+  for (const who of ["user", "assistant", "assistant"]) {
+    const row = document.createElement("div");
+    row.className = "chat-skel-row " + who;
+    const b = document.createElement("div");
+    b.className = "chat-skel-bubble";
+    row.appendChild(b);
+    el.appendChild(row);
+  }
+  log.appendChild(el);
+}
+
 async function loadChatHistory() {
+  const gen = chatHistGen;
   try {
-    const h = await fetch("/api/chat/history").then(r => r.json());
+    chatMoreBar();                     // first child: stays above every page
+    chatSkeleton(true);
+    const h = await fetch("/api/chat/history?limit=" + HISTORY_PAGE)
+      .then(r => r.json());
+    chatSkeleton(false);
+    if (gen !== chatHistGen) return;   // the transcript changed under us
     renderCtx(h.context);         // X14: context line rides the same fetch
-    const msgs = (h.messages || []).slice(-40);
+    const msgs = h.messages || [];
+    chatHistHasMore = h.has_more === true;
+    chatHistOldest = msgs.length ? msgs[0].id : null;
+    chatMorePaint();
     if (!msgs.length) return;
     document.getElementById("chatEmpty")?.remove();
     for (const m of msgs) chatBubble(m.role, m.content, m.id);
-  } catch (e) { /* empty state stays */ }
+    foldHistoryRows();          // batch 4-5: fold each turn's interim rows
+  } catch (e) {
+    chatSkeleton(false);         /* empty state stays */
+  }
+}
+
+/* The next older page, prepended in front of everything already drawn. The
+   scroll offset is restored by the height the prepend added, so reading
+   position never jumps; one request at a time, and an honest failure leaves
+   the button in place for the next attempt. */
+async function loadOlderHistory() {
+  if (chatHistBusy || !chatHistHasMore || chatHistOldest === null) return;
+  chatHistBusy = true;
+  chatMorePaint();
+  const gen = chatHistGen;
+  try {
+    const h = await fetch("/api/chat/history?limit=" + HISTORY_PAGE +
+                          "&before=" + chatHistOldest)
+      .then(r => r.json());
+    if (gen !== chatHistGen) return;   // clear/open replaced the transcript
+    const msgs = h.messages || [];
+    chatHistHasMore = h.has_more === true;
+    if (msgs.length) {
+      chatHistOldest = msgs[0].id;
+      const log = document.getElementById("chatLog");
+      // the first content child can be a fold toggle (an older run starts
+      // folded): the next page must land ABOVE it, never between it and
+      // the rows it hides.
+      const ref = log ? log.querySelector(".chat-row, .chat-fold") : null;
+      const top = log ? log.scrollTop : 0;
+      const hgt = log ? log.scrollHeight : 0;
+      document.getElementById("chatEmpty")?.remove();
+      for (const m of msgs) chatBubble(m.role, m.content, m.id, ref);
+      foldHistoryRows();        // re-group: the new page joins the runs above
+      if (log) log.scrollTop = top + (log.scrollHeight - hgt);
+    }
+  } catch (e) { /* the bar stays: next click retries */ }
+  finally {
+    chatHistBusy = false;
+    chatMorePaint();
+  }
 }
 
 /* ------------------------------------ Wave 4 X7 + X14: chat card wiring ----
@@ -4092,11 +4404,10 @@ function chatSend() {
       input.value = text;             // not accepted: hand the text back
       return;
     }
-    chatQueue.push(text);
-    chatQueueRender();
+    chatQueueSend(text);              // batch 4-2: merged into the live run
     return;
   }
-  chatQueue.push(text);
+  chatQueue.push({ text, srv: false });
   chatQueueNext(false);
 }
 
@@ -4118,14 +4429,25 @@ async function chatTurn(text) {
   bubble.classList.add("pending");
   let acc = "";
   let meta = null;
+  /* batch 4-5 (3): `folded` = how many chars of acc already live in a
+     folded reasoning line; a non-empty delta closes the current tool burst
+     so every burst gets its own timeline line, in chronological order. */
+  let folded = 0;
+  chatToolRun = null;
   const handle = (ev, data) => {
     if (ev === "delta") {
       acc += data.text || "";
-      bubble.textContent = acc;
+      if (data.text) chatToolRun = null;
+      bubble.textContent = acc.slice(folded);
       const log = document.getElementById("chatLog");
       log.scrollTop = log.scrollHeight;
     } else if (ev === "tool") {
-      chatToolLine(data.name || "?");
+      // the narration came FIRST, so its fold line is placed before the
+      // tool line: [reasoning][tools][answer], never reordered
+      folded = chatReasonFold(bubble, acc, folded);
+      chatToolTick(data);
+    } else if (ev === "steer") {
+      chatSteer(data);                 // batch 4-2: queued instructions
     } else if (ev === "progress") {
       chatProgress(data);
     } else if (ev === "done") {
@@ -4177,6 +4499,14 @@ async function chatTurn(text) {
       document.getElementById("chatMeta").textContent =
         t("chat.meta", "{i} iterations · {t} tool calls")
           .replace("{i}", meta.iterations).replace("{t}", meta.tool_calls);
+      if (meta.queued > 0) {
+        // Instructions the chain could not take (bound, pause or budget)
+        // are still on the server: they ride the NEXT turn — say so rather
+        // than leaving the bar to explain itself.
+        chatNote("", t("chat.qQueued",
+          "queued {n}/{max} — it will join the running turn")
+          .replace("{n}", String(meta.queued)).replace("{max}", String(CHAT_QUEUE_MAX)));
+      }
       if (!meta.text.trim()) bubble.textContent = t("chat.noOutput", "(no output)");
       // car C1 (A-2): stamp THIS turn's rows with their absolute ids so
       // edit/fork work on the live bubbles without a refetch; a missing
@@ -4191,10 +4521,17 @@ async function chatTurn(text) {
       }
     } else if (!acc) {
       bubble.textContent = t("chat.noOutput", "(no output)");
+    } else if (!bubble.textContent.trim() && bubble.parentElement) {
+      // every delta went into a folded reasoning line — drop the empty row
+      // rather than draw a pill with nothing in it
+      bubble.parentElement.remove();
     }
   } catch (e) {
     chatNote("err", t("chat.err", "stream failed — retry"));
-    if (!acc) bubble.remove();
+    if (!bubble.textContent.trim()) {
+      if (folded && bubble.parentElement) bubble.parentElement.remove();
+      else if (!acc) bubble.remove();
+    }
   } finally {
     bubble.classList.remove("pending");
     chatProgressClear();
@@ -4364,6 +4701,10 @@ async function chatClear() {
     }
     document.getElementById("chatLog").innerHTML =
       `<div class="chat-empty" id="chatEmpty">${escapeHtml(t("chat.empty", "no messages yet"))}</div>`;
+    // batch 4 item 4: the transcript is gone, so is every paging cursor
+    chatHistGen++;
+    chatHistOldest = null;
+    chatHistHasMore = false;
     document.getElementById("chatMeta").textContent = "";
     chatNote("ok", body.archived ? t("chat.cleared", "session archived")
                                  : t("chat.empty", "no messages yet"));
@@ -9544,6 +9885,7 @@ async function refreshStatus() {
   try {
     statusData = await fetch("/api/status").then(r => r.json());
     renderStatus();
+    renderWriteTarget();        // batch 4-5: keep the amber write target current
     document.getElementById("ts").textContent = statusData.time_utc || "";
     // stream lines rendered before status arrived still carry placeholders
     // (e.g. the boot event's {v}) — repaint them now that version is known
@@ -10459,7 +10801,9 @@ function renderMemoryBrowse() {
 }
 
 /* One browsable entry: the heading, its PROVENANCE (the admission channel
-   in plain words + the opaque source id) and the per-entry FORGET action.
+   in plain words + the opaque source id), its REVISION HISTORY (batch 4-3,
+   hashes and times only — a forgotten entry's history never reaches this
+   list at all) and the per-entry FORGET action.
    The action is rendered only for a slot the forget API can address — the
    UI never invents an endpoint and never guesses a slot. */
 function memBrowseEntryHtml(entry, groupSlot) {
@@ -10468,6 +10812,7 @@ function memBrowseEntryHtml(entry, groupSlot) {
   const slot = memForgetSlotFor(entry, groupSlot);
   const body = `<div class="stat-note mem-entry-text">${escapeHtml(
     entry.excerpt || "")}</div>`;
+  const hist = memBrowseHistHtml(entry);
   // The action needs a REAL heading: the forget API addresses an entry by
   // its heading, so an entry without one (a whole file with no heading)
   // is shown honestly but cannot be addressed from here.
@@ -10486,7 +10831,37 @@ function memBrowseEntryHtml(entry, groupSlot) {
   return `<details class="mem-entry"><summary>` +
     `<span class="mem-entry-title">${escapeHtml(title)}</span>` +
     `<span class="mem-entry-prov">${memForgetProvHtml(entry)}</span>` +
-    `</summary><div class="mem-entry-body">${body}${action}</div></details>`;
+    `</summary><div class="mem-entry-body">${body}${hist}${action}</div></details>`;
+}
+
+/* The revision history of one entry (batch 4-3): WHEN it changed, WHICH
+   operation changed it and the OPAQUE digests of its versions — never the
+   text (the API never sends it here), and never a forgotten entry's rows
+   (the API filters them out before answering). Rendered only while the
+   entry actually has recorded revisions. */
+function memBrowseHistHtml(entry) {
+  const n = Number((entry && entry.revisions) || 0);
+  if (!(n > 0)) return "";
+  const rows = (Array.isArray(entry.history) ? entry.history : []).map(h => {
+    const when = new Date(Number(h.ts) * 1000).toLocaleString();
+    return `<div class="mem-hist-row">${escapeHtml(when)} · ${escapeHtml(
+      String(h.op || ""))} · <code>${escapeHtml(
+      String(h.digest || "").slice(0, 12))}</code></div>`;
+  }).join("");
+  const shown = Array.isArray(entry.history) ? entry.history.length : 0;
+  const note = (shown < n)
+    ? `<div class="stat-note">${escapeHtml(
+        t("memory.history.latest", "showing the latest {n} of {m}")
+          .replace("{n}", String(shown)).replace("{m}", String(n)))}</div>`
+    : "";
+  return `<details class="mem-entry-hist"><summary>${escapeHtml(
+    t("memory.history.label", "revision history"))} (${n})</summary>` +
+    `<div class="mem-hist-list">${rows || escapeHtml(
+      t("memory.history.empty", "no visible revisions"))}</div>${note}` +
+    `<div class="stat-note">${escapeHtml(
+      t("memory.history.note",
+        "hashes and times only — the text stays in the memory files"))}
+    </div></details>`;
 }
 
 const memBrowseBtnEl = document.getElementById("memBrowseBtn");
@@ -11314,6 +11689,51 @@ function sessForgetHitsHtml(s) {
     `<div class="sess-hit-list">${rows}</div>${more}</details>`;
 }
 
+/* Batch 4 item 1 — the cross-session, cross-slot recall that rides along
+   with ?q= (mycore.recall): ONE bounded list over every transcript AND the
+   memory slots, ranked by the server (BM25 + recency), already filtered
+   against the live suppression ledger. This only renders what the server
+   gave it: no FORGET action of its own (the session rows above already
+   address the same messages by their opaque id), no invented hit, and the
+   method the search actually ran. */
+function sessRecallHtml() {
+  const doc = sessData && sessData.messages;
+  if (!doc) return "";
+  if (doc.suppression === "unavailable") {
+    return `<div class="stat-note sess-recall">${escapeHtml(
+      t("sess.recall.withheld",
+        "cross-session matches withheld: the suppression ledger "
+        + "is unavailable"))}</div>`;
+  }
+  const hits = Array.isArray(doc.hits) ? doc.hits : [];
+  if (!hits.length) return "";
+  const rows = hits.map(h => {
+    const where = h.kind === "memory"
+      ? [String(h.slot || ""), String(h.heading || "")]
+          .filter(Boolean).join(" · ")
+      : [String(h.session || ""), String(h.role || "")]
+          .filter(Boolean).join(" · ");
+    const when = h.when ? new Date(h.when * 1000).toLocaleString() : "";
+    const head = [where, when].filter(Boolean).join(" · ");
+    return `<div class="sess-recall-row">` +
+      (head ? `<div class="stat-note">${escapeHtml(head)}</div>` : "") +
+      `<div style="overflow-wrap:anywhere;">${escapeHtml(
+        String(h.text || ""))}</div></div>`;
+  }).join("");
+  const method = (doc.fallback || doc.method !== "fts5")
+    ? t("sess.methodSub", "substring fallback")
+    : t("sess.methodFts", "full-text (fts5)");
+  const more = doc.truncated
+    ? `<div class="stat-note">${escapeHtml(
+      t("sess.recall.more", "only the first {n} matches are shown — "
+      + "narrow the search").replace("{n}",
+        String(doc.limit || hits.length)))}</div>`
+    : "";
+  return `<div class="sess-recall"><div class="stat-note">${escapeHtml(
+    t("sess.recall.title", "matches across all sessions and memory")
+    + " (" + method + ", " + hits.length + ")")}</div>${rows}${more}</div>`;
+}
+
 function renderSessions(q) {
   const list = document.getElementById("sessList");
   const badge = document.getElementById("sessBadge");
@@ -11379,6 +11799,10 @@ function renderSessions(q) {
         " · " + sessData.count + " session(s)")}</div>`;
     }
   }
+  // Batch 4 item 1: the message-level recall for THIS query — rendered
+  // even when no session row matched (a memory-only hit still matters).
+  const recallHtml = sessRecallHtml();
+  if (recallHtml) list.innerHTML += recallHtml;
   // X12: prune state + the one-shot advisory, server-owned wording
   const pr = sessData.prune;
   if (pruneEl) {
@@ -11409,6 +11833,7 @@ function renderSessions(q) {
    NEW live file, and the list refetches (the opened row is gone — it became
    the live session). */
 async function chatReload() {
+  chatHistGen++;                       // the live transcript is being replaced
   const log = document.getElementById("chatLog");
   if (log) {
     log.innerHTML = `<div class="chat-empty" id="chatEmpty">` +
@@ -14918,6 +15343,445 @@ function wireIntentRoute() {
     go();
   });
 }
+
+/* =========================================================================
+   batch 4-5 — frontend touch four (interaction density, render layer only).
+   No framework, no plugin, no API / SSE / `ids`-identity change: this block
+   only adds paint, focus and pointer handling on the existing surfaces.
+   The visual language is untouched — paper #fcfcfa, logo blue #2892ff,
+   navy ink #001633, cyan #70e4fd, rule #a5b7ca, warm accent #e98667
+   (decorative edge/fill ONLY: the amber strip's text is navy #001633 on
+   #f9ebe5 = 15.5:1 and its chip ink #a05a04 on #fff = 5.3:1).
+   ========================================================================= */
+
+/* ------------------------------------- 3. one-line folded reasoning ----- */
+function paintFold(btn) {
+  const f = btn._fold || { text: "", rows: [] };
+  const open = btn.getAttribute("aria-expanded") === "true";
+  const n = f.rows.length;
+  const count = t("chat.foldRows", "{n} folded rows").replace("{n}", String(n));
+  btn.textContent = "";
+  const tag = document.createElement("span");
+  tag.className = "cr-tag";
+  tag.textContent = f.text
+    ? t("chat.foldReason", "reasoning")
+    : t("chat.foldTool", "tool activity");
+  const prev = document.createElement("span");
+  prev.className = open ? "cr-prev is-full" : "cr-prev";
+  if (open) {
+    prev.textContent = f.text || count;
+  } else if (f.text) {
+    const line = String(f.text).split("\n").find(s => s.trim()) || "";
+    prev.textContent = line.trim().slice(0, 110);
+  } else {
+    prev.textContent = count;
+  }
+  const caret = document.createElement("span");
+  caret.className = "cr-caret";
+  caret.setAttribute("aria-hidden", "true");
+  caret.textContent = "▸";
+  btn.appendChild(tag);
+  btn.appendChild(prev);
+  btn.appendChild(caret);
+}
+
+/* The ONE fold control, used by both surfaces: a history run of interim
+   assistant rows (the rows stay DIRECT children of #chatLog so the
+   older-page prepend ref keeps working) and the live turn's pre-tool
+   narration (no rows — its full text IS the body). */
+function chatFoldButton(text, rows) {
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "chat-fold";
+  btn.setAttribute("aria-expanded", "false");
+  btn.title = t("chat.foldToggle", "show or hide the folded rows");
+  btn._fold = { text: text || "", rows: rows || [] };
+  btn.addEventListener("click", () => {
+    const open = btn.getAttribute("aria-expanded") !== "true";
+    btn.setAttribute("aria-expanded", open ? "true" : "false");
+    btn._fold.rows.forEach(r => r.classList.toggle("is-folded", !open));
+    paintFold(btn);
+  });
+  paintFold(btn);
+  return btn;
+}
+
+function foldRepaint() {
+  document.querySelectorAll(".chat-fold").forEach(paintFold);
+}
+
+/* Live turn: everything the model narrated BEFORE its next tool call moves
+   out of the answer bubble into one quiet folded line above the tool line.
+   The `done` frame still replaces the bubble with the authoritative answer,
+   so nothing is lost and nothing is duplicated. Returns the new offset. */
+function chatReasonFold(bubble, acc, folded) {
+  const chunk = acc.slice(folded);
+  if (!chunk.trim()) return folded;
+  const log = document.getElementById("chatLog");
+  const row = bubble ? bubble.parentElement : null;
+  if (!log || !row || row.parentNode !== log) return folded;
+  log.insertBefore(chatFoldButton(chunk, []), row);
+  bubble.textContent = "";
+  return acc.length;
+}
+
+/* History: within every run of consecutive assistant rows, the LAST row
+   carrying text is the turn's answer — everything else (interim narration,
+   tool-only iterations, empty bubbles) folds into one line. The log's NEWEST
+   row is never folded: it can be the LIVE pending bubble mid-turn. */
+function foldHistoryRows() {
+  const log = document.getElementById("chatLog");
+  if (!log) return;
+  // idempotent: unwrap every previous fold, then re-group the whole log
+  log.querySelectorAll(".chat-fold").forEach(b => b.remove());
+  log.querySelectorAll(".chat-row.is-folded")
+    .forEach(r => r.classList.remove("is-folded"));
+  const kids = Array.prototype.slice.call(log.children);
+  const last = log.lastElementChild;
+  let i = 0;
+  while (i < kids.length) {
+    const k = kids[i];
+    if (!(k.classList && k.classList.contains("chat-row") &&
+          k.classList.contains("assistant"))) { i++; continue; }
+    let j = i;
+    while (j < kids.length && kids[j].classList &&
+           kids[j].classList.contains("chat-row") &&
+           kids[j].classList.contains("assistant")) j++;
+    const run = kids.slice(i, j);
+    i = j;
+    if (!run.length) continue;
+    const text = r => {
+      const b = r.querySelector(".chat-bubble");
+      return b ? b.textContent.trim() : "";
+    };
+    let keep = -1;
+    for (let n = run.length - 1; n >= 0; n--) {
+      if (text(run[n])) { keep = n; break; }
+    }
+    const anchor = keep >= 0 ? run[keep] : null;
+    const fold = run.filter(r => r !== anchor && r !== last);
+    if (!fold.length) continue;
+    let sample = "";
+    for (const r of fold) { const s = text(r); if (s) { sample = s; break; } }
+    const btn = chatFoldButton(sample, fold);
+    log.insertBefore(btn, fold[0]);
+    fold.forEach(r => r.classList.add("is-folded"));
+  }
+}
+
+/* ------------------------------------------ 2. Ctrl/Cmd+K palette -------- */
+var cmdkOpen = false, cmdkActive = 0, cmdkFiltered = [], cmdkReturnFocus = null;
+
+function cmdkPickModel(m) {
+  setView("chat", true);                 // the picker only lives in Chat
+  const sel = document.getElementById("chatModel");
+  if (!sel) return;
+  if (!Array.from(sel.options).some(o => o.value === m)) chatModelOptions();
+  sel.value = m;
+  sel.dispatchEvent(new Event("change"));
+}
+
+function cmdkItems() {
+  const items = [];
+  document.querySelectorAll(".nav-item[data-view]").forEach(b => {
+    // a nav item the region gate hid must not be offered — the jump would
+    // silently resolve to Overview and the palette would be lying
+    if (b.hidden || b.classList.contains("is-hidden")) return;
+    const lab = b.querySelector(".nav-label");
+    const label = ((lab && lab.textContent) || b.dataset.view || "").trim();
+    if (!label) return;
+    items.push({ g: "views", gk: "cmdk.groupViews", gl: "Views",
+                 label, hint: b.dataset.view,
+                 keys: "goto view " + b.dataset.view,
+                 run: () => setView(b.dataset.view, true) });
+  });
+  const mc = (settings && typeof settings === "object" && settings.mycore) || {};
+  (Array.isArray(mc.models) ? mc.models : []).forEach(m => {
+    const s = String(m);
+    if (!s) return;
+    items.push({ g: "models", gk: "cmdk.groupModels", gl: "Models",
+                 label: s, hint: "", keys: "model " + s,
+                 run: () => cmdkPickModel(s) });
+  });
+  const act = (label, keys, run) => items.push({
+    g: "actions", gk: "cmdk.groupActions", gl: "Actions",
+    label, hint: "", keys, run });
+  act(t("chat.clear", "NEW SESSION"), "new session clear transcript start",
+      () => { setView("chat", true); chatClear(); });
+  act(t("cmdk.focus", "focus the chat composer"),
+      "focus chat input composer textbox",
+      () => { setView("chat", true);
+              const i = document.getElementById("chatInput");
+              if (i) i.focus(); });
+  act(t("cmdk.upd", "check for updates"), "update version check upgrade",
+      () => { updateCheck(); });
+  act(t("cmdk.lang", "switch language"), "language lang english chinese",
+      () => { const b = document.getElementById("langBtn");
+              if (b) b.click(); });
+  return items;
+}
+
+/* Simple subsequence scorer: exact > prefix > substring > fuzzy, with a
+   bonus for word starts and a penalty for wide gaps. Zero keeps the
+   natural (grouped) order when the box is empty. */
+function cmdkScore(q, s) {
+  if (!q) return 0;
+  const hay = s.toLowerCase();
+  const needle = q.toLowerCase();
+  if (hay === needle) return 10000;
+  if (hay.startsWith(needle)) return 9000 - hay.length;
+  const at = hay.indexOf(needle);
+  if (at >= 0) return 8000 - at;
+  let i = 0, sc = 0, last = -1, gaps = 0;
+  for (let k = 0; k < needle.length; k++) {
+    const j = hay.indexOf(needle[k], i);
+    if (j < 0) return -1;
+    sc += (j === last + 1) ? 6 : 2;
+    if (j === 0 || " -_./·(".indexOf(hay[j - 1]) >= 0) sc += 5;
+    gaps += j - i;
+    last = j;
+    i = j + 1;
+  }
+  return Math.max(1, sc - gaps);
+}
+
+function cmdkPaint() {
+  const input = document.getElementById("cmdkInput");
+  const list = document.getElementById("cmdkList");
+  if (!input || !list) return;
+  const opts = Array.prototype.slice.call(
+    list.querySelectorAll('[role="option"]'));
+  if (!opts.length) {
+    cmdkActive = -1;
+    input.removeAttribute("aria-activedescendant");
+    return;
+  }
+  if (cmdkActive < 0 || cmdkActive >= opts.length) cmdkActive = 0;
+  opts.forEach((o, i) => {
+    const on = i === cmdkActive;
+    o.classList.toggle("is-on", on);
+    o.setAttribute("aria-selected", on ? "true" : "false");
+    if (on) {
+      input.setAttribute("aria-activedescendant", o.id);
+      const lr = list.getBoundingClientRect();
+      const or = o.getBoundingClientRect();
+      if (or.top < lr.top + 4) list.scrollTop -= (lr.top + 4 - or.top);
+      else if (or.bottom > lr.bottom - 4) list.scrollTop += (or.bottom - lr.bottom + 4);
+    }
+  });
+}
+
+function cmdkRender() {
+  const input = document.getElementById("cmdkInput");
+  const list = document.getElementById("cmdkList");
+  if (!input || !list) return;
+  const q = input.value.trim();
+  const rows = cmdkItems().map((it, i) => ({ it, i,
+      s: cmdkScore(q, it.label + " " + (it.hint || "") + " " + (it.keys || "")) }))
+    .filter(x => x.s >= 0)
+    .sort((a, b) => (b.s - a.s) || (a.i - b.i));
+  cmdkFiltered = rows.map(x => x.it);
+  list.textContent = "";
+  if (!cmdkFiltered.length) {
+    const li = document.createElement("li");
+    li.className = "cmdk-empty";
+    li.setAttribute("role", "presentation");
+    li.textContent = t("cmdk.none", "no match");
+    list.appendChild(li);
+    cmdkActive = -1;
+    input.removeAttribute("aria-activedescendant");
+    return;
+  }
+  let group = null, box = null;
+  cmdkFiltered.forEach((it, n) => {
+    if (it.g !== group) {
+      group = it.g;
+      const wrap = document.createElement("li");
+      wrap.setAttribute("role", "presentation");
+      const ul = document.createElement("ul");
+      ul.setAttribute("role", "group");
+      ul.setAttribute("aria-label", t(it.gk, it.gl));
+      const head = document.createElement("li");
+      head.className = "cmdk-grp";
+      head.setAttribute("role", "presentation");
+      head.textContent = t(it.gk, it.gl);
+      ul.appendChild(head);
+      wrap.appendChild(ul);
+      list.appendChild(wrap);
+      box = ul;
+    }
+    const li = document.createElement("li");
+    li.className = "cmdk-item";
+    li.id = "cmdk-opt-" + n;
+    li.setAttribute("role", "option");
+    li.dataset.group = it.g;
+    li.setAttribute("aria-selected", "false");
+    const lab = document.createElement("span");
+    lab.className = "cmdk-label";
+    lab.textContent = it.label;
+    li.appendChild(lab);
+    if (it.hint) {
+      const h = document.createElement("span");
+      h.className = "cmdk-hint";
+      h.textContent = it.hint;
+      li.appendChild(h);
+    }
+    li.addEventListener("click", () => cmdkRun(n));
+    box.appendChild(li);
+  });
+  cmdkActive = 0;
+  cmdkPaint();
+}
+
+function cmdkMove(d) {
+  const list = document.getElementById("cmdkList");
+  if (!list) return;
+  const n = list.querySelectorAll('[role="option"]').length;
+  if (!n) return;
+  cmdkActive = (cmdkActive + d + n) % n;
+  cmdkPaint();
+}
+
+function cmdkRun(i) {
+  const it = cmdkFiltered[i];
+  if (!it) return;
+  cmdkClose();                    // focus goes home FIRST, then the action
+  try { it.run(); } catch (e) { /* a broken action must never strand the UI */ }
+}
+
+function cmdkShow() {
+  if (cmdkOpen) return;
+  // never open behind a modal dialog (the top layer would cover it)
+  if (document.querySelector("dialog[open]")) return;
+  const layer = document.getElementById("cmdkLayer");
+  const input = document.getElementById("cmdkInput");
+  if (!layer || !input) return;
+  cmdkOpen = true;
+  cmdkReturnFocus = document.activeElement;
+  layer.hidden = false;
+  input.value = "";
+  input.setAttribute("aria-expanded", "true");
+  const btn = document.getElementById("cmdkBtn");
+  if (btn) btn.setAttribute("aria-expanded", "true");
+  cmdkRender();
+  input.focus();
+}
+
+function cmdkClose() {
+  if (!cmdkOpen) return;
+  cmdkOpen = false;
+  const layer = document.getElementById("cmdkLayer");
+  if (layer) layer.hidden = true;
+  const input = document.getElementById("cmdkInput");
+  if (input) input.setAttribute("aria-expanded", "false");
+  const btn = document.getElementById("cmdkBtn");
+  if (btn) btn.setAttribute("aria-expanded", "false");
+  const back = cmdkReturnFocus;
+  cmdkReturnFocus = null;
+  // Esc must land focus back on whatever opened it — never on <body>
+  if (back && typeof back.focus === "function" && document.contains(back)) {
+    try { back.focus(); } catch (e) { /* detached: fall through */ }
+    if (document.activeElement === back) return;
+  }
+  if (btn) btn.focus();
+}
+
+(function wireCmdk() {
+  const btn = document.getElementById("cmdkBtn");
+  const layer = document.getElementById("cmdkLayer");
+  const input = document.getElementById("cmdkInput");
+  const panel = layer ? layer.querySelector(".cmdk") : null;
+  if (btn) {
+    btn.setAttribute("aria-haspopup", "dialog");
+    btn.setAttribute("aria-expanded", "false");
+    btn.addEventListener("click", () => cmdkShow());
+  }
+  if (layer && input) {
+    // capture phase: one place owns Ctrl/Cmd+K and Esc while the palette is
+    // up, and stopping here keeps the palette's Esc from reaching the
+    // document Escape handler (which would mark the alert ticker dismissed)
+    document.addEventListener("keydown", e => {
+      if (e.isComposing) return;
+      if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey &&
+          String(e.key || "").toLowerCase() === "k") {
+        e.preventDefault();
+        if (cmdkOpen) cmdkClose(); else cmdkShow();
+        return;
+      }
+      if (e.key === "Escape" && cmdkOpen) {
+        e.preventDefault();
+        e.stopPropagation();
+        cmdkClose();
+      }
+    }, true);
+    input.addEventListener("input", () => cmdkRender());
+    input.addEventListener("keydown", e => {
+      if (e.key === "ArrowDown") { e.preventDefault(); cmdkMove(1); }
+      else if (e.key === "ArrowUp") { e.preventDefault(); cmdkMove(-1); }
+      else if (e.key === "Enter") { e.preventDefault(); cmdkRun(cmdkActive); }
+      else if (e.key === "Tab") {
+        // focus trap: the input is the only tabbable node in the layer
+        e.preventDefault();
+        input.focus();
+      }
+    });
+    layer.addEventListener("mousedown", e => {
+      if (e.target === layer) { e.preventDefault(); cmdkClose(); return; }
+      if (e.target !== input) { e.preventDefault(); input.focus(); }
+    });
+    if (panel) {
+      panel.addEventListener("click", e => {
+        if (e.target === panel) cmdkClose();
+      });
+    }
+  }
+})();
+
+/* --------------------------------- 4. spring bottom sheet (<=760px) ------ */
+(function wireSheetGrip() {
+  const grip = document.getElementById("memGrip");
+  const dlg = document.getElementById("memForgetDialog");
+  if (!grip || !dlg) return;
+  let startY = null, dy = 0;
+  const settle = () => {
+    dlg.classList.remove("is-dragging", "is-closing");
+    dlg.style.transform = "";
+  };
+  grip.addEventListener("pointerdown", e => {
+    if (!dlg.open) return;
+    startY = e.clientY;
+    dy = 0;
+    dlg.classList.add("is-dragging");   // kills the entrance spring mid-flight
+    try { grip.setPointerCapture(e.pointerId); } catch (err) { /* optional */ }
+    e.preventDefault();
+  });
+  grip.addEventListener("pointermove", e => {
+    if (startY === null) return;
+    dy = Math.max(0, e.clientY - startY);
+    dlg.style.transform = "translateY(" + dy + "px)";
+  });
+  const release = () => {
+    if (startY === null) return;
+    startY = null;
+    const far = dy > 80;               // past the threshold = let it go
+    dlg.classList.remove("is-dragging");
+    dlg.style.transform = "";
+    if (!far) return;                  // springs back via .mem-dialog's curve
+    dlg.classList.add("is-closing");
+    let ended = false;
+    const done = () => {
+      if (ended) return;
+      ended = true;
+      if (dlg.open) memForgetClose();  // the `close` event settles the styles
+      settle();
+    };
+    dlg.addEventListener("transitionend", done, { once: true });
+    setTimeout(done, 320);             // reduced motion: no transition fires
+  };
+  grip.addEventListener("pointerup", release);
+  grip.addEventListener("pointercancel", release);
+  dlg.addEventListener("close", settle);
+})();
 
 wireIntentRoute();
 wireBackup();

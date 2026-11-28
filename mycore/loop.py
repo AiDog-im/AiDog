@@ -127,7 +127,8 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
              on_delta: Callable[[str], None] | None = None,
              budget_tokens: int | None = None,
              should_stop: Callable[[], bool] | None = None,
-             run_deadline: float | None = None) -> TurnResult:
+             run_deadline: float | None = None,
+             steer: Callable[[], list] | None = None) -> TurnResult:
     """Drive one user turn to completion. Mutates `messages` in place (the
     caller owns session state); never raises for model/tool failures.
 
@@ -152,6 +153,17 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
     stop="aborted" and an honest assistant note (never a fake failure):
     "[mycore: turn stopped by the operator (STOP) ...]". None (default)
     keeps today's behavior byte-for-byte.
+    `steer` (batch 4-2, queueing steering), when set, is called ONCE per
+    iteration at the top — right after the STOP/deadline checks and before
+    the model call — and returns the follow-up instructions that were
+    queued while this run worked (each a plain string). They are appended
+    as user messages, so the model reads them at its NEXT call: never in
+    the middle of a tool-call exchange (the tool results above stay
+    contiguous) and never into an aborted run. A callable that raises, or
+    that returns nothing (empty / suppressed / ledger unavailable / paused),
+    injects NOTHING — fail-closed is the queue's contract, not this loop's.
+    None (default) keeps today's behavior byte-for-byte: no call, no
+    message, no event.
     """
     # L3 (owner2026-11-07): turn wall-clock ceiling — prior art's separate
     # run deadline. None -> resolve from settings (default1800s,0 = off);
@@ -219,6 +231,21 @@ def run_turn(messages: list[dict], chat: ChatFn, registry: ToolRegistry,
                     f"{max(0, it - 1)} completed iteration(s)]")
             messages.append({"role": "assistant", "content": note})
             return stop("aborted", note)
+        # Queueing steering (batch 4-2): merge what was queued while this
+        # run worked. AFTER the STOP/deadline checks on purpose — an
+        # aborted run takes no new instruction — and BEFORE measure/compact
+        # so the fold budget already counts the merged rows.
+        if steer is not None:
+            try:
+                queued = steer()
+            except Exception:                  # noqa: BLE001 — a broken queue
+                queued = None                  # never breaks the turn
+            merged = [q for q in (queued or [])
+                      if isinstance(q, str) and q.strip()]
+            if merged:
+                for q in merged:
+                    messages.append({"role": "user", "content": q})
+                emit("steer", {"count": len(merged)})
         chars_before = measure(messages)
         if budget_chars:
             eff_budget = budget_chars

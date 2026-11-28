@@ -48,6 +48,7 @@ jobs:
         run: |
           python3 tests/deploy_site_cf.py
           python3 tests/free_tier_usage.py
+          python3 tests/aidog_start_version.py
           node tests/bridge_redirect.mjs
 # Publish READY remains an operator-local gate: it verifies vault remote,
 # pre-push hooks and sanitized export structure absent in a fresh CI checkout.

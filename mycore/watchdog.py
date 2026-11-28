@@ -41,7 +41,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from .tg import TgClient, TgError
+from .tg import LIVE_BOT_ENV, POLL_BOT_ENV, TgClient, TgError
 from .envslots import wd_chat_target  # noqa: E402  (slot fallback, car 1.6)
 
 DEFAULT_INTERVAL = 60
@@ -583,7 +583,17 @@ def main(argv: list[str] | None = None) -> int:
         cfg.dry_run = False
 
     state_path = args.state or (args.config + ".state.json")
-    tg = TgClient() if os.environ.get("TELEGRAM_BOT_TOKEN") else None
+    # Delivery token: send-only, so no getUpdates conflict with the chat
+    # service. Prefer the OWNER-FACING bot (MYCORE_TG_TOKEN, the one the
+    # allowlist and the poll loop use) — post-swap the live gateway is
+    # retired and TELEGRAM_BOT_TOKEN may be absent, which used to leave the
+    # watchdog silently log-only even with a chat id set. Env wins, then the
+    # own-line secrets slot, then the legacy gateway token as a fallback.
+    from .envslots import slot_value
+    token = (os.environ.get(POLL_BOT_ENV, "").strip()
+             or slot_value(POLL_BOT_ENV)
+             or os.environ.get(LIVE_BOT_ENV, "").strip())
+    tg = TgClient(token=token) if token else None
     wd = Watchdog(cfg, state_path, tg=tg)
 
     if args.once:

@@ -426,6 +426,26 @@ body {
   animation: blink 1s steps(2) infinite; }
 .chat-empty { color: var(--muted); font-family: var(--mono); font-size: 13px;
   font-style: italic; }
+/* batch 4 item 4: the older-page control sticks to the top of the log (the
+   log is the scroll container), and the skeleton holds the layout while a
+   page is in flight — plain CSS, no framework, no virtual list. */
+.chat-more { position: sticky; top: 0; z-index: 2; align-self: flex-start;
+  padding: 3px 10px; font-family: var(--mono); font-size: 11.5px;
+  color: var(--muted); background: var(--bg2); border: 1px solid var(--line);
+  border-radius: 999px; cursor: pointer; }
+.chat-more:hover { color: var(--text); border-color: var(--blue); }
+.chat-more:disabled { cursor: progress; opacity: .8; }
+.chat-more[hidden] { display: none; }
+.chat-skeleton { display: flex; flex-direction: column; gap: 8px; }
+.chat-skel-row { display: flex; }
+.chat-skel-row.user { justify-content: flex-end; }
+.chat-skel-bubble { width: min(62%, 460px); height: 34px; border-radius: 12px;
+  background: linear-gradient(90deg, var(--bg2) 25%, var(--line) 50%,
+  var(--bg2) 75%); background-size: 200% 100%;
+  animation: chat-skel 1.2s ease-in-out infinite; }
+.chat-skel-row.user .chat-skel-bubble { width: min(46%, 320px); }
+@keyframes chat-skel { from { background-position: 200% 0; }
+  to { background-position: -200% 0; } }
 .chat-row { display: flex; opacity: 0; animation: rise .25s ease forwards; }
 .chat-row.user { justify-content: flex-end; }
 .chat-bubble { max-width: min(82%, 680px); padding: 9px 12px; font-size: 13.5px;
@@ -2580,6 +2600,20 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
   margin-top: 11px;
 }
 .mem-forget-hint { margin-top: 0; font-size: 12px; }
+/* --- revision history (batch 4-3): hashes and times, never the text --- */
+.mem-entry-hist {
+  margin-top: 8px; border-top: 1px dashed var(--rule); padding-top: 6px;
+  font-size: 12px;
+}
+.mem-entry-hist > summary { cursor: pointer; color: var(--blue-ink);
+  font-family: var(--mono); letter-spacing: .04em; }
+.mem-hist-list { margin-top: 5px; }
+.mem-hist-row {
+  font-family: var(--mono); font-size: 11.5px; color: var(--muted);
+  overflow-wrap: anywhere; padding: 1px 0;
+}
+.mem-hist-row code { font-family: var(--mono); color: var(--blue-ink);
+  background: var(--blue-wash); padding: 0 3px; }
 .mem-status { margin-top: 10px; font-size: 13px; color: var(--blue-ink);
   overflow-wrap: anywhere; }
 .mem-status.is-err { color: var(--red); }
@@ -2660,3 +2694,188 @@ a.btn.ext-link { display: inline-flex; align-items: center; text-decoration: non
 }
 .sess-hit .mem-src-id { font-size: 11px; }
 .sess-hits-more { flex-basis: 100%; margin: 0; }
+
+/* --------------------------------------- cross-session recall (batch 4) --
+   mycore.recall's message-level hits for the SAME query: one bounded block
+   under the session rows, same paper/ink language. Read-only — it carries
+   no FORGET action of its own, so the id/label geometry above stays
+   untouched. */
+.sess-recall {
+  min-width: 0; margin-top: 9px; padding-top: 7px;
+  border-top: 1px solid var(--line);
+}
+.sess-recall-row {
+  min-width: 0; margin-top: 7px; padding: 7px 9px;
+  border: 1px solid var(--line); background: #fff;
+}
+
+/* ============================ batch 4-5: front-end feel (2026-11-28) ====
+   Four interaction-density surfaces on the EXISTING paper/ink language —
+   no skin change, no framework: (1) the amber write-target banner, (2) the
+   Ctrl/Cmd+K command palette, (3) the compact tool timeline + one-line
+   folded reasoning in Chat, (4) the shared confirm dialog as a spring
+   bottom sheet on phones. Contrast measured with the WCAG relative-
+   luminance rule (tmp/contrast_audit_console.js): navy #001633 on the
+   amber wash #f9ebe5 = 15.5:1, amber ink #a05a04 on #fff = 5.3:1 — the
+   warm accent #e98667 is DECORATIVE ONLY (edge/fill), never text. */
+
+/* ------------------------------------------------ 1. write banner ----- */
+.write-banner {
+  position: sticky; top: var(--topbar-h, 56px); z-index: 15;
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin: -24px -24px 14px;            /* bleed into .main's 24px padding */
+  padding: 9px 24px;
+  background: #f9ebe5;                 /* #e98667 @14% over #fcfcfa */
+  border-bottom: 1px solid #e98667;
+  color: #001633; font-size: 13px;
+}
+.write-banner[hidden] { display: none; }
+.wb-tag {
+  flex: none; font-family: var(--mono); font-size: 11px;
+  letter-spacing: .12em; color: #a05a04;   /* 5.3:1 on its #fff chip */
+  background: #fff; border: 1px solid #e98667;
+  border-radius: 999px; padding: 2px 10px; white-space: nowrap;
+}
+.wb-text { min-width: 0; overflow-wrap: anywhere; }
+.wb-profile { font-family: var(--mono); font-weight: 700; }
+/* .main drops to 16/14px padding below 1000px and the topbar stops being
+   sticky there, so the bleed and the sticky offset follow it exactly —
+   a -24px bleed at 320px would push the strip past the viewport edge. */
+@media (max-width: 1000px) {
+  .write-banner { top: 0; margin: -16px -14px 12px; padding: 8px 14px; }
+}
+
+/* -------------------------------------------- 2. command palette ------- */
+.cmdk-layer {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(0, 22, 51, .42);
+  display: flex; align-items: flex-start; justify-content: center;
+  padding: 12vh 16px 16px;
+}
+.cmdk-layer[hidden] { display: none; }
+.cmdk {
+  width: min(560px, 100%); max-height: 72vh;
+  display: flex; flex-direction: column; min-height: 0;
+  background: #fff; border: 1px solid var(--ink); border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 22, 51, .28); overflow: hidden;
+}
+.cmdk-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 10px;
+  padding: 10px 14px; border-bottom: 1px solid var(--line-solid);
+}
+.cmdk-title { font-family: var(--serif); font-size: 15px; color: var(--ink); }
+.cmdk-kbd {
+  font-family: var(--mono); font-size: 11px; color: var(--muted);
+  border: 1px solid var(--line); border-radius: 6px;
+  padding: 1px 7px; background: #fff;
+}
+.cmdk-input {
+  border: 0; border-bottom: 1px solid var(--line-solid);
+  padding: 12px 14px; width: 100%; background: #fff;
+  color: var(--text); font-family: var(--font); font-size: 15px;
+}
+.cmdk-input:focus {
+  outline: none; border-bottom-color: var(--blue);
+  box-shadow: inset 0 -2px 0 var(--blue);
+}
+.cmdk-list { list-style: none; margin: 0; padding: 6px; overflow-y: auto;
+  flex: 1 1 auto; min-height: 0; }
+.cmdk-list ul { list-style: none; margin: 0; padding: 0; }
+.cmdk-grp {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .12em;
+  text-transform: uppercase; color: var(--muted);
+  padding: 8px 10px 3px;
+}
+.cmdk-item {
+  display: flex; gap: 10px; align-items: baseline;
+  padding: 7px 10px; border-radius: 8px; cursor: pointer;
+  font-size: 13.5px; color: var(--text);
+}
+.cmdk-item.is-on { background: var(--blue-wash); color: var(--navy); }
+.cmdk-item .cmdk-label { min-width: 0; overflow-wrap: anywhere; }
+.cmdk-item .cmdk-hint {
+  margin-left: auto; flex: none; font-family: var(--mono);
+  font-size: 11.5px; color: var(--muted); white-space: nowrap;
+}
+.cmdk-empty { padding: 14px 12px; color: var(--muted); font-size: 13px; }
+.cmdk-foot {
+  padding: 8px 14px; border-top: 1px solid var(--line-solid);
+  background: var(--bg2); font-family: var(--mono);
+  font-size: 11.5px; color: var(--muted); letter-spacing: .04em;
+}
+
+/* ------------------------------------ 3. tool timeline + reasoning ----- */
+/* one compact line per turn instead of one row per SSE frame */
+.chat-tools-row.chat-timeline {
+  display: flex; flex-wrap: wrap; gap: 2px 14px; align-items: baseline;
+  max-width: min(92%, 760px);
+}
+.chat-timeline .tl-seg { white-space: nowrap; }
+.chat-timeline .tl-n { color: var(--muted); }
+.chat-timeline .tl-ok { color: var(--ok); }
+.chat-timeline .tl-bad { color: var(--red); }
+
+/* one quiet line, expandable — never a big box. Both surfaces (a history
+   run of interim assistant rows, and the live turn's pre-tool narration)
+   use the SAME button: the folded rows stay DIRECT children of #chatLog so
+   the older-page prepend ref keeps working, and the live line simply has no
+   rows to unhide — its full text IS the body. */
+.chat-fold {
+  display: block; max-width: min(92%, 760px); width: 100%;
+  margin: 1px 0; padding: 2px 0 2px 8px;
+  background: none; border: 0; border-left: 2px solid var(--line-solid);
+  font: inherit; font-size: 13px; line-height: 1.5;
+  color: var(--muted); text-align: left; cursor: pointer;
+}
+.chat-fold:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.cr-tag {
+  font-family: var(--mono); font-size: 11px; letter-spacing: .1em;
+  text-transform: uppercase; color: var(--blue-ink); margin-right: 6px;
+}
+.cr-prev {
+  display: inline-block; max-width: calc(100% - 40px);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  vertical-align: bottom;
+}
+.cr-prev.is-full {
+  display: block; max-width: 100%; white-space: pre-wrap;
+  overflow: visible; text-overflow: clip; color: var(--text);
+  margin-top: 4px;
+}
+.cr-caret {
+  display: inline-block; margin-left: 6px; color: var(--blue-ink);
+  transition: transform .15s ease;
+}
+.chat-fold[aria-expanded="true"] .cr-caret { transform: rotate(90deg); }
+.chat-row.is-folded { display: none; }
+
+/* ------------------------- 4. spring bottom sheet (mobile, <=760px) ---- */
+.mem-grip { display: none; }
+@media (max-width: 760px) {
+  .mem-grip {
+    display: block; width: 44px; height: 4px; border-radius: 999px;
+    background: var(--line); margin: 0 auto 12px;
+    touch-action: none; cursor: grab;
+  }
+  .mem-dialog {
+    inset: auto 0 0 0; margin: 0;
+    width: 100%; max-width: 100%;
+    border-radius: 16px 16px 0 0;
+    max-height: 88vh;
+    padding-bottom: calc(18px + env(safe-area-inset-bottom, 0px));
+    box-shadow: 0 -14px 40px rgba(0, 22, 51, .28);
+    transition: transform .42s cubic-bezier(.34, 1.4, .5, 1);
+  }
+  .mem-dialog[open] { animation: sheet-spring .46s cubic-bezier(.34, 1.45, .5, 1); }
+  .mem-dialog.is-dragging { animation: none !important; transition: none; }
+  .mem-dialog.is-closing {
+    animation: none !important;
+    transform: translateY(100%);
+    transition: transform .22s ease-in;
+  }
+}
+@keyframes sheet-spring {
+  0% { transform: translateY(100%); }
+  62% { transform: translateY(-3.5%); }
+  100% { transform: translateY(0); }
+}

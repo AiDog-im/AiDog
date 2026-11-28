@@ -757,8 +757,9 @@ def main() -> int:
               and LEGACY_CONSOLE_ANSWER in raw_hist1
               and LEGACY_CONSOLE_TURN in raw_hist1, raw_hist1[:240])
         check("L5 the console history keeps its shape and its counts",
-              set(hist1) == {"messages", "count", "context"}
+              set(hist1) == {"messages", "count", "context", "has_more"}
               and hist1.get("count") == 2
+              and isinstance(hist1.get("has_more"), bool)
               and all(set(m) == {"id", "role", "content"}
                       for m in hist1.get("messages") or []),
               str(sorted(hist1))[:160])

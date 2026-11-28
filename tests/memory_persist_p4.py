@@ -71,10 +71,23 @@ def run(script: Path, args: list[str], extra_env: dict | None = None) -> tuple[i
 
 
 def make_fake_repo(root: Path) -> Path:
-    """Throwaway deploy/ trio under /tmp so imports write only inside /tmp."""
+    """Throwaway deploy/ trio under /tmp so imports write only inside /tmp.
+
+    The kernel pair (mycore/memforget.py + lib/profile_paths.py) ships with
+    every real install, so the fixture ships it too — otherwise
+    `memforget_module()` returns None and the fail-closed import gate (P1.4,
+    audit finding #4) withholds the restore for a reason a real install never
+    has. The suppression LEDGER still lives in the temporary state root, so
+    an absent ledger stays the normal empty set.
+    """
     (root / "deploy").mkdir(parents=True)
     for name in ("aidog_persist.py", "aidog_memory.py", "check_publish.py"):
         shutil.copy2(REPO / "deploy" / name, root / "deploy" / name)
+    (root / "mycore").mkdir(exist_ok=True)
+    (root / "mycore" / "__init__.py").write_text("", encoding="utf-8")
+    shutil.copy2(REPO / "mycore" / "memforget.py", root / "mycore" / "memforget.py")
+    (root / "lib").mkdir(exist_ok=True)
+    shutil.copy2(REPO / "lib" / "profile_paths.py", root / "lib" / "profile_paths.py")
     return root / "deploy" / "aidog_persist.py"
 
 

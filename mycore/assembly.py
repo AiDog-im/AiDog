@@ -59,13 +59,64 @@ CONTEXT_SETTINGS_KEY = "context_dirs"        # settings mycore block (same form)
 _AUTO = object()
 
 
-def _read_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
-    """Read one body file with a size cap; None = missing/unreadable."""
+# ------------------------------------- batch 4 item 4: warm body reads ---
+# Every build_system_stack() opens the body layer ~9 times (constitution,
+# memory slots, learned slot, capability map, project context files).
+# Measured on this machine (tests/perf_three_pack.py): those open+read+close
+# calls cost ~15ms and are the LARGEST synchronous cost on the first turn's
+# path — bigger than the session read (3ms at N=2000) and the router glue.
+# Cache ONLY the raw text, keyed by (mtime_ns, size):
+#   * a body file edit moves mtime_ns/size -> the next build re-reads it;
+#   * a profile flip resolves different paths -> different keys (the cache
+#     can never hand one profile's body to another);
+#   * the SUPPRESSION filter and the size cap still run on EVERY call, so a
+#     new tombstone takes effect on the very next build (D31/D34) — only the
+#     bytes are cached, never the filtered result;
+#   * an unreadable/absent file is never cached (a file may appear later).
+READ_CACHE_MAX = 64
+_read_cache: dict[str, tuple[int, int, str]] = {}
+
+
+def clear_read_cache() -> None:
+    """Drop the cached body bytes (test seam + the restore path)."""
+    _read_cache.clear()
+
+
+def _cached_text(path: Path) -> str | None:
+    """Raw text of `path` (None = missing/unreadable), read at most once per
+    (mtime_ns, size). Stat BEFORE and AFTER the read so a file rewritten
+    mid-read is returned fresh and never cached under a stale key."""
+    try:
+        before = path.stat()
+    except OSError:
+        return None
+    key = str(path)
+    hit = _read_cache.get(key)
+    if hit is not None and hit[0] == before.st_mtime_ns \
+            and hit[1] == before.st_size:
+        return hit[2]
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    if not text.strip():
+    try:
+        after = path.stat()
+    except OSError:
+        return text
+    if (after.st_mtime_ns, after.st_size) != (before.st_mtime_ns,
+                                              before.st_size):
+        return text                      # changed under us: serve, don't cache
+    if len(_read_cache) >= READ_CACHE_MAX:
+        _read_cache.clear()              # tiny working set; drop rather than LRU
+    _read_cache[key] = (after.st_mtime_ns, after.st_size, text)
+    return text
+
+
+def _read_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
+    """Read one body file with a size cap; None = missing/unreadable.
+    Bytes come from the warm read cache; the cap is applied per call."""
+    text = _cached_text(path)
+    if text is None or not text.strip():
         return None
     return text if len(text) <= cap else text[:cap] + f"\n... [truncated at {cap} chars]"
 
@@ -83,12 +134,13 @@ def _read_memory_slot(path: Path, cap: int = MAX_SLOT_CHARS) -> str | None:
         one-line notice.
 
     With no suppression recorded the result is byte-identical to
-    _read_slot() — the normal state before anything is forgotten."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    if not text.strip():
+    _read_slot() — the normal state before anything is forgotten.
+
+    The CACHED bytes are the RAW file only: filter_slot() runs here on every
+    call, so a tombstone written a millisecond ago still silences this slot
+    on the very next build (the read cache never stores a filtered result)."""
+    text = _cached_text(path)
+    if text is None or not text.strip():
         return None
     try:
         text = memforget.filter_slot(path, text)
@@ -425,3 +477,42 @@ def stack_digest(stack: list[dict]) -> str:
     (lets two runs prove they used the same body layer without embedding it)."""
     joined = "\n".join(str(m.get("content", "")) for m in stack)
     return hashlib.sha256(joined.encode("utf-8")).hexdigest()[:16]
+
+
+def warm_startup(session_path: Path | None = None) -> str:
+    """Boot warm-up (batch 4 item 1) — the body layer read ONCE, off the
+    first turn's critical path.
+
+    Callers start this on a DAEMON thread at process start (console main,
+    chat service run): a slow disk can therefore never delay boot, and a
+    turn that arrives while it still runs simply does its own reads — there
+    is nothing to wait on. What it primes:
+
+      * the body-layer read cache (constitution/memory/learned/capability/
+        project context) — the ~15ms of open+read+close that dominated the
+        measured first-turn path;
+      * the suppression ledger snapshot (memforget's fingerprint cache), so
+        the first turn's visibility filter opens the ledger once;
+      * the transcript `session_path`, when given, so the console's first
+        history read can take its bounded path instead of a full parse.
+
+    It NEVER writes: no settings, no ledger row, no session line — a warm
+    cache is a performance artefact only, and every read path still applies
+    suppression on its own. Returns "" or the exception class name; a
+    failure here is honest and silent because the first turn re-derives
+    everything itself."""
+    from mycore import cli          # deferred: cli imports this module
+    try:
+        build_system_stack(
+            context_dirs=resolve_context_dirs(),
+            user_rules=resolve_user_rules(),
+            capability_path=resolve_capability_path(),
+            runtime_facts=cli.resolve_runtime_facts(
+                cli.resolve_model_config().model))
+        memforget.load_set()
+        if session_path is not None:
+            from mycore.session import Session
+            Session(session_path).load()
+        return ""
+    except Exception as e:  # noqa: BLE001 — warm-up must never break boot
+        return type(e).__name__

@@ -26,6 +26,83 @@ from mycore import memforget   # the suppression ledger (stage 6, D30-D35)
 
 MSG_KEYS = ("role", "content", "name", "tool_calls", "tool_call_id", "ts")
 
+# ------------------------------------- batch 4 item 4: the page anchor ----
+# The console history face serves a PAGE of the transcript (newest first,
+# absolute ids) instead of the whole file. An id is an ordinal over load()'s
+# message rows, so a backward window alone cannot know the TOTAL row count a
+# page's ids are measured from — that count is kept as an in-process ANCHOR:
+#
+#     anchor[<abs path>] = (fingerprint, n)
+#     fingerprint = (st_dev, st_ino, st_size, st_mtime_ns)
+#
+# Rules (fail-closed by construction, no new files anywhere):
+#   * the anchor is honoured ONLY while the file's fingerprint matches
+#     exactly. An append, a rewind/fork/resume (os.replace -> new inode), a
+#     prune or a hand edit moves it, and the next page falls back to the full
+#     parse that WAS the whole read path before this car (correct, slower);
+#   * n is only ever recorded by a full parse of that very fingerprint, or
+#     by a writer that saw a valid anchor BEFORE its own append (it then
+#     knows the exact new count) — otherwise the anchor is dropped;
+#   * a page scan that reaches the start of the file recounts every row and
+#     must land on n; any disagreement drops the anchor and the page is
+#     re-served from a fresh full parse — never from a wrong number;
+#   * writers and readers share the single-writer-per-transcript convention
+#     the console's `done` frame already depends on (its `base_len + i` ids
+#     are computed the same way); a SECOND process appending to the same
+#     file changes the fingerprint and forces a full parse.
+ANCHOR_MAX = 16
+_anchor: dict[str, tuple[tuple[int, int, int, int], int]] = {}
+
+
+def _fingerprint(path: str | Path) -> tuple[int, int, int, int] | None:
+    """(dev, ino, size, mtime_ns) of `path`, or None when it is not a file
+    we can read (missing, unreadable)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    return (st.st_dev, st.st_ino, st.st_size, st.st_mtime_ns)
+
+
+def _anchor_get(path: str | Path, fp: tuple | None = None) -> int | None:
+    """The row count `path` had at its CURRENT fingerprint; None = unknown
+    (every caller then falls back to a full parse). A stale entry is dropped
+    on sight, so the map never outlives the file it describes."""
+    key = str(path)
+    hit = _anchor.get(key)
+    if hit is None:
+        return None
+    if fp is None:
+        fp = _fingerprint(path)
+    if fp is None or hit[0] != fp:
+        _anchor.pop(key, None)
+        return None
+    return hit[1]
+
+
+def _anchor_set(path: str | Path, fp: tuple, n: int) -> None:
+    if len(_anchor) >= ANCHOR_MAX:
+        _anchor.clear()                     # tiny working set, drop rather than LRU
+    _anchor[str(path)] = (fp, int(n))
+
+
+def _anchor_drop(path: str | Path) -> None:
+    _anchor.pop(str(path), None)
+
+
+def _anchor_after_append(path: str | Path, pre_fp: tuple | None,
+                         pre_n: int | None, added: int) -> None:
+    """Re-anchor after WE appended `added` rows. The new count is only
+    trustworthy when the anchor was valid before the write (then n + added
+    is exact); any other history means: drop it and let the next read pay
+    the full parse."""
+    fp = _fingerprint(path)
+    if fp is None or pre_fp is None or pre_n is None or added < 0:
+        _anchor_drop(path)
+        return
+    _anchor_set(path, fp, pre_n + added)
+
+
 
 class Session:
     def __init__(self, path: str | Path) -> None:
@@ -41,6 +118,9 @@ class Session:
         doc = {"meta": {"created": time.time(), "format": 1,
                         **({"model": meta["model"]} if meta and meta.get("model") else {})}}
         s.path.write_text(json.dumps(doc, ensure_ascii=False) + "\n", encoding="utf-8")
+        fp = _fingerprint(s.path)          # a fresh file holds 0 message rows
+        if fp is not None:
+            _anchor_set(s.path, fp, 0)
         return s
 
     def append(self, message: dict) -> None:
@@ -55,10 +135,13 @@ class Session:
         line = {k: message[k] for k in MSG_KEYS if k in message}
         line.setdefault("ts", time.time())
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        pre_fp = _fingerprint(self.path)
+        pre_n = _anchor_get(self.path, pre_fp)
         self._ensure_line_start()
         with open(self.path, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(line, ensure_ascii=False) + "\n")
             fh.flush()
+        _anchor_after_append(self.path, pre_fp, pre_n, 1)
 
     def _ensure_line_start(self) -> None:
         """Terminate a partial (newline-less) tail line left by a crash."""
@@ -78,7 +161,10 @@ class Session:
         if not messages:
             return
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        pre_fp = _fingerprint(self.path)
+        pre_n = _anchor_get(self.path, pre_fp)
         self._ensure_line_start()
+        added = 0
         with open(self.path, "a", encoding="utf-8") as fh:
             for m in messages:
                 if not isinstance(m, dict) or not m.get("role"):
@@ -86,14 +172,21 @@ class Session:
                 line = {k: m[k] for k in MSG_KEYS if k in m}
                 line.setdefault("ts", time.time())
                 fh.write(json.dumps(line, ensure_ascii=False) + "\n")
+                added += 1
             fh.flush()
+        _anchor_after_append(self.path, pre_fp, pre_n, added)
 
     # ------------------------------------------------------------- read ----
     def load(self) -> list[dict]:
-        """All messages (meta line dropped). Corrupt lines skipped + counted."""
+        """All messages (meta line dropped). Corrupt lines skipped + counted.
+
+        A load is also an ANCHOR write (batch 4 item 4): when the file's
+        fingerprint is stable across the read, its exact row count is what a
+        later bounded page read starts from."""
         self.corrupt = 0
         if not self.path.is_file():
             return []
+        fp0 = _fingerprint(self.path)
         out: list[dict] = []
         for raw in self.path.read_text(encoding="utf-8", errors="replace").splitlines():
             if not raw.strip():
@@ -112,6 +205,8 @@ class Session:
                 self.corrupt += 1
                 continue
             out.append({k: doc[k] for k in MSG_KEYS if k in doc})
+        if fp0 is not None and _fingerprint(self.path) == fp0:
+            _anchor_set(self.path, fp0, len(out))
         return out
 
     def meta(self) -> dict:
@@ -130,6 +225,156 @@ class Session:
             return self.path.stat().st_size
         except OSError:
             return 0
+
+
+# ------------------------------------- batch 4 item 4: bounded page read --
+READ_PAGE_MAX = 500            # one HTTP page, hard bound (abuse/budget cap)
+READ_PAGE_CHUNK = 1 << 16      # bytes read per backward step
+
+
+def _iter_rows_backward(fh, size: int):
+    """Yield the raw lines of an open binary file from the LAST line to the
+    first, in READ_PAGE_CHUNK steps — a page never holds the transcript in
+    memory and never reads bytes it has already passed. The file is read up
+    to `size` only, so a file that grows mid-scan cannot leak into the page.
+    Blank lines are yielded as b"" and skipped by the caller (they consume
+    no id, exactly like Session.load)."""
+    pos = size
+    pending = b""                # tail read so far that starts mid-line
+    while pos > 0:
+        take = min(READ_PAGE_CHUNK, pos)
+        pos -= take
+        fh.seek(pos)
+        buf = fh.read(take) + pending
+        if pos > 0:
+            nl = buf.find(b"\n")
+            if nl < 0:
+                pending = buf    # still no line start: read further back
+                continue
+            # buf[:nl+1] completes the line that started before `pos`; what
+            # follows is line-aligned (it starts right after a newline).
+            rest, first = buf[nl + 1:], buf[:nl + 1]
+            pending = b""
+            for raw in reversed(rest.split(b"\n")):
+                yield raw
+            yield first[:-1] if first.endswith(b"\n") else first
+            continue
+        pending = b""
+        for raw in reversed(buf.split(b"\n")):
+            yield raw
+
+
+def _page_from_full(path: str | Path, limit: int, before: int | None,
+                    keep) -> dict:
+    """The honest fallback: parse the whole file (today's read path), then
+    page it in memory. Also primes the anchor for the next call."""
+    rows = Session(path).load()
+    picked: list[tuple[int, dict]] = []
+    for i, row in enumerate(rows):
+        if before is not None and i >= before:
+            break
+        if keep is None or keep(row):
+            picked.append((i, row))
+    has_more = len(picked) > limit
+    if has_more:
+        picked = picked[-limit:]
+    return {"messages": picked, "count": len(picked), "has_more": has_more}
+
+
+def _page_from_anchor(path: str | Path, fp: tuple, n: int, limit: int,
+                      before: int | None, keep) -> dict | None:
+    """The bounded path: walk the file BACKWARD from its end, parsing only
+    the rows a page needs, and derive each row's absolute id from the
+    anchored total (`id = n - 1 - rows after it`).
+
+    Returns None whenever the anchor and the file disagree (more rows than
+    `n`, a count that does not land on `n` at byte 0, a fingerprint that
+    moved during the read): the caller then drops the anchor and serves the
+    page from a full parse — never from a number it cannot prove."""
+    out: list[tuple[int, dict]] = []
+    after = 0
+    has_more = False
+    try:
+        with open(path, "rb") as fh:
+            if _fingerprint(path) != fp:
+                return None
+            for raw in _iter_rows_backward(fh, fp[2]):
+                if not raw.strip():
+                    continue
+                try:
+                    doc = json.loads(raw.decode("utf-8", "replace"))
+                except ValueError:
+                    continue          # corrupt row: consumes no id (as load)
+                if not isinstance(doc, dict):
+                    continue
+                if "meta" in doc and "role" not in doc:
+                    continue                              # header line
+                if not doc.get("role"):
+                    continue
+                if after >= n:
+                    return None       # more rows than the anchor accounted for
+                mid = n - 1 - after
+                after += 1
+                if before is not None and mid >= before:
+                    continue          # outside this page (still counted above)
+                row = {k: doc[k] for k in MSG_KEYS if k in doc}
+                if keep is not None and not keep(row):
+                    continue
+                out.append((mid, row))
+                if len(out) > limit:
+                    has_more = True   # one row past the page proves it exists
+                    break
+            else:
+                if after != n:
+                    return None       # the whole file disagrees with n
+            if _fingerprint(path) != fp:
+                return None           # rewritten while we read it
+    except OSError:
+        return None
+    if has_more:
+        out = out[:limit]
+    return {"messages": list(reversed(out)), "count": len(out),
+            "has_more": has_more}
+
+
+def read_page(path: str | Path, limit: int, before: int | None = None,
+              keep=None) -> dict:
+    """The NEWEST `limit` message rows of `path` that pass `keep`, in
+    ASCENDING absolute-id order — the bounded read behind the console's
+    paginated history.
+
+    `before` (exclusive) pages backwards: only rows with id < before are
+    returned, so the client walks the transcript oldest-ward without ever
+    re-reading what it already has. `keep(row)` decides membership (roles,
+    suppression) and runs on THIS read only — a row it rejects still consumes
+    its id, which is why ids stay the file's own indices (rewind/fork
+    handles never move).
+
+    Returns {"messages": [(id, row)], "count", "has_more"}: `has_more` is
+    exact — True only when a row the page rejected really exists further
+    back, False when the scan reached byte 0.
+
+    Raises ValueError for an unusable limit/before (the HTTP layer answers
+    400). The ledger is NOT consulted here: suppression is the CALLER's
+    `keep`, and a caller that cannot read the ledger must not call this.
+    """
+    if not isinstance(limit, int) or isinstance(limit, bool) \
+            or not 1 <= limit <= READ_PAGE_MAX:
+        raise ValueError(f"limit must be an integer in 1..{READ_PAGE_MAX}")
+    if before is not None and (not isinstance(before, int)
+                               or isinstance(before, bool) or before < 0):
+        raise ValueError("before must be a non-negative integer")
+    if before == 0:
+        return {"messages": [], "count": 0, "has_more": False}
+    path = Path(path)
+    fp = _fingerprint(path)
+    n = _anchor_get(path, fp) if fp is not None else None
+    if n is not None:
+        page = _page_from_anchor(path, fp, n, limit, before, keep)
+        if page is not None:
+            return page
+        _anchor_drop(path)
+    return _page_from_full(path, limit, before, keep)
 
 
 # ------------------------------------------- Wave 6 delta2: X12/X13 faces ---
@@ -1042,6 +1287,11 @@ def write_session_file(path: str | Path, meta: dict,
         except OSError:
             pass
         raise
+    # The rewrite is exact by construction: meta + one line per message, so
+    # the new fingerprint carries `len(messages)` rows (batch 4 item 4).
+    fp = _fingerprint(path)
+    if fp is not None:
+        _anchor_set(path, fp, len(messages))
 
 
 def export_session(directory: str | Path, sid: str, fmt: str = "json") -> tuple[str, str]:

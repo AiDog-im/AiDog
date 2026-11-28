@@ -486,6 +486,7 @@ from mycore import (bridge, checkpoint, cli, decision, evolution, hooks, leash, 
                     prosearch, security, sniff, terminal)  # noqa: E402  (X10 snapshots + config + MCP/ hooks/ terminal/ mission grammar/ sniff grammar/ profiling grammar/ decision client/ bridge grammar/ car-7 leash grammar/ D2 ledger grammar + car-E security self-check)
 from mycore import meter as model_meter  # noqa: E402  (v0.5.55 self-metering)
 from mycore import memforget  # noqa: E402  (memory suppression ledger, D5/D6)
+from mycore import memorylog  # noqa: E402  (batch 4-3: the memory revision timeline)
 from mycore import secrets_store  # noqa: E402  (E2: secrets.env at-rest state)
 from mycore.assembly import (build_system_stack,  # noqa: E402
                               resolve_context_dirs, resolve_user_rules,
@@ -493,15 +494,17 @@ from mycore.assembly import (build_system_stack,  # noqa: E402
                               DEFAULT_OBEDIENCE, validate_obedience)
 from mycore.compact import measure  # noqa: E402  (X14 context usage: the loop's own payload metric)
 from mycore.loop import run_turn  # noqa: E402
+from mycore.steer import SteerQueue, SteerError  # noqa: E402 (batch 4-2: queueing steering)
 from mycore.model import ChatClient  # noqa: E402
 from mycore.service import (state_dir as mycore_state_dir,  # noqa: E402
                             BOT_COMMANDS)
 from mycore.session import (Session, export_session, list_sessions,  # noqa: E402
-                             prune_old, read_head, session_file,
+                             prune_old, read_head, read_page, session_file,
                              write_session_file,
                              find_message_by_source_id,
                              message_is_visible, message_suppression,
                              visible_session_messages)
+from mycore import recall as session_recall  # noqa: E402 (batch 4 item 1)
 from mycore.tools import (KNOWN_TOOL_NAMES, build_registry,  # noqa: E402
                           resolve_disabled_tools, outbound_probe,
                           outbound_validate)
@@ -553,6 +556,8 @@ MEDIA_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".webp": "image/webp"}
 MEDIA_DIR = profile_paths.media_dir(REPO)  # imagegen's output dir (read-only here)
 CHAT_MAX_CHARS = 4000                 # one console chat message (input cap)
 CHAT_HISTORY_CAP = 2000               # per-message chars returned by /history
+CHAT_HISTORY_LIMIT = 200              # GET /api/chat/history default page
+CHAT_HISTORY_LIMIT_MAX = 500          # hard cap on ?limit= (batch 4 item 4)
 CHAT_SESSION_NAME = "web"             # console session file stem (numeric
                                       # chat_ids belong to the TG service)
 # Wave 6 delta2 (X12/X13/X16/X17): caps for the session/gallery/vision faces.
@@ -560,6 +565,8 @@ SESSION_LIST_LIMIT = 200          # GET /api/sessions default page size
 SESSION_LIST_MAX = 500            # hard cap on ?limit=
 SESSIONS_Q_MAX = 200              # chars in ?q= (FTS5 search, honest
                                   # substring fallback — mycore.session)
+SESSION_RECALL_LIMIT = 20         # message-level cross-session hits returned
+                                  # alongside ?q= (mycore.recall)
 ARTIFACTS_LIMIT = 60              # GET /api/artifacts default page size
 ARTIFACTS_MAX = 200               # hard cap on ?limit=
 CHAT_BODY_MAX = 2_000_000         # chat POST body budget (X16 image attach;
@@ -948,6 +955,11 @@ BACKUP_INCLUDES = ("secrets", "settings", "memory")
 # Fixed memory slot names — a restore can NEVER address an arbitrary path.
 BACKUP_MEMORY_FILES = ("MEMORY_curated.md", "USER_curated.md",
                        "EVOLUTION_learned.md")
+# Batch 4-3: the timeline slot label each fixed memory file maps to (the
+# same labels the memory view and the forget control use).
+BACKUP_MEMORY_SLOTS = {BACKUP_MEMORY_FILES[0]: "memory",
+                       BACKUP_MEMORY_FILES[1]: "user",
+                       BACKUP_MEMORY_FILES[2]: "learned"}
 BACKUP_MEMORY_MAX_BYTES = 512 * 1024      # per memory slot, in BOTH directions
 BACKUP_MAX_BODY = 4 * 1024 * 1024         # restore body budget: a whole
                                            # payload rides in on one request
@@ -1465,6 +1477,16 @@ def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
         counts = _suppressed_entry_counts(path, text, kept_text, local,
                                           incoming, effective)
         data = kept_text.encode("utf-8")
+        # Batch 4-3 (memory timeline): what this slot held BEFORE the
+        # overwrite. None means the prior state is unknown (unreadable):
+        # record nothing rather than invent a revision. Read before the
+        # write; the record below is side-band and fail-soft.
+        try:
+            old_text = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            old_text = ""
+        except (OSError, ValueError):
+            old_text = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             if name == BACKUP_MEMORY_FILES[2]:
@@ -1493,6 +1515,14 @@ def backup_apply_memory(doc: dict, tombstones: list | None = None) -> dict:
                            "reason": f"persist failed: {type(e).__name__}"})
             continue
         files.append(name)
+        # Batch 4-3 (memory timeline): a restore OVERWRITES the slot, so
+        # record the entries whose stored form changed — side-band only,
+        # fail-soft (memorylog never raises), and only for titles the
+        # FILTERED payload still holds: a section the suppression filter
+        # removed never enters the log.
+        if old_text is not None:
+            memorylog.record_slot_write(BACKUP_MEMORY_SLOTS.get(name, ""),
+                                        old_text, kept_text, "restore")
         total += len(data)
         filtered_local += counts[0]
         filtered_travelling += counts[1]
@@ -5055,6 +5085,73 @@ def chat_session_path() -> Path:
     return chat_sessions_dir() / f"{CHAT_SESSION_NAME}.jsonl"
 
 
+# -------------------------------------- queueing steering (batch 4-2) -------
+# While a run works on a console session, a message for the SAME session
+# is admitted to the bounded, durable steering queue (mycore.steer) instead
+# of racing the run over one session file — two concurrent run_turns over
+# one transcript were never safe. The live run merges the queue at its next
+# iteration boundary; the queue re-checks suppression on admission AND on
+# merge and fails closed (nothing injected) whenever the ledger cannot be
+# read or the leash gate holds the turn.
+_steering_lock = threading.Lock()
+# One run slot per console session: a NON-BLOCKING claim, so a request that
+# loses the race queues at once instead of blocking behind a long turn.
+_chat_turn_claims: dict[str, threading.Lock] = {}
+MAX_STEER_CHAIN = 2          # extra runs ONE request may chain (bounded)
+
+# Refusal code -> HTTP status for the queue admission path: `full` is a
+# 409 (the running turn is the conflict), a suppression refusal a 403, an
+# unavailable ledger a 503 — honest codes, never a swallowed 200.
+STEER_STATUS = {"full": 409, "suppressed": 403, "too_long": 400,
+                "empty": 400, "ledger_unavailable": 503, "unreadable": 503,
+                "not_writable": 503, "no_active_run": 409}
+
+
+def chat_turn_key(path: Path | None = None) -> str:
+    """The queue key of the console session: the session FILE name, so a
+    key never carries a path. The service side prefixes its own keys with
+    `tg:`, so the two surfaces cannot collide inside one queue file."""
+    return "console:" + ((path or chat_session_path()).name)
+
+
+def claim_chat_turn(key: str) -> bool:
+    """Take the run slot for `key`. True = this request owns the run (and
+    must release it in a finally); False = a run already owns it, so the
+    caller queues its message instead. Never blocks: a second caller must
+    be answered at once, not parked behind a long turn."""
+    with _steering_lock:
+        lock = _chat_turn_claims.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _chat_turn_claims[key] = lock
+        return lock.acquire(blocking=False)
+
+
+def release_chat_turn(key: str) -> None:
+    with _steering_lock:
+        lock = _chat_turn_claims.get(key)
+    if lock is not None:
+        try:
+            lock.release()
+        except RuntimeError:                   # unbalanced release: never crash
+            pass
+
+
+def steer_queue() -> SteerQueue:
+    """This profile's queue, judged against the console's own transcripts."""
+    return SteerQueue(directory=chat_sessions_dir())
+
+
+def _steer_payload(items) -> list[dict]:
+    """The wire shape of queue decisions: id + text + dropped flag. The
+    client already holds the text it sent; the id is what lets a frame drop
+    the right row, and `dropped` (a source forgotten while it waited) is
+    reported WITHOUT the text ever being echoed back anywhere else."""
+    return [{"id": i.get("id"), "text": i.get("text"),
+             "dropped": bool(i.get("dropped"))} for i in items
+            if isinstance(i, dict)]
+
+
 # --------------------------------------- stage 6: the transcript filter ----
 # A FORGOTTEN transcript message must not resurface through ANY read path
 # (D31). The console's own faces — the live chat history, the context
@@ -5110,7 +5207,8 @@ def chat_context_usage() -> dict:
     return out
 
 
-def chat_history(limit: int = 200) -> dict:
+def chat_history(limit: int = CHAT_HISTORY_LIMIT,
+                 before: int | None = None) -> dict:
     """Read-only session view for GET /api/chat/history: user/assistant turns
     only (system constitution and tool payloads never leave the server),
     content capped at CHAT_HISTORY_CAP. Loopback read, no bearer needed.
@@ -5121,31 +5219,41 @@ def chat_history(limit: int = 200) -> dict:
     as this read: a clear/resume/fork renumbers, so the client re-reads
     history after any of them (it already does).
 
+    Batch 4 item 4 (bounded history): `limit` caps how many rows this answer
+    carries and `before` pages BACKWARD (only ids < `before`), so a session
+    of thousands of rows is read as a window, not as a whole — the server
+    parses the rows a page needs, the client renders the rows it fetched,
+    and `has_more` says exactly whether an older page exists. `limit` is
+    validated by read_page (1..500) and a bad value raises ValueError, which
+    the HTTP layer answers 400.
+
     A FORGOTTEN message is not shown (D31): it leaves this face at once,
     while every other message keeps its absolute id (the ids stay the file's
     own indices, so a rewind/fork handle never points at the wrong row).
-    The transcript file itself is never rewritten — the line stays on disk."""
-    sess = Session(chat_session_path())
-    full = sess.load()
-    start = max(0, len(full) - limit)
+    The suppression check runs on EVERY page — paged or not, a tombstoned
+    row cannot appear, and an unreadable ledger still fails closed to an
+    empty answer. The transcript file itself is never rewritten — the line
+    stays on disk."""
     suppression = message_suppression(chat_sessions_dir())
     if not suppression.available:
         return {"messages": [], "count": 0, "suppression": "unavailable",
                 "note": memforget.LEDGER_UNAVAILABLE}
-    out = []
-    for idx in range(start, len(full)):
-        m = full[idx]
-        role = m.get("role")
-        if role not in ("user", "assistant"):
-            continue
-        content = m.get("content")
-        if not isinstance(content, str):
-            continue
-        if not message_is_visible(m, suppression):
-            continue          # a forgotten message is not shown (D31)
-        out.append({"id": idx, "role": role,
-                    "content": content[:CHAT_HISTORY_CAP]})
+
+    def keep(m: dict) -> bool:
+        """Membership of this page: a console turn row the owner may see.
+        Runs inside read_page, so a rejected row still keeps its id."""
+        if m.get("role") not in ("user", "assistant"):
+            return False
+        if not isinstance(m.get("content"), str):
+            return False
+        return message_is_visible(m, suppression)   # D31, every page
+
+    page = read_page(chat_session_path(), limit, before=before, keep=keep)
+    out = [{"id": idx, "role": m["role"],
+            "content": m["content"][:CHAT_HISTORY_CAP]}
+           for idx, m in page["messages"]]
     return {"messages": out, "count": len(out),
+            "has_more": page["has_more"],
             "context": chat_context_usage()}
 
 
@@ -8351,7 +8459,30 @@ class Handler(BaseHTTPRequestHandler):
                     MYCORE_STATE_DIR / "ledger"),
             })
         if path == "/api/chat/history":
-            return self._json(chat_history())
+            # Batch 4 item 4: ?limit= (page size) and ?before= (exclusive
+            # absolute id) page the transcript backwards. A non-integer or an
+            # out-of-range value is a local validation failure -> 400, never
+            # a silently clamped answer the client would page against.
+            query = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
+                if "?" in self.path else {}
+            raw_limit = (query.get("limit") or [""])[0].strip()
+            if raw_limit and not raw_limit.isdigit():
+                return self._json({"error": "validation failed",
+                                   "details": ["limit must be a positive "
+                                               "integer"]}, 400)
+            limit = int(raw_limit) if raw_limit else CHAT_HISTORY_LIMIT
+            if not 1 <= limit <= CHAT_HISTORY_LIMIT_MAX:
+                return self._json({"error": "validation failed",
+                                   "details": [f"limit must be 1.."
+                                               f"{CHAT_HISTORY_LIMIT_MAX}"]},
+                                  400)
+            raw_before = (query.get("before") or [""])[0].strip()
+            if raw_before and not raw_before.isdigit():
+                return self._json({"error": "validation failed",
+                                   "details": ["before must be a non-negative "
+                                               "integer"]}, 400)
+            before = int(raw_before) if raw_before else None
+            return self._json(chat_history(limit=limit, before=before))
         if path == "/api/version":
             query = urllib.parse.parse_qs(self.path.split("?", 1)[1]) \
                 if "?" in self.path else {}
@@ -9910,6 +10041,26 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as e:  # noqa: BLE001 — fail-soft, class only
             sys.stderr.write(f"session list failed err={type(e).__name__}\n")
             return self._json({"error": "sessions unavailable"}, 503)
+        if q:
+            # Batch 4 item 1: the SAME query at MESSAGE level across every
+            # transcript and every memory slot, ranked BM25 + recency
+            # (mycore.recall). Additive `messages` field — the session-level
+            # contract above is untouched. recall fail-closes on an unknown
+            # suppression ledger and never raises; the belt below withholds
+            # rather than invents hits if it ever did.
+            try:
+                payload["messages"] = session_recall.recall(
+                    q, directory=chat_sessions_dir(),
+                    limit=SESSION_RECALL_LIMIT)
+            except Exception as e:  # noqa: BLE001 — withhold, never guess
+                sys.stderr.write(f"session recall failed "
+                                 f"err={type(e).__name__}\n")
+                payload["messages"] = {
+                    "query": q, "method": "none", "fallback": True,
+                    "reason": "internal_error", "hits": [], "count": 0,
+                    "truncated": False, "limit": SESSION_RECALL_LIMIT,
+                    "suppression": "unavailable",
+                    "note": "recall unavailable; affected data withheld"}
         payload["prune"] = session_prune_view()
         return self._json(payload)
 
@@ -10580,13 +10731,47 @@ class Handler(BaseHTTPRequestHandler):
                                "params": ctx},
                               409 if code == "paused" else 429)
 
-        self._sse_start()
+        # Queueing steering (batch 4-2): a message for a session that is
+        # already running goes into the bounded, durable queue and answers
+        # 202 + depth — the run is not interrupted, the message is merged at
+        # its next iteration boundary. The run slot is claimed
+        # NON-BLOCKING, so a caller that loses the race (or announces
+        # itself with `queue:true`) is never parked behind a long turn and
+        # never starts a second one over the same transcript.
+        key = chat_turn_key()
+        claimed = claim_chat_turn(key)
+        if claimed and doc.get("queue") is True:
+            # The client announced a hand-off but no run is live: an honest
+            # 409 instead of a second stream it did not ask for.
+            release_chat_turn(key)
+            return self._json(
+                {"error": "no_active_run",
+                 "details": ["no turn is running — send it as a normal "
+                             "message"]}, 409)
+        if not claimed:
+            if image is not None:
+                # An attachment is a one-shot per turn: refuse it rather
+                # than let the queue silently pair it with another message.
+                return self._json(
+                    {"error": "image_busy",
+                     "details": ["finish the current turn before sending "
+                                 "an image"]}, 409)
+            try:
+                info = steer_queue().enqueue(key, text)
+            except SteerError as e:
+                return self._json({"error": e.code, "details": [e.detail]},
+                                  STEER_STATUS.get(e.code, 409))
+            return self._json({"ok": True, "queued": True, **info}, 202)
+
         try:
+            self._sse_start()
             ok = self._run_chat_turn(text, model, image=image)
         except Exception as e:  # noqa: BLE001 — never leak internals to the stream
             sys.stderr.write(f"chat turn failed err={type(e).__name__}\n")
             self._sse("error", {"error": "internal"})
             return
+        finally:
+            release_chat_turn(key)     # the slot is free the instant it ends
         if not ok:
             return
 
@@ -10617,6 +10802,7 @@ class Handler(BaseHTTPRequestHandler):
                                         "chars": len(text or ""),
                                         "has_image": bool(image)})
         path = chat_session_path()
+        key = chat_turn_key(path)
         sess = Session(path)
         history = sess.load()
         if not history and not sess.meta():
@@ -10641,11 +10827,65 @@ class Handler(BaseHTTPRequestHandler):
             runtime_facts=cli.resolve_runtime_facts(cfg.model))
         messages = stack + history
         pre_ids = {id(m) for m in messages}
+
+        # Queueing steering (batch 4-2). Two reads, both fail-closed:
+        # `recover` decides the items a PREVIOUS run took but never
+        # persisted (in the transcript -> done, missing -> back to pending),
+        # `take` then hands over whatever that run never got to. Both land
+        # BEFORE the owner's own message so the transcript keeps its
+        # chronological order, and both are reported to the client as one
+        # `steer` frame below.
+        queue = steer_queue()
+        taken: list[dict] = []
+        decided: list[dict] = []
+        try:
+            queue.recover(key, [m.get("content") for m in history
+                                if m.get("role") == "user"
+                                and isinstance(m.get("content", ""), str)])
+            decided = queue.take(key)
+        except SteerError as e:
+            sys.stderr.write(f"steer queue err code={e.code}\n")
+        live = [i for i in decided if not i.get("dropped")]
+        taken.extend(live)          # committed with the rest of this turn's
+        for item in live:           # rows once they are on disk
+            messages.append({"role": "user", "content": item["text"]})
+
         content = text
         if image:
             content = [{"type": "text", "text": text},
                        {"type": "image_url", "image_url": {"url": image}}]
-        messages.append({"role": "user", "content": content})
+        # The owner's OWN row: identified by object, because the queued rows
+        # above it are user rows too and `ids.user` must never point at one
+        # of them (edit/fork would rewind the wrong message).
+        owner_row = {"role": "user", "content": content}
+        messages.append(owner_row)
+
+        def steer_gate_open() -> bool:
+            """Pause and today's budget hold the merge exactly as they hold
+            a NEW turn: a held run takes no instruction from the queue."""
+            try:
+                return bool(leash.gate(load_settings())[0])
+            except Exception:                  # noqa: BLE001 — never break a turn
+                return False
+
+        def steer_take() -> list[str]:
+            """The run's merge point (loop.run_turn's `steer`): gate, take,
+            announce. A refusal or an unreadable queue injects NOTHING and
+            leaves the items where they are — fail-closed is the queue's
+            contract, so a broken queue can never cost a turn."""
+            if not steer_gate_open():
+                return []
+            try:
+                items = queue.take(key)
+            except SteerError as e:
+                sys.stderr.write(f"steer queue err code={e.code}\n")
+                return []
+            if items:
+                self._sse("steer", {"items": _steer_payload(items)})
+                live = [i for i in items if not i.get("dropped")]
+                taken.extend(live)
+                return [i["text"] for i in live]
+            return []
 
         # Console STOP is per-request and process-local; it never shares the
         # persisted leash.stop_seq watched by the independent TG service.
@@ -10657,16 +10897,25 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if not self._sse("meta", {"model": cfg.model}):
                 return False
+            if decided:
+                # The queued rows are already in the transcript above (or
+                # dropped for being forgotten); the client settles them on
+                # this frame.
+                self._sse("steer", {"items": _steer_payload(decided)})
 
             return self._drive_chat_turn(
                 messages, pre_ids, cfg, image, content, sess, alive,
-                cancel, turn_id, base_len)
+                cancel, turn_id, base_len, queue=queue, key=key,
+                taken=taken, owner_row=owner_row, steer_take=steer_take,
+                steer_gate_open=steer_gate_open)
         finally:
             finish_console_turn(turn_id)
             _bump_active_turn(-1)
 
     def _drive_chat_turn(self, messages, pre_ids, cfg, image, content, sess,
-                         alive, cancel, turn_id, base_len=0) -> bool:
+                         alive, cancel, turn_id, base_len=0, *, queue=None,
+                         key="", taken=None, owner_row=None, steer_take=None,
+                         steer_gate_open=None) -> bool:
         """The model/observer half of _run_chat_turn (split so the
         active-turn counter in the caller covers the whole turn in a
         finally — a crash must not leave the tail stuck at "working")."""
@@ -10747,43 +10996,83 @@ class Handler(BaseHTTPRequestHandler):
         hb = threading.Thread(target=_heartbeat, daemon=True,
                               name="chat-think-heartbeat")
         hb.start()
+        sent: set[int] = set()          # rows already flushed to the session
+        persisted = True                # every chunk so far made it to disk
+        chain = 0
         try:
-            res = run_turn(messages, chat_fn, registry,
-                           on_event=_busy_event if alive[0] else None,
-                           budget_chars=chat_budget(), on_delta=_busy_delta,
-                           should_stop=cancel.is_set)
+            while True:
+                res = run_turn(messages, chat_fn, registry,
+                               on_event=_busy_event if alive[0] else None,
+                               budget_chars=chat_budget(),
+                               on_delta=_busy_delta,
+                               should_stop=cancel.is_set,
+                               steer=steer_take)
+                # Persist THIS chunk only (identity-based: compaction
+                # rewrites list slots, so an index slice would misalign).
+                chunk = [m for m in messages
+                         if id(m) not in pre_ids and id(m) not in sent
+                         and m.get("role") != "system"]
+                if image:
+                    # X16: persist the MARKER, not the bytes — the session
+                    # stays small, later turns never resend the image, and
+                    # chat history / export render an honest '[image]'
+                    # instead of vanishing.
+                    for m in chunk:
+                        if isinstance(m.get("content"), list):
+                            m["content"] = content_blocks_text(m["content"])
+                    if res.stop == "model_error":
+                        res.text = vision_rejection_note(res.text)
+                if chunk:
+                    try:
+                        sess.append_many(chunk)
+                        sent.update(id(m) for m in chunk)
+                    except OSError as e:  # noqa: BLE001 — honest, log the type
+                        persisted = False
+                        sys.stderr.write("chat session append failed "
+                                         f"err={type(e).__name__}\n")
+                # The queue's commit point: rows on disk -> the merged items
+                # leave the queue for good; rows NOT on disk -> released, so
+                # they ride the next turn instead of vanishing with this one.
+                if queue is not None and taken:
+                    if persisted:
+                        queue.commit(taken)
+                    else:
+                        queue.release(taken)
+                    taken.clear()
+                if not persisted:
+                    break
+                # An instruction that landed during the LAST model call has
+                # no iteration left to merge into: chain one more run so it
+                # is answered now rather than waiting for the owner's next
+                # message. Bounded, gated, and only while the queue really
+                # still holds something.
+                if (queue is not None and steer_take is not None
+                        and steer_gate_open is not None
+                        and not cancel.is_set() and chain < MAX_STEER_CHAIN
+                        and steer_gate_open() and queue.remaining(key)):
+                    chain += 1
+                    continue
+                break
         finally:
             hb_stop.set()
             hb.join(timeout=2.0)
 
-        delta = [m for m in messages
-                 if id(m) not in pre_ids and m.get("role") != "system"]
-        if image:
-            # X16: persist the MARKER, not the bytes — the session stays
-            # small, later turns never resend the image, and chat history /
-            # export render an honest '[image]' instead of vanishing.
-            for m in delta:
-                if isinstance(m.get("content"), list):
-                    m["content"] = content_blocks_text(m["content"])
-            if res.stop == "model_error":
-                res.text = vision_rejection_note(res.text)
-        try:
-            sess.append_many(delta)
-        except OSError as e:  # noqa: BLE001 — stream stays honest, log only
-            sys.stderr.write(f"chat session append failed err={type(e).__name__}\n")
-            delta = None                    # rows are NOT in the file — no ids
+        delta = ([m for m in messages
+                  if id(m) not in pre_ids and m.get("role") != "system"]
+                 if persisted else None)
         # car C1 (A-2): absolute ids of THIS turn's persisted rows, so the
         # client can offer edit/fork on the bubbles it just drew without a
-        # refetch. Omitted (null) when the append failed — an id must never
-        # point at a row that is not there.
+        # refetch. `user` is the OWNER's row by identity — a row merged from
+        # the steering queue is a user row too and must never take it.
+        # Omitted (null) when the append failed — an id must never point at
+        # a row that is not there.
         ids = None
         if delta:
             found: dict = {}
             for i, m in enumerate(delta):
-                role = m.get("role")
-                if role == "user" and "user" not in found:
+                if m is owner_row:
                     found["user"] = base_len + i
-                elif role == "assistant":
+                elif m.get("role") == "assistant":
                     found["assistant"] = base_len + i   # keep the LAST one
             ids = found or None
         from mycore import fleet as fleet_module
@@ -10805,10 +11094,14 @@ class Handler(BaseHTTPRequestHandler):
                           "usage_complete": res.usage_complete})
         if not alive[0]:
             return False
+        try:
+            queued_left = queue.remaining(key) if queue is not None else 0
+        except SteerError:                 # an unreadable queue is honest null
+            queued_left = None
         return self._sse("done", {"text": receipt, "stop": res.stop,
                                   "iterations": res.iterations,
                                   "tool_calls": res.tool_calls,
-                                  "ids": ids})
+                                  "ids": ids, "queued": queued_left})
 
     # ------------------------------------------------- OpenAI v1 gateway ---
     def _openai_error(self, code: int, message: str, type_: str) -> None:
@@ -12013,8 +12306,29 @@ def main() -> None:
     threading.Thread(target=_startup_security_check,
                      kwargs={"console_port": PORT},
                      daemon=True).start()
+    # Batch 4 item 4: the first sentence must not pay the body layer's cold
+    # read. One daemon thread primes the read cache, the suppression ledger
+    # snapshot and the console transcript's page anchor; a turn that arrives
+    # before it finishes simply does its own reads (there is nothing to wait
+    # for), and the warm-up itself never writes a byte of product state.
+    threading.Thread(target=_startup_warm_body,
+                     kwargs={"session_path": chat_session_path()},
+                     daemon=True, name="warm-body").start()
     print(f"I'm AiDog console -> http://{HOST}:{PORT}/  (loopback only, {VERSION})")
     srv.serve_forever()
+
+
+def _startup_warm_body(session_path: Path | None = None) -> None:
+    """Boot warm-up (batch 4 item 4): build the system stack once off the
+    critical path. Never raises and never logs content — one sanitized line
+    with the outcome word only."""
+    try:
+        from mycore import assembly
+        err = assembly.warm_startup(session_path)
+    except Exception as e:  # noqa: BLE001 — belt over the fail-soft contract
+        err = type(e).__name__
+    if err:
+        sys.stderr.write(f"warm body layer: unavailable ({err})\n")
 
 
 def _startup_security_check(console_port: int) -> None:
